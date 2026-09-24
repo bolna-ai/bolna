@@ -67,6 +67,7 @@ class SynthesizerProvider(str, Enum):
     MAYA = "maya"
     KALPA = "kalpa"
     GEMINI = "gemini"
+    SONIOX = "soniox"
 
     @classmethod
     def all_values(cls):
@@ -206,6 +207,7 @@ class HangupReason(str, Enum):
     LLM_PROMPTED_HANGUP = "llm_prompted_hangup"
     VOICEMAIL_DETECTED = "voicemail_detected"
     WEB_CALL_MAX_DURATION_REACHED = "web_call_max_duration_reached"
+    MAX_DURATION_REACHED = "max_duration_reached"
     INACTIVITY_TIMEOUT = "inactivity_timeout"
     TRANSCRIBER_ERROR = "transcriber_error"
     TRANSCRIBER_CONNECTION_ERROR = "transcriber_connection_error"
@@ -213,6 +215,7 @@ class HangupReason(str, Enum):
     LLM_ERROR = "llm_error"
     END_CALL_TOOL = "end_call_tool"
     S2S_ERROR = "s2s_error"
+    CLIENT_DISCONNECTED = "client_disconnected"
 
     @classmethod
     def all_values(cls):
@@ -255,6 +258,29 @@ _DISPLAY_NAMES = {
     LogComponent.FUNCTION_CALL: "Function call",
     LogComponent.GRAPH_ROUTING: "Graph routing",
 }
+
+
+class AudioPlaybackReason(str, Enum):
+    """Why the agent's audio-playing state flipped. Grepped in the logs to attribute a stuck flag."""
+
+    # Enum.__str__ would render the member name, and these are logged with lazy %s args.
+    __str__ = str.__str__
+
+    AUDIO_SENT = "audio_sent"
+    BARGE_IN = "barge_in"
+    FINAL_CHUNK_ACK = "final_chunk_ack"
+    FREESWITCH_PLAYOUT_DONE_EVENT = "freeswitch_playout_done_event"
+    FREESWITCH_PLAYOUT_TIMER = "freeswitch_playout_timer"
+    FREESWITCH_SOCKET_CLOSED = "freeswitch_socket_closed"
+    LID_SWITCH_TRUNCATE = "lid_switch_truncate"
+    PRE_MARK_ACK = "pre_mark_ack"
+    S2S_AUDIO_SENT = "s2s_audio_sent"
+    S2S_DROP_QUEUED = "s2s_drop_queued"
+    SILENCE_HANGUP_INTERRUPT = "silence_hangup_interrupt"
+    SIP_INTERRUPTION = "sip_interruption"
+    SIP_PLAYBACK_FINISHED = "sip_playback_finished"
+    SYNTHESIZER_STREAM_END = "synthesizer_stream_end"
+    WELCOME_MESSAGE_SENT = "welcome_message_sent"
 
 
 class LogDirection(str, Enum):

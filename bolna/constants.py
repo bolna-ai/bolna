@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timezone
-from bolna.enums import ReasoningEffort as RE
+from bolna.enums import ReasoningEffort as RE, TelephonyProvider
 
 PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
@@ -10,12 +10,66 @@ PCM16_SCALE = 32768.0
 WEB_BASED_CALL_PROVIDER = "web_based_call"
 # Web + FreeSWITCH webcall paths play raw PCM at this fixed rate (telephony stays 8k mulaw).
 WEBCALL_TTS_SAMPLE_RATE = 24000
+# Input handlers on these providers batch a different amount of audio than the transcriber's
+# frame constant assumes, so the stream cursor measures the payload instead of trusting it.
+# sip-trunk batches 80ms against a 200ms constant; the webcall paths batch 200ms against 256ms/500ms.
+MEASURED_FRAME_PROVIDERS = frozenset(
+    {
+        TelephonyProvider.SIP_TRUNK.value,
+        TelephonyProvider.FREESWITCH.value,
+        WEB_BASED_CALL_PROVIDER,
+    }
+)
 
 OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S = 5
 OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 0.5
 
 # ElevenLabs realtime (scribe_v2_realtime) accepts up to 50 keyterms for biasing.
 ELEVENLABS_REALTIME_MAX_KEYTERMS = 50
+
+# Past these the engine rejects the session rather than truncating.
+ASSEMBLYAI_MAX_KEYTERMS = 100
+ASSEMBLYAI_MAX_PROMPT_CHARACTERS = 1750
+SMALLEST_MAX_KEYWORDS = 100
+
+# Beyond this a phrase list costs Azure accuracy and latency rather than buying either.
+AZURE_MAX_PHRASES = 2000
+
+# Anything outside this set rejects the session.
+ASSEMBLYAI_SUPPORTED_LANGUAGES = {
+    "af",
+    "ar",
+    "ca",
+    "da",
+    "de",
+    "en",
+    "es",
+    "et",
+    "fa",
+    "fi",
+    "fr",
+    "gl",
+    "he",
+    "hi",
+    "it",
+    "ja",
+    "ko",
+    "mr",
+    "nl",
+    "nn",
+    "no",
+    "pt",
+    "ro",
+    "ru",
+    "sv",
+    "tr",
+    "ur",
+    "vi",
+    "xh",
+    "yue",
+    "zh",
+    "zu",
+}
 
 # Deepgram Flux defaults — all overridable via agent transcriber config
 DEEPGRAM_FLUX_EOT_THRESHOLD = 0.7  # confidence to declare end-of-turn
@@ -305,7 +359,11 @@ END_CALL_TOOL_DEFINITION = {
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
     "bulbul:v3": 22050,  # NOTE: Documentation claims 24000, but WAV header shows 22050
+    "bulbul:v4-flash": 22050,
 }
+
+# These models open a stream with a bare WAV header and send raw PCM after it.
+SARVAM_STREAMING_WAV_HEADER_MODELS = {"bulbul:v3", "bulbul:v4-flash"}
 
 # bulbul TTS requires a concrete target_language_code (no "unknown"/auto).
 SARVAM_TTS_SUPPORTED_LANGUAGES = {
@@ -365,6 +423,8 @@ MODEL_REASONING_EFFORT_MAP = {
     "gpt-5.6-sol": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.6-terra": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.6-luna": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-6-sol": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-6-luna": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-6-astra": [RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH, RE.MAX],
     # Realtime speech-to-speech. gpt-realtime-1.5 has no reasoning and is deliberately absent.
     "gpt-realtime-2": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
@@ -418,3 +478,10 @@ def canonical_model(name: str) -> str:
     bare = (name or "").rsplit("/", 1)[-1]
     known = [m for m in MODEL_REASONING_EFFORT_MAP if m in bare]
     return max(known, key=len) if known else bare
+
+
+# Text chat (turn-based) watchdog: how often idle / max-duration caps are checked.
+CHAT_WATCHDOG_TICK_S = 3.0
+# Text chat: this many failed turns in a row end the chat (LLM_ERROR) instead of answering every message with an
+# empty end_of_stream forever.
+CHAT_MAX_CONSECUTIVE_TURN_FAILURES = 3

@@ -7,6 +7,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from dotenv import load_dotenv
 from bolna.constants import IS_USER_ONLINE_MESSAGE
+from bolna.enums import AudioPlaybackReason
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
 
@@ -32,6 +33,7 @@ class DefaultInputHandler:
         self.input_types = input_types
         self.websocket_listen_task = None
         self.running = True
+        self.input_stream_ended = False
         # set here because these handlers mint a stream id on demand; telephony clears it
         self.stream_sid_ready = asyncio.Event()
         self.stream_sid_ready.set()
@@ -63,6 +65,13 @@ class DefaultInputHandler:
         self.last_final_chunk_sequence_id: Optional[int] = None
         self.last_final_chunk_played_ts: Optional[float] = None
 
+    def _end_input_stream(self, io, **meta_info):
+        """Mark the caller's audio as over and tell the transcriber to close."""
+        self.input_stream_ended = True
+        self.queues["transcriber"].put_nowait(
+            create_ws_data_packet(data=None, meta_info={"io": io, "eos": True, **meta_info})
+        )
+
     def get_calculated_plivo_latency(self):
         return self.calculated_plivo_latency
 
@@ -90,11 +99,10 @@ class DefaultInputHandler:
         self.audio_chunks_received = 0
         return audio_chunks_received
 
-    def update_is_audio_being_played(self, value):
-        logger.info(f"Audio is being updated - {value}")
+    def update_is_audio_being_played(self, value, reason: AudioPlaybackReason):
+        logger.info("Audio playback -> %s (reason=%s)", value, reason)
         if value is True:
             self.update_start_ts = time.time()
-            logger.info(f"updating ts as mark_message received: {self.update_start_ts}")
         self._is_audio_being_played_to_user = value
 
     def is_audio_being_played_to_user(self):
@@ -148,7 +156,6 @@ class DefaultInputHandler:
         return self.mark_event_meta_data.fetch_data(mark_id)
 
     def process_mark_message(self, packet):
-        logger.info("BOLNA_TRACE_ACK recv mark_id=%s", packet.get("name"))
         mark_event_meta_data_obj = self.get_mark_event_meta_data_obj(packet)
         if not mark_event_meta_data_obj:
             logger.info(
@@ -160,7 +167,14 @@ class DefaultInputHandler:
         is_content_audio = message_type not in ["backchanneling"]
 
         if message_type == "pre_mark_message":
-            self.update_is_audio_being_played(True)
+            logger.info(
+                "BOLNA_TRACE_ACK applied mark_id=%s type=pre_mark_message seq=%s turn=%s response_uid=%s",
+                packet.get("name"),
+                mark_event_meta_data_obj.get("sequence_id"),
+                mark_event_meta_data_obj.get("turn_id"),
+                mark_event_meta_data_obj.get("response_uid"),
+            )
+            self.update_is_audio_being_played(True, AudioPlaybackReason.PRE_MARK_ACK)
             return
 
         self.audio_chunks_received += 1
@@ -213,7 +227,7 @@ class DefaultInputHandler:
                 final_chunk_observable = self.observable_variables.get("final_chunk_played_observable")
                 if final_chunk_observable is not None:
                     final_chunk_observable.value = not final_chunk_observable.value
-            self.update_is_audio_being_played(False)
+            self.update_is_audio_being_played(False, AudioPlaybackReason.FINAL_CHUNK_ACK)
 
             if message_type == "agent_welcome_message":
                 logger.info("Received mark event for agent_welcome_message")
@@ -233,6 +247,9 @@ class DefaultInputHandler:
         self.process_mark_message(packet)
 
     def __process_audio(self, audio):
+        if self.turn_based_conversation:
+            # A text chat has no transcriber consuming this queue; an audio frame here would only accumulate.
+            return
         data = base64.b64decode(audio)
         ws_data_packet = create_ws_data_packet(
             data=data, meta_info={"io": "default", "type": "audio", "sequence": self.input_types["audio"]}
@@ -265,17 +282,23 @@ class DefaultInputHandler:
                 await self.process_message(request)
 
         except WebSocketDisconnect as e:
-            ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
-            await self.queues["transcriber"].put(ws_data_packet)
+            self._end_input_stream("default")
             self.running = False
+            if self.turn_based_conversation:
+                # A text chat's run loop listens on the llm queue; tell it the client is gone.
+                self.queues["llm"].put_nowait(
+                    create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
+                )
 
         except Exception as e:
-            # Send EOS message to transcriber to shut the connection
-            ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
             import traceback
 
             traceback.print_exc()
-            self.queues["transcriber"].put_nowait(ws_data_packet)
+            self._end_input_stream("default")
+            if self.turn_based_conversation:
+                self.queues["llm"].put_nowait(
+                    create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
+                )
             logger.info(f"Error while handling websocket message: {e}")
             return
 

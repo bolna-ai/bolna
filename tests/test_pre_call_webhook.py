@@ -334,6 +334,7 @@ def _make_transfer_self(tool_conf):
     out = SimpleNamespace(handle=AsyncMock())
     me = SimpleNamespace(
         check_if_user_online=True,
+        turn_based_conversation=False,
         run_id="exec-123",
         has_transfer=False,
         kwargs={"api_tools": {"tools_params": {"transfer_call": tool_conf}}},

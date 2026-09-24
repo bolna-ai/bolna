@@ -9,11 +9,13 @@ from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from .base_transcriber import BaseTranscriber
+from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import build_soniox_config, create_ws_data_packet, soniox_ws_url, timestamp_ms
 from bolna.enums import TelephonyProvider
 from bolna.constants import (
+    MEASURED_FRAME_PROVIDERS,
     SONIOX_AUTO_LANGUAGE_VALUES,
     SONIOX_DEFAULT_MULTILINGUAL_HINTS,
     SONIOX_ENDPOINT_TOKEN,
@@ -39,6 +41,7 @@ class SonioxTranscriber(BaseTranscriber):
         encoding="linear16",
         output_queue=None,
         keywords=None,
+        context=None,
         process_interim_results="true",
         language_hints=None,
         **kwargs,
@@ -51,6 +54,7 @@ class SonioxTranscriber(BaseTranscriber):
         self.encoding = encoding
         self.sampling_rate = int(sampling_rate) if isinstance(sampling_rate, (str, int)) else 16000
         self.keywords = keywords
+        self.context = (context or "").strip()
         self.language_hints = language_hints
         self.transcriber_output_queue = output_queue
         self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
@@ -130,9 +134,18 @@ class SonioxTranscriber(BaseTranscriber):
             return SONIOX_DEFAULT_MULTILINGUAL_HINTS
         return [self.language]
 
+    def _build_soniox_context(self):
+        """Soniox takes free-form text and a term list in one `context` object."""
+        context = {}
+        if self.context:
+            context["text"] = self.context
+        terms = keyword_terms(self.keywords)
+        if terms:
+            context["terms"] = terms
+        return context or None
+
     def _build_config(self):
         """First WebSocket frame: auth + stream config (Soniox carries the api_key here, not a header)."""
-        terms = [kw.strip() for kw in self.keywords.split(",") if kw.strip()] if self.keywords else []
         return build_soniox_config(
             self.api_key,
             self.model,
@@ -141,7 +154,7 @@ class SonioxTranscriber(BaseTranscriber):
             max_endpoint_delay_ms=self.max_endpoint_delay_ms,
             endpoint_sensitivity=self.endpoint_sensitivity,
             language_hints=self._resolve_language_hints() or None,
-            context={"terms": terms} if terms else None,
+            context=self._build_soniox_context(),
         )
 
     def get_soniox_ws_url(self):
@@ -176,6 +189,13 @@ class SonioxTranscriber(BaseTranscriber):
         except Exception as e:
             raise ConnectionError(f"Unexpected error connecting to Soniox websocket: {e}")
 
+    def _audio_frame_seconds(self, num_bytes: int) -> float:
+        """Audio carried by one send. Measured where the input handler batches something other than
+        the constant it is booked at; every other path really does send the constant."""
+        if self.provider not in MEASURED_FRAME_PROVIDERS:
+            return self.audio_frame_duration
+        return num_bytes / ((1 if self.encoding == "mulaw" else 2) * self.sampling_rate)
+
     async def sender_stream(self, ws: ClientConnection):
         """Forward raw audio frames to Soniox; an empty-string frame signals end-of-stream."""
         try:
@@ -195,14 +215,11 @@ class SonioxTranscriber(BaseTranscriber):
                         logger.error(f"Error sending Soniox end-of-stream: {e}")
                     break
 
-                frame_start = self.num_frames * self.audio_frame_duration
-                frame_end = (self.num_frames + 1) * self.audio_frame_duration
-                self.audio_frame_timestamps.append((frame_start, frame_end, timestamp_ms()))
-                self.num_frames += 1
-
                 data = ws_data_packet.get("data")
                 if not data:
                     continue
+                if isinstance(data, (bytes, bytearray)):
+                    self.record_audio_frame(self._audio_frame_seconds(len(data)), timestamp_ms())
                 try:
                     await ws.send(data)
                 except ConnectionClosedError as e:
@@ -285,7 +302,7 @@ class SonioxTranscriber(BaseTranscriber):
                 res = json.loads(message)
 
                 if self.connection_start_time is None:
-                    self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)
+                    self.connection_start_time = time.time() - self.audio_cursor_s
 
                 if res.get("error_code") is not None:
                     self.connection_error = f"{res.get('error_code')}: {res.get('error_message')}"
@@ -467,7 +484,7 @@ class SonioxTranscriber(BaseTranscriber):
                 self.websocket_connection = None
                 self.connection_authenticated = False
 
-        self.audio_frame_timestamps = []
+        self.reset_audio_frame_state()
         self.current_turn_interim_details = []
 
     async def run(self):
@@ -479,9 +496,7 @@ class SonioxTranscriber(BaseTranscriber):
     async def transcribe(self):
         soniox_ws = None
         # Audio positions restart at 0 on each connection; reset local frame bookkeeping with them.
-        self.num_frames = 0
-        self.audio_frame_timestamps = []
-        self.connection_start_time = None
+        self.reset_audio_frame_state()
         try:
             start_time = timestamp_ms()
             try:

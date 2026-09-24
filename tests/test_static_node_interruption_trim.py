@@ -145,6 +145,7 @@ async def _static_turn(is_silence_trigger=False):
     tm.run_id = "run"
     tm.language = "en"
     tm.stream = True
+    tm.turn_based_conversation = False
     tm.on_turn_usage = None
     tm.on_overflow = None
     tm.llm_config = {"model": "gpt-4.1-mini", "provider": "openai"}
@@ -155,6 +156,7 @@ async def _static_turn(is_silence_trigger=False):
     tm.conversation_history = ConversationHistory()
     tm._stage_assistant_history = MagicMock()
     tm._inject_language_instruction = lambda messages: messages
+    tm._apply_node_interruption_threshold = lambda node: None
     tm._synthesize = AsyncMock()
 
     async def _generate(*args, **kwargs):

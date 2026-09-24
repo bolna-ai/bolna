@@ -159,6 +159,9 @@ def _make_task_manager(agent=None, **overrides):
     tm.task_id = 0
     tm._response_turn_id = 0  # real __init__ sets this; __get_updated_meta_info increments it
     tm.repeat_after_silence_seconds = None
+    # real __init__ sets both from ConversationConfig; a node change re-applies them
+    tm.default_number_of_words_for_interruption = 3
+    tm.number_of_words_for_interruption = 3
     tm.conversation_history = ConversationHistory()
     tm.context_data = graph_agent.context_data  # Share context_data with agent
     tm._language = "en"  # backs the `language` property (real __init__ sets this)

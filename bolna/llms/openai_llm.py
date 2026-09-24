@@ -26,7 +26,7 @@ from bolna.constants import DEFAULT_LANGUAGE_CODE, default_reasoning_effort, is_
 from bolna.enums import ResponseStreamEvent, ResponseItemType, Verbosity
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
-from bolna.helpers.function_calling_helpers import guard_llm_base_url
+from bolna.helpers.function_calling_helpers import guard_llm_base_url, tool_names
 from .openai_base import OpenAICompatibleLLM
 from .message_models import strip_internal_keys
 from .tool_call_accumulator import ToolCallAccumulator
@@ -193,11 +193,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         self.custom_tools = kwargs.get("api_tools", None)
         self.language = language
-        logger.info(f"API Tools {self.custom_tools}")
+        logger.info("API Tools %s", tool_names(self.custom_tools))
         if self.custom_tools is not None:
             self.trigger_function_call = True
             self.api_params = self.custom_tools["tools_params"]
-            logger.info(f"Function dict {self.api_params}")
             self.tools = self.custom_tools["tools"]
         else:
             self.trigger_function_call = False
@@ -379,6 +378,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     service_tier=service_tier,
                     llm_host=self.llm_host,
                 )
+                self._log_llm_request_id(completion_stream, getattr(chunk, "id", None))
 
             delta = chunk.choices[0].delta
 
@@ -654,6 +654,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 if evt_type == ResponseStreamEvent.CREATED:
                     resp = evt.get("response", {})
                     self.previous_response_id = resp.get("id")
+                    self._log_llm_request_id(response_id=resp.get("id"))
                     ws_service_tier = resp.get("service_tier")
                     if latency_data is None:
                         latency_data = LatencyData(

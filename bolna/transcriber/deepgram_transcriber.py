@@ -11,12 +11,14 @@ from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake, ConnectionClosed
 
 from .base_transcriber import BaseTranscriber
+from bolna.helpers.asr_keywords import keyword_entries
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
-from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
+from bolna.helpers.utils import create_ws_data_packet, resolve_deepgram_mip_opt_out, timestamp_ms
 from bolna.enums import TelephonyProvider
 from bolna.constants import (
     DEEPGRAM_FLUX_EOT_THRESHOLD,
+    MEASURED_FRAME_PROVIDERS,
     DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD,
     DEEPGRAM_FLUX_EOT_TIMEOUT_MS,
     DEEPGRAM_FLUX_TURN_STALL_FLOOR_S,
@@ -72,15 +74,18 @@ class DeepgramTranscriber(BaseTranscriber):
         self.transcription_cursor = 0.0
         self.interruption_signalled = False
         self.run_id = kwargs.get("run_id")
+        self.mip_opt_out = resolve_deepgram_mip_opt_out(kwargs.get("mip_opt_out"))
         if not self.stream:
             self.api_url = f"https://{self.deepgram_host}/v1/listen?model={self.model}&language={self.language}"
             if self.is_english:
                 self.api_url += "&filler_words=true"
             if self.run_id:
                 self.api_url += f"&tag={quote(self.run_id)}&extra={quote(f'run_id:{self.run_id}')}"
+            if self.mip_opt_out:
+                self.api_url += "&mip_opt_out=true"
             self.session = aiohttp.ClientSession()
             if self.keywords is not None:
-                keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
+                keyword_list = [quote(entry) for entry in keyword_entries(self.keywords)]
                 if keyword_list:
                     if self.model.startswith("nova-3"):
                         keyword_string = "&keyterm=" + "&keyterm=".join(keyword_list)
@@ -195,11 +200,14 @@ class DeepgramTranscriber(BaseTranscriber):
             dg_params["tag"] = self.run_id
             dg_params["extra"] = f"run_id:{self.run_id}"
 
+        if self.mip_opt_out:
+            dg_params["mip_opt_out"] = "true"
+
         websocket_api = "{}://{}/v1/listen?".format(self.deepgram_host_protocol, self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params)
 
         if self.keywords:
-            keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
+            keyword_list = [quote(entry) for entry in keyword_entries(self.keywords)]
             if keyword_list:
                 if self.model.startswith("nova-3"):
                     websocket_url += "&keyterm=" + "&keyterm=".join(keyword_list)
@@ -242,7 +250,7 @@ class DeepgramTranscriber(BaseTranscriber):
             self.audio_frame_duration = 0.0
 
         if self.keywords:
-            keyword_list = [kw.strip() for kw in self.keywords.split(",") if kw.strip()]
+            keyword_list = keyword_entries(self.keywords)
             if keyword_list:
                 dg_params["keyterm"] = keyword_list
 
@@ -253,6 +261,9 @@ class DeepgramTranscriber(BaseTranscriber):
 
         if self.run_id:
             dg_params["tag"] = self.run_id
+
+        if self.mip_opt_out:
+            dg_params["mip_opt_out"] = "true"
 
         websocket_api = "{}://{}/v2/listen?".format(self.deepgram_host_protocol, self.deepgram_flux_host)
         websocket_url = websocket_api + urlencode(dg_params, doseq=True)
@@ -535,7 +546,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.connection_authenticated = False
 
         # Always clear accumulated per-call data to prevent memory leaks
-        self.audio_frame_timestamps = []
+        self.reset_audio_frame_state()
         self.current_turn_interim_details = []
 
     async def _get_http_transcription(self, audio_data):
@@ -607,6 +618,13 @@ class DeepgramTranscriber(BaseTranscriber):
             logger.info("Cancelled sender task")
             return
 
+    def _audio_frame_seconds(self, num_bytes: int) -> float:
+        """Audio carried by one send. Measured where the input handler batches something other than
+        the constant it is booked at; every other path really does send the constant."""
+        if self.provider not in MEASURED_FRAME_PROVIDERS:
+            return self.audio_frame_duration
+        return num_bytes / ((1 if self.encoding == "mulaw" else 2) * self.sampling_rate)
+
     async def sender_stream(self, ws: ClientConnection):
         try:
             while True:
@@ -629,14 +647,12 @@ class DeepgramTranscriber(BaseTranscriber):
                 if end_of_stream:
                     break
 
-                frame_start = self.num_frames * self.audio_frame_duration
-                frame_end = (self.num_frames + 1) * self.audio_frame_duration
-                send_timestamp = timestamp_ms()
-                self.audio_frame_timestamps.append((frame_start, frame_end, send_timestamp))
-                self.num_frames += 1
+                data = ws_data_packet.get("data")
+                if isinstance(data, (bytes, bytearray)):
+                    self.record_audio_frame(self._audio_frame_seconds(len(data)), timestamp_ms())
 
                 try:
-                    await ws.send(ws_data_packet.get("data"))
+                    await ws.send(data)
                 except ConnectionClosedError as e:
                     logger.error(f"Connection closed while sending data: {e}")
                     break
@@ -668,17 +684,15 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 # If connection_start_time is None, it is the durations of frame submitted till now minus current time
                 if self.connection_start_time is None:
-                    self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)
+                    self.connection_start_time = time.time() - self.audio_cursor_s
 
                 if msg["type"] == "SpeechStarted":
-                    logger.info("Received SpeechStarted event from deepgram")
                     if not isinstance(self.current_turn_id, int):
                         self._turn_first_speech_epoch_ms = timestamp_ms()
                         self._turn_pending = True  # counter incremented on first real interim
                     self.speech_start_time = timestamp_ms()
                     self.is_transcript_sent_for_processing = False
 
-                    logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
                     logger.info(
                         "BOLNA_TRACE_DG speech_started dg_turn=%s request_id=%s",
                         self.current_turn_id,
@@ -906,7 +920,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 msg = json.loads(msg)
 
                 if self.connection_start_time is None:
-                    self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)
+                    self.connection_start_time = time.time() - self.audio_cursor_s
 
                 if msg["type"] == "Connected":
                     logger.info(f"Connected to Deepgram Flux: request_id={msg.get('request_id')}")
@@ -1225,9 +1239,7 @@ class DeepgramTranscriber(BaseTranscriber):
         # bookkeeping must restart with them. A pool reconnect re-runs transcribe()
         # on the same instance — stale values from the previous connection would
         # map new positions onto old wall-clock times.
-        self.num_frames = 0
-        self.audio_frame_timestamps = []
-        self.connection_start_time = None
+        self.reset_audio_frame_state()
         try:
             start_time = timestamp_ms()
             try:

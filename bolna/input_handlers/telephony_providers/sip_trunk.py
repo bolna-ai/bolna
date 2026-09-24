@@ -322,11 +322,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             if merged:
                 await self.ingest_audio(merged, self._audio_meta())
 
-        ws_data_packet = create_ws_data_packet(
-            data=None,
-            meta_info={"io": self.io_provider, "eos": True, "sequence": (self.input_types or {}).get("audio", 0)},
-        )
-        self.queues["transcriber"].put_nowait(ws_data_packet)
+        self._end_input_stream(self.io_provider, sequence=(self.input_types or {}).get("audio", 0))
         logger.info(f"sip-trunk WebSocket closed for channel {self.channel_id}")
 
     async def _handle_control_message(self, text: str):

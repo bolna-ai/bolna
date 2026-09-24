@@ -30,7 +30,7 @@ EXPECTED_FIELDS = {
         "style": False,
     },
     "openai": {"voice": True, "model": True},
-    "deepgram": {"voice_id": True, "voice": True, "model": True},
+    "deepgram": {"voice_id": True, "voice": True, "model": True, "mip_opt_out": False},
     "azuretts": {"voice": True, "model": True, "language": True, "speed": False},
     "cartesia": {"voice": True, "voice_id": True, "model": True, "language": True, "speed": False},
     "smallest": {"voice": True, "voice_id": True, "model": True, "language": True},

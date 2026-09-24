@@ -75,6 +75,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                             "turn_id": meta_info.get("turn_id"),
                             "response_uid": meta_info.get("response_uid"),
                             "response_group_uid": meta_info.get("response_group_uid"),
+                            "message_category": meta_info.get("message_category", ""),
                         }
                         mark_id = str(uuid.uuid4())
                         self.mark_event_meta_data.update_data(mark_id, pre_mark_event_meta_data)
@@ -83,15 +84,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                             and self.mark_event_meta_data.welcome_pre_mark_id is None
                         ):
                             self.mark_event_meta_data.welcome_pre_mark_id = mark_id
-                        logger.info(
-                            "BOLNA_TRACE_TEL send_pre_mark mark_id=%s seq=%s turn=%s response_uid=%s group_uid=%s category=%s",
-                            mark_id,
-                            meta_info.get("sequence_id"),
-                            meta_info.get("turn_id"),
-                            meta_info.get("response_uid"),
-                            meta_info.get("response_group_uid"),
-                            meta_info.get("message_category", ""),
-                        )
                         mark_message = await self.form_mark_message(mark_id)
                         await self._send_text(json.dumps(mark_message))
 
@@ -141,17 +133,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     )
                     # sending of post-mark message
                     self.mark_event_meta_data.update_data(mark_id, mark_event_meta_data)
-                    logger.info(
-                        "BOLNA_TRACE_TEL send_post_mark mark_id=%s seq=%s turn=%s response_uid=%s group_uid=%s final=%s category=%s text_len=%s",
-                        mark_id,
-                        meta_info.get("sequence_id"),
-                        meta_info.get("turn_id"),
-                        meta_info.get("response_uid"),
-                        meta_info.get("response_group_uid"),
-                        mark_event_meta_data.get("is_final_chunk"),
-                        meta_info.get("message_category", ""),
-                        len(mark_event_meta_data.get("text_synthesized", "") or ""),
-                    )
                     mark_message = await self.form_mark_message(mark_id)
                     await self._send_text(json.dumps(mark_message))
                 else:

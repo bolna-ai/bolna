@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
-from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet
+from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, resolve_deepgram_mip_opt_out
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
 logger = configure_logger(__name__)
@@ -46,7 +46,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
         self.voice_id = voice_id
         self.sample_rate = str(sampling_rate)
         self.model = model
-        self.api_key = kwargs.get("transcriber_key", os.getenv("DEEPGRAM_AUTH_TOKEN"))
+        self.api_key = kwargs.get("synthesizer_key") or os.getenv("DEEPGRAM_AUTH_TOKEN")
 
         self.use_mulaw = kwargs.get("use_mulaw", False)
         if self.use_mulaw or audio_format in ("pcm", "wav"):
@@ -62,9 +62,12 @@ class DeepgramSynthesizer(StreamSynthesizer):
             self.cache = InmemoryScalarCache()
 
         self.run_id = kwargs.get("run_id")
+        self.mip_opt_out = resolve_deepgram_mip_opt_out(kwargs.get("mip_opt_out"))
         self.ws_url = f"{DEEPGRAM_TTS_WS_URL}?encoding={self.format}&sample_rate={self.sample_rate}&model={self.model}"
         if self.run_id:
             self.ws_url += f"&tag={self.run_id}"
+        if self.mip_opt_out:
+            self.ws_url += "&mip_opt_out=true"
 
         # Extra TTFB tracking for WS mode
         self.ws_send_time = None
@@ -268,6 +271,8 @@ class DeepgramSynthesizer(StreamSynthesizer):
         url = f"{DEEPGRAM_TTS_URL}?container=none&encoding={self.format}&sample_rate={self.sample_rate}&model={self.model}"
         if self.run_id:
             url += f"&tag={self.run_id}"
+        if self.mip_opt_out:
+            url += "&mip_opt_out=true"
         logger.info(f"Sending deepgram request {url}")
         try:
             async with aiohttp.ClientSession() as session:

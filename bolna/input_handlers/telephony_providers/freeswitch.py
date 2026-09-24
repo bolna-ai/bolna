@@ -135,13 +135,9 @@ class FreeSwitchInputHandler(DefaultInputHandler):
                 f"after bin={bin_frames} txt={txt_frames}"
             )
             self.flush_ingest()
-            self.queues["transcriber"].put_nowait(
-                create_ws_data_packet(data=None, meta_info={"io": "freeswitch", "eos": True})
-            )
+            self._end_input_stream("freeswitch")
             self.running = False
         except Exception as e:
             logger.error(f"freeswitch input handler error after bin={bin_frames} txt={txt_frames}: {e}", exc_info=True)
             self.flush_ingest()
-            self.queues["transcriber"].put_nowait(
-                create_ws_data_packet(data=None, meta_info={"io": "freeswitch", "eos": True})
-            )
+            self._end_input_stream("freeswitch")

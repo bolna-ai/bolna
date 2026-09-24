@@ -5,6 +5,7 @@ import os
 import time
 import uuid
 
+from bolna.enums import AudioPlaybackReason
 from bolna.output_handlers.default import DefaultOutputHandler
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import wav_bytes_to_pcm
@@ -82,7 +83,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
             if self.input_handler:
                 self.input_handler.process_mark_message({"type": "mark", "name": mark_id})
         if self.input_handler and self.input_handler.is_audio_being_played_to_user():
-            self.input_handler.update_is_audio_being_played(False)
+            self.input_handler.update_is_audio_being_played(False, AudioPlaybackReason.FREESWITCH_PLAYOUT_DONE_EVENT)
 
     async def set_stream_sid(self, stream_id):
         # the first-message/welcome path calls this (telephony handlers track a stream_sid);
@@ -111,7 +112,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         self._response_bytes = 0
         self._response_first_send = None
         if self.input_handler and self.input_handler.is_audio_being_played_to_user():
-            self.input_handler.update_is_audio_being_played(False)
+            self.input_handler.update_is_audio_being_played(False, AudioPlaybackReason.FREESWITCH_SOCKET_CLOSED)
 
     async def handle_interruption(self):
         if self._closed:
@@ -148,7 +149,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
             # turn-taking reads this state; without clearing it the agent looks like
             # it's still speaking and user turns get delayed (mirrors sip_trunk)
             if self.input_handler and self.input_handler.is_audio_being_played_to_user():
-                self.input_handler.update_is_audio_being_played(False)
+                self.input_handler.update_is_audio_being_played(False, AudioPlaybackReason.FREESWITCH_PLAYOUT_TIMER)
         except asyncio.CancelledError:
             pass  # interrupted → playout aborted
 

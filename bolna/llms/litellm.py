@@ -12,7 +12,9 @@ from bolna.helpers.utils import convert_to_request_log, compute_function_pre_cal
 from .llm import BaseLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
-from .message_models import strip_internal_keys, first_tool_call_result
+from .message_models import strip_internal_keys
+from .routing_stream import read_routing_stream
+from bolna.helpers.function_calling_helpers import tool_names
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -53,11 +55,10 @@ class LiteLLM(BaseLLM):
                 self.model_args["aws_region_name"] = kwargs["aws_region_name"]
 
         self.custom_tools = kwargs.get("api_tools", None)
-        logger.info(f"API Tools {self.custom_tools}")
+        logger.info("API Tools %s", tool_names(self.custom_tools))
         if self.custom_tools is not None:
             self.trigger_function_call = True
             self.api_params = self.custom_tools["tools_params"]
-            logger.info(f"Function dict {self.api_params}")
             self.tools = self.custom_tools["tools"]
         else:
             self.trigger_function_call = False
@@ -123,6 +124,7 @@ class LiteLLM(BaseLLM):
                     sequence_id=meta_info.get("sequence_id"),
                     first_token_latency_ms=first_token_time - start_time,
                 )
+                self._log_llm_request_id(completion_stream, getattr(chunk, "id", None))
 
             choice = chunk["choices"][0]
             delta = choice.get("delta", {})
@@ -181,12 +183,13 @@ class LiteLLM(BaseLLM):
                 "tools": parsed_tools,
                 "tool_choice": tool_choice,
                 "parallel_tool_calls": False,
-                "stream": False,
+                "stream": True,
+                "stream_options": {"include_usage": True},
                 "temperature": 0.0,
             }
         )
-        completion = await acompletion(**model_args)
-        return first_tool_call_result(completion)
+        stream = await acompletion(**model_args)
+        return await read_routing_stream(stream, parsed_tools)
 
     async def generate(self, messages, stream=False, request_json=False, meta_info=None, ret_metadata=False):
         text = ""
@@ -198,7 +201,16 @@ class LiteLLM(BaseLLM):
 
         if request_json:
             model_args["response_format"] = {"type": "json_object"}
-        logger.info(f"Request to litellm {model_args}")
+        # model_args holds the BYOK api_key. The conversation path's prompt is persisted by
+        # convert_to_request_log; extraction and summarization keep only this shape.
+        sent_messages = model_args["messages"] or []
+        logger.info(
+            "Request to litellm model=%s messages=%s chars=%s stream=%s",
+            model_args.get("model"),
+            len(sent_messages),
+            sum(len(str(m.get("content") or "")) for m in sent_messages if isinstance(m, dict)),
+            stream,
+        )
         try:
             completion = await acompletion(**model_args)
             text = completion.choices[0].message.content

@@ -15,6 +15,10 @@ logger = configure_logger(__name__)
 _LID_MODE = os.getenv("LID_MODE", "shadow").lower()
 
 
+# Providers bound single-frame duration; AssemblyAI rejects anything under 50ms.
+KEEPALIVE_SILENCE_MS = 100
+
+
 class TranscriberPool:
     """
     Holds multiple pre-warmed transcriber connections and routes audio to the active one.
@@ -184,10 +188,8 @@ class TranscriberPool:
         return list(self.transcribers.keys())
 
     def is_active_transcriber_alive(self):
-        """True if the active transcriber's connection task is still running."""
-        active = self.transcribers[self.active_label]
-        task = getattr(active, "transcription_task", None)
-        return task is not None and not task.done()
+        """True if the active transcriber's provider connection is still usable."""
+        return self.transcribers[self.active_label].is_connected()
 
     # ------------------------------------------------------------------
     # Duck-typed interface
@@ -211,12 +213,12 @@ class TranscriberPool:
             await self._start_lid_tap()
 
     @staticmethod
-    def _silence_frame(encoding):
-        """Return 10ms of silence in the given encoding (320 bytes at 16kHz)."""
+    def _silence_frame(encoding, sample_rate):
+        """Silence sized for the leg's own rate and encoding."""
+        samples = int(sample_rate * KEEPALIVE_SILENCE_MS / 1000)
         if encoding == "mulaw":
-            return b"\xff" * 320
-        # linear16 and anything else: zeros
-        return b"\x00" * 320
+            return b"\xff" * samples
+        return b"\x00" * samples * 2
 
     async def _audio_router(self):
         """Read from the shared input queue, forward to active transcriber, and feed LID tap."""
@@ -260,11 +262,13 @@ class TranscriberPool:
                         continue
                     # Skip if this transcriber's connection already dropped —
                     # reconnect-on-demand in switch() handles that case.
-                    task = getattr(transcriber, "transcription_task", None)
-                    if task is not None and task.done():
+                    if not transcriber.is_connected():
                         continue
                     encoding = getattr(transcriber, "encoding", "linear16")
-                    silence = self._silence_frame(encoding)
+                    sample_rate = (
+                        getattr(transcriber, "sampling_rate", None) or getattr(transcriber, "sample_rate", None) or 8000
+                    )
+                    silence = self._silence_frame(encoding, int(sample_rate))
                     transcriber.input_queue.put_nowait(
                         {
                             "data": silence,
@@ -518,6 +522,8 @@ class TranscriberPool:
                 )
                 return False
             active = self.transcribers[self.active_label]
+            # Stale error would ride the next close and end a recovered call.
+            active.connection_error = None
             try:
                 await active.run()
             except Exception as e:
@@ -560,9 +566,11 @@ class TranscriberPool:
             # after eos: a switch decision landing post-hangup must not resurrect
             # connections on a call that is tearing down.
             target = self.transcribers[label]
-            transcription_task = getattr(target, "transcription_task", None)
-            if transcription_task is not None and transcription_task.done() and not self.call_ended:
+            # is_connected(), not the task: Azure never sets transcription_task, so the old probe
+            # read None and never reconnected a dropped standby here.
+            if not target.is_connected() and not self.call_ended:
                 logger.info(f"TranscriberPool: transcriber '{label}' connection dropped, reconnecting")
+                target.connection_error = None
                 await target.run()
                 self.reconnect_count += 1
 

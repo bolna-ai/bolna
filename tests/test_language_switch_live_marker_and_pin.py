@@ -31,7 +31,8 @@ def _switcher_capturing_prompt(monkeypatch, sent):
 
     sw._llm = MagicMock()
     sw._llm.generate = generate
-    sw._log_decision = MagicMock()
+    sw._log_request = MagicMock(return_value={})
+    sw._log_response = MagicMock()
     return sw
 
 
