@@ -131,6 +131,38 @@ def test_elevenlabs_still_requires_both_voice_and_voice_id():
         Synthesizer(provider="elevenlabs", provider_config={"voice": "George", "model": "eleven_turbo_v2_5"})
 
 
+def test_elevenlabs_control_defaults_are_stable():
+    config = ElevenLabsConfig(voice="George", voice_id="voice-id", model="eleven_turbo_v2_5")
+
+    assert config.temperature == 0.5
+    assert config.similarity_boost == 0.75
+    assert config.speed == 1.0
+    assert config.style == 0.0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("temperature", -0.01),
+        ("temperature", 1.01),
+        ("similarity_boost", -0.01),
+        ("similarity_boost", 1.01),
+        ("speed", 0.69),
+        ("speed", 1.21),
+        ("style", -0.01),
+        ("style", 1.01),
+    ],
+)
+def test_elevenlabs_rejects_out_of_range_controls(field, value):
+    with pytest.raises(ValueError):
+        ElevenLabsConfig(
+            voice="George",
+            voice_id="voice-id",
+            model="eleven_turbo_v2_5",
+            **{field: value},
+        )
+
+
 def test_an_unknown_provider_is_rejected():
     with pytest.raises(ValueError):
         Synthesizer(provider="nope", provider_config={"voice": "x"})
