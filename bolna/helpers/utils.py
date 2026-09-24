@@ -198,6 +198,13 @@ def write_json_file(file_path, data):
         json.dump(data, file, indent=4, ensure_ascii=False)
 
 
+def resolve_deepgram_mip_opt_out(value=None):
+    """Per-agent value wins; unset falls back to the fleet-wide DEEPGRAM_MIP_OPT_OUT env."""
+    if value is not None:
+        return bool(value)
+    return os.getenv("DEEPGRAM_MIP_OPT_OUT", "false").lower() == "true"
+
+
 def safe_log_text(text, limit=120):
     """Strip control chars from caller text and truncate — blocks forged log entries."""
     return re.sub(r"[\x00-\x1f\x7f]+", " ", str(text or ""))[:limit]
@@ -368,6 +375,19 @@ async def get_raw_audio_bytes(
         audio_data = await get_s3_file(BUCKET_NAME, object_key)
 
     return audio_data
+
+
+def scalar_fields(data, max_len=120):
+    """Field map with containers elided and long strings truncated, for logging a config by shape."""
+    summary = {}
+    for key, value in (data or {}).items():
+        if isinstance(value, (dict, list, tuple, set, bytes)):
+            summary[key] = f"<{type(value).__name__}[{len(value)}]>"
+        elif isinstance(value, str) and len(value) > max_len:
+            summary[key] = f"{value[:max_len]}...<{len(value)}>"
+        else:
+            summary[key] = value
+    return summary
 
 
 def get_md5_hash(text):

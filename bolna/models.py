@@ -69,6 +69,8 @@ class DeepgramConfig(BaseModel):
     voice_id: str
     voice: str
     model: str
+    # Opt out of Deepgram's Model Improvement Program (zero retention after processing).
+    mip_opt_out: Optional[bool] = None
 
 
 class StandardVoiceConfig(BaseModel):
@@ -179,6 +181,8 @@ class Transcriber(BaseModel):
     deepgram_host: Optional[str] = None
     deepgram_flux_host: Optional[str] = None
     deepgram_host_protocol: Optional[str] = None
+    # Opt out of Deepgram's Model Improvement Program (zero retention after processing).
+    mip_opt_out: Optional[bool] = None
     # Flux model parameters
     eot_threshold: Optional[float] = None
     eager_eot_threshold: Optional[float] = None

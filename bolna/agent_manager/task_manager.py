@@ -55,6 +55,7 @@ from bolna.constants import (
     WEBCALL_TTS_SAMPLE_RATE,
 )
 from bolna.helpers.function_calling_helpers import (
+    redacted_url,
     trigger_api,
     computed_api_response,
     prepare_api_request,
@@ -68,6 +69,7 @@ from bolna.providers import *
 from bolna.s2s import events as s2s_events
 from bolna.llms.routing_stream import CONFIDENCE_KEY, REASONING_KEY
 from bolna.enums import (
+    AudioPlaybackReason,
     TelephonyProvider,
     LogComponent,
     LogDirection,
@@ -102,6 +104,7 @@ from bolna.helpers.utils import (
     save_audio_file_to_s3,
     update_prompt_with_context,
     get_md5_hash,
+    scalar_fields,
     static_node_audio_key,
     clean_json_string,
     wav_bytes_to_pcm,
@@ -329,6 +332,7 @@ class TaskManager(BaseManager):
         super().__init__()
         self.kwargs = kwargs
         self.kwargs["task_manager_instance"] = self
+        self.provider_api_keys = self.kwargs.pop("provider_api_keys", None) or {}
         # Optional load-signal callback (set by the caller only for PTU-served calls).
         self.on_turn_usage = kwargs.get("on_turn_usage")
         # Fired instead of on_turn_usage when another backend served the turn.
@@ -383,7 +387,12 @@ class TaskManager(BaseManager):
         ):
             self.kwargs["assistant_id"] = task["tools_config"]["llm_agent"]["llm_config"]["assistant_id"]
 
-        logger.info(f"doing task {task}")
+        logger.info(
+            "doing task %s type=%s config_sha=%s",
+            task_id,
+            task.get("task_type"),
+            get_md5_hash(repr(task))[:12],
+        )
         self.task_id = task_id
         self.assistant_name = assistant_name
         self.tools = {}
@@ -704,7 +713,7 @@ class TaskManager(BaseManager):
             # For nitro
             self.nitro = True
             self.conversation_config = task.get("task_config", {})
-            logger.info(f"Conversation config {self.conversation_config}")
+            logger.info("Conversation config %s", scalar_fields(self.conversation_config))
 
             # Enable DTMF flow
             dtmf_enabled = self.conversation_config.get("dtmf_enabled", False)
@@ -1576,7 +1585,7 @@ class TaskManager(BaseManager):
                 logger.info("No welcome message audio to send, marking welcome message as played")
                 self.tools["input"].is_welcome_message_played = True
             else:
-                self.tools["input"].update_is_audio_being_played(True)
+                self.tools["input"].update_is_audio_being_played(True, AudioPlaybackReason.WELCOME_MESSAGE_SENT)
                 self.conversation_history.append_welcome_message(text)
                 convert_to_request_log(
                     message=text,
@@ -1665,6 +1674,17 @@ class TaskManager(BaseManager):
         if self.task_config["tools_config"].get("llm_agent") is not None and llm_config is not None:
             llm_config["buffer_size"] = (self.task_config["tools_config"].get("synthesizer") or {}).get("buffer_size")
 
+    def __pool_leg_kwargs(self, base_kwargs, key_name, provider):
+        """Swap in this leg's own provider key; dropping it leaves the provider's env fallback."""
+        # Without a map the caller cannot resolve per-leg keys, so the base key stands.
+        if not provider or not self.provider_api_keys:
+            return base_kwargs
+        leg_kwargs = dict(base_kwargs)
+        leg_kwargs.pop(key_name, None)
+        if leg_key := self.provider_api_keys.get(provider):
+            leg_kwargs[key_name] = leg_key
+        return leg_kwargs
+
     def __setup_transcriber(self):
         try:
             if self.task_config["tools_config"]["transcriber"] is not None:
@@ -1699,6 +1719,9 @@ class TaskManager(BaseManager):
                         # Per-call Deepgram host override arrives per-label on cfg itself (the caller
                         # stamps only the legs a chosen endpoint can serve); do not inherit from the
                         # top-level config, or an unsupported leg would be forced onto that endpoint.
+                        # Data-retention opt-out is agent-wide, so legs do inherit it.
+                        if cfg.get("mip_opt_out") is None and transcriber_config.get("mip_opt_out") is not None:
+                            cfg["mip_opt_out"] = transcriber_config["mip_opt_out"]
                         if is_sip:
                             cfg["encoding"] = "mulaw"
                             cfg["sampling_rate"] = 8000
@@ -1712,7 +1735,8 @@ class TaskManager(BaseManager):
                             cls = SUPPORTED_TRANSCRIBER_PROVIDERS.get(cfg["provider"])
                         else:
                             cls = SUPPORTED_TRANSCRIBER_MODELS.get(cfg["model"])
-                        transcribers[label] = cls(provider, **cfg, **self.kwargs)
+                        leg_kwargs = self.__pool_leg_kwargs(self.kwargs, "transcriber_key", cfg.get("provider"))
+                        transcribers[label] = cls(provider, **cfg, **leg_kwargs)
 
                         if label == active_label:
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
@@ -1852,7 +1876,8 @@ class TaskManager(BaseManager):
                         cfg["stream"] = True if self.enforce_streaming else False
 
                     cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
-                    synthesizers[label] = cls(**cfg, **provider_config, **synthesizer_kwargs, caching=caching)
+                    leg_kwargs = self.__pool_leg_kwargs(synthesizer_kwargs, "synthesizer_key", provider_name)
+                    synthesizers[label] = cls(**cfg, **provider_config, **leg_kwargs, caching=caching)
 
                 # Use active synth's provider/voice for logging metadata, and buffer_size
                 # Note that in the current state, buffer_size of other synth configs is ignored
@@ -2878,7 +2903,11 @@ class TaskManager(BaseManager):
         while not self.conversation_ended:
             mark_events = self.mark_event_meta_data.mark_event_meta_data
             mark_items_list = [{"mark_id": k, "mark_data": v} for k, v in mark_events.items()]
-            logger.info(f"current_list: {mark_items_list}")
+            logger.info(
+                "current_list: %s pending %s",
+                len(mark_items_list),
+                [(m["mark_id"], m["mark_data"].get("type")) for m in mark_items_list],
+            )
 
             if not mark_items_list:
                 break
@@ -4120,7 +4149,17 @@ class TaskManager(BaseManager):
 
                 if trigger_function_call:
                     self.function_call_in_flight = True  # so a parallel LID switch won't truncate it
-                    logger.info(f"Triggering function call for {data}")
+                    # model_extra is the model-produced arguments; the declared fields carry the
+                    # tool's api_token, its auth headers and the whole conversation history.
+                    logger.info(
+                        "Triggering function call %s url=%s method=%s seq=%s turn=%s args=%s",
+                        data.called_fun,
+                        redacted_url(data.url),
+                        data.method,
+                        meta_info.get("sequence_id"),
+                        meta_info.get("turn_id"),
+                        data.model_extra,
+                    )
                     # Stamp total_stream_duration_ms before early return — function call chunk carries the final latency
                     if latency:
                         fc_latency_dict = latency.model_dump()
@@ -5446,7 +5485,7 @@ class TaskManager(BaseManager):
                             self.interruption_manager.on_interruption_triggered(asr_turn_id=_asr_turn_id)
                             # Also record in the interrupted set for was_interrupted annotation
                             self.interruption_manager.record_interrupted_transcriber_turn(_asr_turn_id)
-                            self.tools["input"].update_is_audio_being_played(False)
+                            self.tools["input"].update_is_audio_being_played(False, AudioPlaybackReason.BARGE_IN)
                             await self.__cleanup_downstream_tasks()
                         # User continuation detection: cancel pending response if user continues within grace period
                         elif (
@@ -6615,7 +6654,7 @@ class TaskManager(BaseManager):
             # never arrives — clear it here as the barge-in path does, or it latches True and
             # blocks the silence prompt and the stall backstop for the rest of the call.
             if "input" in self.tools:
-                self.tools["input"].update_is_audio_being_played(False)
+                self.tools["input"].update_is_audio_being_played(False, AudioPlaybackReason.LID_SWITCH_TRUNCATE)
             await self.__cleanup_downstream_tasks()
             # Sequence invalidated — the held audio can no longer ship; safe to open the gate.
             self.lid_playback_gate = None
@@ -7300,7 +7339,9 @@ class TaskManager(BaseManager):
                             # as a false interruption. Mirror the BLOCK-path guard.
                             if meta_info.get("end_of_synthesizer_stream", False):
                                 self._turn_audio_flushed.set()
-                                self.tools["input"].update_is_audio_being_played(False)
+                                self.tools["input"].update_is_audio_being_played(
+                                    False, AudioPlaybackReason.SYNTHESIZER_STREAM_END
+                                )
 
                         # Give control to other tasks
                         sleep_time = self.tools["synthesizer"].get_sleep_time()
@@ -7614,7 +7655,7 @@ class TaskManager(BaseManager):
                         if sequence_id is not None:
                             self._sent_audio_sequences.add(sequence_id)
                         self._commit_staged_assistant_history(sequence_id)
-                        self.tools["input"].update_is_audio_being_played(True)
+                        self.tools["input"].update_is_audio_being_played(True, AudioPlaybackReason.AUDIO_SENT)
                         self.response_in_pipeline = False
                         self._synthesis_awaiting_first_audio = False
                         await self.tools["output"].handle(message)
@@ -7984,7 +8025,9 @@ class TaskManager(BaseManager):
                     # mark dictionary, so the final-chunk mark echo will never arrive and
                     # is_audio_being_played would stay stuck True forever — blocking the
                     # silence-hangup gate in this loop indefinitely.
-                    self.tools["input"].update_is_audio_being_played(False)
+                    self.tools["input"].update_is_audio_being_played(
+                        False, AudioPlaybackReason.SILENCE_HANGUP_INTERRUPT
+                    )
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
@@ -8521,7 +8564,7 @@ class TaskManager(BaseManager):
             await self.tools["output"].handle_interruption()
         # handle_interruption clears the pending final-chunk mark, and that mark's echo is
         # the only thing that would otherwise flip this flag back off.
-        self.tools["input"].update_is_audio_being_played(False)
+        self.tools["input"].update_is_audio_being_played(False, AudioPlaybackReason.S2S_DROP_QUEUED)
         while not self.buffered_output_queue.empty():
             try:
                 self.buffered_output_queue.get_nowait()
@@ -8584,7 +8627,7 @@ class TaskManager(BaseManager):
                 continue
 
             try:
-                self.tools["input"].update_is_audio_being_played(True)
+                self.tools["input"].update_is_audio_being_played(True, AudioPlaybackReason.S2S_AUDIO_SENT)
                 await self.tools["output"].handle(message)
 
                 if self.should_record and isinstance(message["data"], bytes) and message["data"] != b"\x00":

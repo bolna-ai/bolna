@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bolna.agent_manager.task_manager import TaskManager
-from bolna.enums import HangupReason, TelephonyProvider
+from bolna.enums import AudioPlaybackReason, HangupReason, TelephonyProvider
 from bolna.helpers.utils import pcm_to_ulaw
 from bolna.s2s import events as s2s_events
 from bolna.s2s.events import AudioEncoding, AudioFormat
@@ -304,7 +304,7 @@ class TestBargeIn:
         # watchdog never fires and the call stays open and billing.
         tm = make_tm()
         await tm._s2s_drop_queued_audio()
-        tm.tools["input"].update_is_audio_being_played.assert_called_with(False)
+        tm.tools["input"].update_is_audio_being_played.assert_called_with(False, AudioPlaybackReason.S2S_DROP_QUEUED)
 
 
 class TestBargeInAccounting:

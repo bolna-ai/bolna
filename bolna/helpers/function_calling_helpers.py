@@ -3,7 +3,7 @@ import ipaddress
 import json
 import os
 import socket
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 import aiohttp
 from yarl import URL
@@ -24,6 +24,25 @@ _ALLOWLISTED_HOSTS = frozenset(
 
 class SSRFError(ValueError):
     """Raised when an outbound request targets a non-public address."""
+
+
+def redacted_url(url):
+    """URL with query-parameter values dropped: a tool's key is often configured in the query string."""
+    parts = urlsplit(str(url or ""))
+    if not parts.query:
+        return url
+    names = ",".join(sorted({k for k, _ in parse_qsl(parts.query, keep_blank_values=True)}))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, f"redacted={names}", ""))
+
+
+def header_names(headers):
+    """Header keys only: the values carry the tool's bearer token."""
+    return sorted(headers or {})
+
+
+def tool_names(custom_tools):
+    """Tool names only: every tools_params entry carries that tool's api_token and headers."""
+    return sorted((custom_tools or {}).get("tools_params") or {})
 
 
 def _is_disallowed_ip(ip):
@@ -257,13 +276,17 @@ async def trigger_api(
             response_text = None
             if method.lower() == "get":
                 get_url = build_get_url(url, api_params)
-                logger.info(f"Sending request {request_body}, {get_url}, {headers}")
+                logger.info(
+                    "Sending request %s, %s, header_keys=%s", request_body, redacted_url(url), header_names(headers)
+                )
                 # allow_redirects=False: the URL is validated pre-flight, but a redirect
                 # hop is not re-validated and would reopen the SSRF path (e.g. 302 -> IMDS).
                 async with session.get(get_url, headers=headers, allow_redirects=False) as response:
                     response_text = await response.text()
             elif method.lower() == "post":
-                logger.info(f"Sending request {api_params}, {url}, {headers}")
+                logger.info(
+                    "Sending request %s, %s, header_keys=%s", api_params, redacted_url(url), header_names(headers)
+                )
                 if content_type == "json":
                     async with session.post(url, json=api_params, headers=headers, allow_redirects=False) as response:
                         response_text = await response.text()
@@ -282,7 +305,7 @@ async def trigger_api(
                 raise ValueError(f"Unsupported HTTP method: {method!r}. Only 'GET' and 'POST' are supported.")
 
             if response is not None:
-                logger.info(f"Final URL: {response.url}")
+                logger.info("Final URL: %s", redacted_url(response.url))
 
             if return_response_metadata:
                 return {
