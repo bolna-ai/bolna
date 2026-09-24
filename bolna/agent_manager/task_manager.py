@@ -670,6 +670,7 @@ class TaskManager(BaseManager):
         # single slot is safe because decisions are serialized by language_switch_lock.
         self._spec_followup_task = None
         self.transfer_call_events: list[dict] = []
+        self.hangup_cancel_events: list[dict] = []
         self.hangup_task = None
 
         self.conversation_config = None
@@ -4464,6 +4465,7 @@ class TaskManager(BaseManager):
         if self.conversation_ended:
             return
         self._hangup_cancelled = True
+        self.hangup_cancel_events.append({"ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2)})
 
         current = asyncio.current_task()
         if self.llm_task is not None and self.llm_task is not current and not self.llm_task.done():
@@ -9101,6 +9103,8 @@ class TaskManager(BaseManager):
                     "non_fatal_llm_error_events": list(self.non_fatal_llm_error_events),
                     "language_switch_events": list(self.language_switch_events),
                     "transfer_call_events": list(self.transfer_call_events),
+                    "interruptible_hangup_message": self.interruptible_hangup_message,
+                    "hangup_cancel_events": list(self.hangup_cancel_events),
                     "lid_detection_events": list(self.__snapshot_lid_events()),
                     "asr_lid_events": self._collect_flux_lid_events(),
                     "transcriber_error_events": list(self.transcriber_error_events),
