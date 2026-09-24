@@ -29,10 +29,6 @@ class DtmfAccumulator:
         self._digits = ""
         self._timer: asyncio.Task | None = None
 
-    @property
-    def digits(self) -> str:
-        return self._digits
-
     def press(self, digit: str) -> None:
         if not digit:
             return

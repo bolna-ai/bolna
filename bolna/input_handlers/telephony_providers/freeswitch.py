@@ -35,7 +35,9 @@ class FreeSwitchInputHandler(DefaultInputHandler):
         self.on_mark_played = None
         # set by TaskManager: the media node reporting a consultative transfer that never connected
         self.on_transfer_failed = None
-        self._dtmf = DtmfAccumulator(lambda digits: self.queues["dtmf"].put_nowait(digits))
+        # set by TaskManager: the call id /process_transfer requires (the trunk plane keys on the run)
+        self.call_sid = None
+        self._dtmf = DtmfAccumulator(self.queues["dtmf"].put_nowait)
 
     async def process_message(self, message):
         if message.get("type") == "markPlayed":
@@ -67,6 +69,9 @@ class FreeSwitchInputHandler(DefaultInputHandler):
                 self.on_playout_done()
             return
         await super().process_message(message)
+
+    def get_call_sid(self):
+        return self.call_sid
 
     async def stop_handler(self):
         self._dtmf.close()

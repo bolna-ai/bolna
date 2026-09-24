@@ -260,10 +260,12 @@ TRANSFERING_CALL_FILLER = {
     "fr": "D'accord, je transfère l'appel. Un instant, s'il vous plaît.",
 }
 
-# Sent by the media node over the fork when a consultative transfer never connected.
+# Resume turn when a trunk transfer never connected (fork transfer_failed or reconcile timeout).
 TRANSFER_FAILED_RESUME_MESSAGE = (
     "[transfer failed] The transfer to the human agent did not connect ({cause}). Tell the caller and continue."
 )
+# /process_transfer runs inside one LLM generation, so it must answer well within LLM_GENERATION_TIMEOUT_S.
+TRANSFER_WEBHOOK_TIMEOUT_S = 15.0
 
 DEFAULT_USER_ONLINE_MESSAGE = "Hey, are you still there?"
 DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION = 6

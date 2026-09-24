@@ -32,8 +32,9 @@ def test_trunk_is_a_label_not_an_audio_transport():
     assert "freeswitch" not in TelephonyProvider.telephony_values()
 
 
-def test_trunk_audio_config_validates():
-    assert IOModel(provider="freeswitch", format="linear16").provider == "freeswitch"
+def test_an_agent_saved_on_a_trunk_validates():
+    # The dashboard stores the agent's telephony provider in tools_config input/output.
+    assert IOModel(provider="trunk").provider == "trunk"
 
 
 async def test_digits_within_timeout_collect_into_one_entry():

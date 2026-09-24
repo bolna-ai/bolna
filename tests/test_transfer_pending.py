@@ -7,6 +7,7 @@ media node says so over the fork and the agent picks the conversation back up.
 """
 
 import asyncio
+import json
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,7 +15,8 @@ import pytest
 
 from bolna.agent_manager import task_manager as task_manager_module
 from bolna.agent_manager.task_manager import TaskManager
-from bolna.constants import STALL_HANGUP_HARD_CAP_S, TRANSFER_FAILED_RESUME_MESSAGE
+from bolna.constants import LLM_GENERATION_TIMEOUT_S, STALL_HANGUP_HARD_CAP_S, TRANSFER_FAILED_RESUME_MESSAGE
+from bolna.helpers.conversation_history import ConversationHistory
 from bolna.input_handlers.telephony_providers.freeswitch import FreeSwitchInputHandler
 
 # Each mode silences every watchdog branch but one, so a pass either fires that branch or nothing.
@@ -42,10 +44,14 @@ def fast_watchdog_clock(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", _sleep)
 
 
-def _make_tm(mode, *, has_transfer):
+def _make_tm(mode, *, has_transfer, provider="trunk"):
     cfg = WATCHDOG_MODES[mode]
     tm = TaskManager.__new__(TaskManager)
-    tm.task_config = {"task_config": {"call_terminate": 3600}, "tools_config": {"output": {"provider": "freeswitch"}}}
+    tm.task_config = {
+        "task_config": {"call_terminate": 3600},
+        "tools_config": {"input": {"provider": "freeswitch"}, "output": {"provider": "freeswitch"}},
+    }
+    tm.transfer_call_params = {"provider": provider}
     tm.s2s_config = None
     tm.is_web_based_call = False
     tm.start_time = time.time()
@@ -108,36 +114,43 @@ async def test_the_same_window_fires_that_branch_without_a_pending_transfer(fast
     assert _watchdog_acted(tm), f"{mode} never fired, so the gated test above proves nothing"
 
 
-def _transfer_call(has_transfer, *, transfer_call_params=None):
-    """A task manager with a transfer in flight, reached the way the media node reaches it."""
+async def test_another_providers_transfer_leaves_the_watchdog_running(fast_watchdog_clock):
+    # A carrier transfer hands the leg off, so the inactivity hangup must still bound it.
+    tm = _make_tm("inactivity_hangup", has_transfer=True, provider="vobiz")
+    await _run_watchdog_window(tm)
+    tm._hangup_after_goodbye.assert_awaited_once()
+
+
+def _transfer_call(has_transfer=False, *, transfer_call_params=None, context_data=None):
+    """A task manager on a real FreeSWITCH fork handler, wired the way __init__ wires it."""
     tm = TaskManager.__new__(TaskManager)
     tm.run_id = "exec-1"
     tm.has_transfer = has_transfer
     tm.conversation_ended = False
+    tm.turn_based_conversation = False
+    tm.check_if_user_online = True
+    tm.conversation_config = {}
+    tm.kwargs = {}
     tm.s2s_config = None
+    tm.task_config = {"task_type": "conversation"}
     tm.stream_sid = "stream-1"
-    tm.context_data = {}
+    tm.context_data = context_data or {}
     tm.conversation_start_init_ts = time.time() * 1000
     tm.transfer_call_params = transfer_call_params
     tm.transfer_call_events = []
-    tm._transfer_failed_task = None
+    tm._transfer_tool_call_id = ""
     tm._transfer_reconcile_task = None
     tm._transfer_tasks = set()
     tm._inject_and_run_llm = AsyncMock()
+    tm._TaskManager__do_llm_generation = AsyncMock()
+    tm._spawn_followup_meta_info = MagicMock(return_value={})
     tm._start_api_call_detail = MagicMock(return_value={})
     tm._finalize_api_call_detail = MagicMock()
     tm._extract_api_call_runtime_args = MagicMock(return_value={})
-    tm.conversation_history = MagicMock()
-    tm.tools = {
-        "input": MagicMock(
-            io_provider="freeswitch",
-            get_call_sid=MagicMock(return_value="uuid-1"),
-            is_audio_being_played_to_user=MagicMock(return_value=False),
-        )
-    }
-    handler = FreeSwitchInputHandler.__new__(FreeSwitchInputHandler)
-    handler.on_transfer_failed = tm.on_transfer_failed
-    return tm, handler
+    tm.conversation_history = ConversationHistory()
+    tm.tools = {"input": FreeSwitchInputHandler(queues={"dtmf": asyncio.Queue(), "transcriber": asyncio.Queue()})}
+    tm._attach_freeswitch_input()
+    return tm, tm.tools["input"]
 
 
 class _FakeResponse:
@@ -173,6 +186,7 @@ class _FakeSession:
     def __init__(self, status=200, body='{"success": true}', error=None):
         self.status, self.body, self.error = status, body, error
         self.posted = None
+        self.timeout = None
 
     def __call__(self, *args, **kwargs):
         return self
@@ -183,8 +197,8 @@ class _FakeSession:
     async def __aexit__(self, *exc):
         return False
 
-    def post(self, url, json=None):
-        self.posted = json
+    def post(self, url, json=None, timeout=None):
+        self.posted, self.timeout = json, timeout
         if self.error is not None:
             return _FakePost(self.error)
         return _FakeResponse(self.status, self.body)
@@ -209,113 +223,165 @@ def transfer_webhook(monkeypatch):
     return _install
 
 
-async def _post_transfer(tm):
-    tm.has_transfer = True
-    resp = {"tool_call_id": "call-1", "call_transfer_number": "+15550100"}
-    return await tm._execute_transfer_call_webhook("transfer_call", "http://backend/process_transfer", None, resp, {})
+async def _call_transfer_tool(tm):
+    """The LLM's transfer_call, down the same tool-call path a live turn takes."""
+    await tm._TaskManager__execute_function_call(
+        "http://backend/process_transfer",
+        "POST",
+        None,
+        None,
+        None,
+        {},
+        {"turn_id": 1, "sequence_id": 1},
+        "synthesizer",
+        "transfer_call",
+        model_response=[{"id": "call-1"}],
+        tool_call_id="call-1",
+    )
 
 
-async def test_refused_transfer_clears_the_flag_and_resumes_once(transfer_webhook):
-    tm, _ = _transfer_call(has_transfer=False, transfer_call_params={"provider": "trunk"})
+def _tool_result(tm):
+    return json.loads(next(m["content"] for m in tm.conversation_history.messages if m.get("tool_call_id") == "call-1"))
+
+
+async def test_refused_transfer_is_answered_inside_the_tool_call_turn(transfer_webhook):
+    tm, _ = _transfer_call(transfer_call_params={"provider": "trunk"})
     transfer_webhook(status=409, body='{"success": false, "message": "at channel limit"}')
 
-    refusal = await _post_transfer(tm)
-    await asyncio.gather(*tm._transfer_tasks)
+    await _call_transfer_tool(tm)
 
-    assert refusal == "at channel limit"
     assert tm.has_transfer is False
-    tm.conversation_history.replace_tool_result.assert_called_once_with(
-        "call-1", '{"status": "failed", "message": "at channel limit"}'
-    )
-    tm._inject_and_run_llm.assert_awaited_once_with(TRANSFER_FAILED_RESUME_MESSAGE.format(cause="at channel limit"))
+    assert tm.check_if_user_online is True
+    assert _tool_result(tm) == {"status": "failed", "message": "at channel limit"}
+    # Inline, so the follow-up belongs to the running llm_task and barge-in can cancel it.
+    tm._TaskManager__do_llm_generation.assert_awaited_once()
+    tm._inject_and_run_llm.assert_not_awaited()
+    assert tm._transfer_tasks == set()
+    assert tm._transfer_reconcile_task is None
     assert tm.transfer_call_events[-1]["success"] is False
 
 
-async def test_accepted_transfer_keeps_the_flag(transfer_webhook):
-    tm, _ = _transfer_call(has_transfer=False, transfer_call_params={"provider": "trunk"})
-    transfer_webhook(status=200, body='{"success": true, "status": "dialing"}')
+async def test_accepted_transfer_keeps_the_flag_and_arms_the_deadline(transfer_webhook):
+    tm, _ = _transfer_call(transfer_call_params={"provider": "trunk"})
+    transfer_webhook(status=200, body='{"success": true, "message": "Transfer initiated"}')
 
-    refusal = await _post_transfer(tm)
+    await _call_transfer_tool(tm)
 
-    assert refusal is None
     assert tm.has_transfer is True
-    assert tm._transfer_reconcile_task is None
-    tm._inject_and_run_llm.assert_not_awaited()
+    assert tm._transfer_reconcile_task is not None
+    tm._TaskManager__do_llm_generation.assert_not_awaited()
     assert tm.transfer_call_events[-1]["success"] is True
 
 
-async def test_ambiguous_transfer_arms_the_reconcile_timer_which_fires_once(transfer_webhook, monkeypatch):
+async def test_the_deadline_resumes_once_when_the_fork_never_reports(transfer_webhook, monkeypatch):
     monkeypatch.setenv("TRANSFER_RECONCILE_S", "0.01")
-    tm, _ = _transfer_call(has_transfer=False, transfer_call_params={"provider": "trunk"})
+    tm, _ = _transfer_call(transfer_call_params={"provider": "trunk"})
     transfer_webhook(error=ConnectionError("backend unreachable"))
 
-    refusal = await _post_transfer(tm)
-    assert refusal is None
+    await _call_transfer_tool(tm)
     assert tm.has_transfer is True
-    reconcile = tm._transfer_reconcile_task
-    assert reconcile is not None
-    await asyncio.gather(reconcile)
+    await asyncio.gather(tm._transfer_reconcile_task)
     await asyncio.gather(*tm._transfer_tasks)
 
     assert tm.has_transfer is False
+    assert _tool_result(tm)["status"] == "failed"
     tm._inject_and_run_llm.assert_awaited_once_with(
         TRANSFER_FAILED_RESUME_MESSAGE.format(cause="transfer status unknown")
     )
     assert tm._transfer_tasks == set()
 
 
-async def test_transfer_failed_frame_cancels_the_reconcile_timer(transfer_webhook, monkeypatch):
+async def test_transfer_failed_frame_resumes_once_and_cancels_the_deadline(transfer_webhook, monkeypatch):
     monkeypatch.setenv("TRANSFER_RECONCILE_S", "30")
-    tm, handler = _transfer_call(has_transfer=False, transfer_call_params={"provider": "trunk"})
-    transfer_webhook(error=ConnectionError("backend unreachable"))
+    tm, handler = _transfer_call(transfer_call_params={"provider": "trunk"})
+    transfer_webhook()
 
-    await _post_transfer(tm)
+    await _call_transfer_tool(tm)
     reconcile = tm._transfer_reconcile_task
-    await handler.process_message({"type": "transfer_failed", "cause": "NO_ANSWER"})
+    await handler.process_message({"type": "transfer_failed", "cause": "USER_BUSY"})
     await asyncio.gather(*tm._transfer_tasks, return_exceptions=True)
 
     assert reconcile.cancelled()
-    assert tm._transfer_reconcile_task is None
-    tm._inject_and_run_llm.assert_awaited_once_with(TRANSFER_FAILED_RESUME_MESSAGE.format(cause="NO_ANSWER"))
+    assert tm.has_transfer is False
+    assert _tool_result(tm) == {"status": "failed", "message": "USER_BUSY"}
+    # Same injection path as the silence nudge, so the turn never surfaces as caller speech.
+    tm._inject_and_run_llm.assert_awaited_once_with(TRANSFER_FAILED_RESUME_MESSAGE.format(cause="USER_BUSY"))
 
 
 async def test_transfer_provider_comes_from_transfer_call_params(transfer_webhook):
-    tm, _ = _transfer_call(has_transfer=False, transfer_call_params={"provider": "trunk", "sub_account_id": "sa-1"})
+    tm, _ = _transfer_call(transfer_call_params={"provider": "trunk", "sub_account_id": "sa-1"})
     session = transfer_webhook()
 
-    await _post_transfer(tm)
+    await _call_transfer_tool(tm)
 
     assert session.posted["provider"] == "trunk"
     assert session.posted["sub_account_id"] == "sa-1"
     assert tm.transfer_call_events[0]["provider"] == "trunk"
     assert tm.tools["input"].io_provider == "freeswitch"
+    # The POST runs inside one LLM generation, so it has to give up before that generation does.
+    assert session.timeout.total < LLM_GENERATION_TIMEOUT_S
 
 
 async def test_transfer_provider_falls_back_to_the_fork_transport(transfer_webhook):
-    tm, _ = _transfer_call(has_transfer=False, transfer_call_params={"sub_account_id": "sa-1"})
+    tm, _ = _transfer_call(transfer_call_params={"sub_account_id": "sa-1"})
     session = transfer_webhook()
 
-    await _post_transfer(tm)
+    await _call_transfer_tool(tm)
 
     assert session.posted["provider"] == "freeswitch"
 
 
-async def test_transfer_failed_resumes_the_conversation_once():
-    tm, handler = _transfer_call(has_transfer=True)
+@pytest.mark.parametrize(
+    "context_data,call_sid",
+    [({}, "exec-1"), ({"recipient_data": {"call_sid": "fs-uuid-1"}}, "fs-uuid-1")],
+    ids=["run_id_when_the_context_has_none", "the_fork_call_uuid"],
+)
+async def test_the_transfer_post_always_carries_a_call_sid(transfer_webhook, context_data, call_sid):
+    # /process_transfer declares call_sid required, so a missing one is a 422 before any transfer.
+    tm, _ = _transfer_call(transfer_call_params={"provider": "trunk"}, context_data=context_data)
+    session = transfer_webhook()
 
-    await handler.process_message({"type": "transfer_failed", "cause": "USER_BUSY"})
-    await asyncio.gather(tm._transfer_failed_task)
+    await _call_transfer_tool(tm)
 
-    assert tm.has_transfer is False
-    # Same injection path as the silence nudge, so the turn never surfaces as caller speech.
-    tm._inject_and_run_llm.assert_awaited_once_with(TRANSFER_FAILED_RESUME_MESSAGE.format(cause="USER_BUSY"))
-    assert "[transfer failed]" in tm._inject_and_run_llm.await_args.args[0]
+    assert session.posted["call_sid"] == call_sid
 
 
 async def test_transfer_failed_without_a_pending_transfer_is_ignored():
-    tm, handler = _transfer_call(has_transfer=False)
+    tm, handler = _transfer_call(transfer_call_params={"provider": "trunk"})
 
     await handler.process_message({"type": "transfer_failed", "cause": "NO_ANSWER"})
 
-    assert tm._transfer_failed_task is None
+    assert tm._transfer_tasks == set()
     tm._inject_and_run_llm.assert_not_awaited()
+
+
+async def test_s2s_model_is_told_the_transfer_failed():
+    tm, handler = _transfer_call(True, transfer_call_params={"provider": "trunk"})
+    tm.s2s_config = {"provider": "openai_realtime"}
+    tm.tools["s2s"] = MagicMock(trigger_response=AsyncMock())
+
+    await handler.process_message({"type": "transfer_failed", "cause": "NO_ANSWER"})
+    await asyncio.gather(*tm._transfer_tasks)
+
+    assert tm.has_transfer is False
+    tm.tools["s2s"].trigger_response.assert_awaited_once_with(
+        instructions=TRANSFER_FAILED_RESUME_MESSAGE.format(cause="NO_ANSWER")
+    )
+    tm._inject_and_run_llm.assert_not_awaited()
+
+
+@pytest.mark.parametrize("has_transfer", [True, False], ids=["ringing", "no_transfer"])
+async def test_dtmf_is_dropped_while_a_trunk_transfer_rings(has_transfer):
+    tm, _ = _transfer_call(has_transfer, transfer_call_params={"provider": "trunk"})
+    tm.queues = {"dtmf": asyncio.Queue()}
+    tm.dtmf_events = []
+    tm._TaskManager__get_updated_meta_info = lambda meta_info: {**meta_info, "sequence_id": 1}
+    tm._handle_transcriber_output = AsyncMock()
+    consumer = asyncio.create_task(tm.inject_digits_to_conversation())
+
+    tm.queues["dtmf"].put_nowait("12")
+    await asyncio.sleep(0.01)
+    consumer.cancel()
+    await asyncio.gather(consumer, return_exceptions=True)
+
+    assert tm._handle_transcriber_output.await_count == (0 if has_transfer else 1)
