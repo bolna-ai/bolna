@@ -45,6 +45,32 @@ def tool_names(custom_tools):
     return sorted((custom_tools or {}).get("tools_params") or {})
 
 
+# Custom tool names carry this prefix; a model may call one without it.
+CUSTOM_TOOL_PREFIX = "custom_task_"
+
+
+def resolve_tool_name(name, tools_params):
+    """Return the tools_params key a model-emitted tool name refers to.
+
+    An exact key wins. Otherwise the name is matched with surrounding whitespace and any
+    namespace removed, with or without the custom tool prefix, then ignoring case. If no
+    single key matches, the name is returned unchanged.
+    """
+    if not name or not tools_params or name in tools_params:
+        return name
+    bare = name.strip().rsplit(".", 1)[-1]
+    candidates = (bare, CUSTOM_TOOL_PREFIX + bare)
+    resolved = next((candidate for candidate in candidates if candidate in tools_params), None)
+    if resolved is None:
+        wanted = {candidate.lower() for candidate in candidates}
+        matches = [key for key in tools_params if key.lower() in wanted]
+        if len(matches) != 1:
+            return name
+        resolved = matches[0]
+    logger.warning(f"Model called tool {name!r}; resolved to configured tool {resolved!r}")
+    return resolved
+
+
 def _is_disallowed_ip(ip):
     """True if ``ip`` (an ``ipaddress`` object) is not safe to connect to."""
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:

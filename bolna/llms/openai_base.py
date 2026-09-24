@@ -17,7 +17,7 @@ from .llm import BaseLLM
 from .message_models import MessageFormatAdapter, strip_internal_keys
 from .routing_stream import read_routing_stream
 from .types import APIParams, LLMStreamChunk, LatencyData, FunctionCallPayload
-from bolna.helpers.function_calling_helpers import redacted_url
+from bolna.helpers.function_calling_helpers import redacted_url, resolve_tool_name
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -209,6 +209,7 @@ class OpenAICompatibleLLM(BaseLLM):
                 return None
             args_str, args_recovered = "{}", True
 
+        func_name = resolve_tool_name(func_name, self.api_params)
         if func_name not in self.api_params:
             logger.warning(f"Text tool call rescue: '{func_name}' not in api_params, falling back to TTS")
             return None
@@ -410,7 +411,7 @@ class OpenAICompatibleLLM(BaseLLM):
             return None
 
         first_item_id = next(iter(func_call_args))
-        func_name = func_call_names[first_item_id]
+        func_name = resolve_tool_name(func_call_names[first_item_id], self.api_params)
         call_id = func_call_ids[first_item_id]
         arguments_str = func_call_args[first_item_id]
 

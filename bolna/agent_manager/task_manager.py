@@ -56,6 +56,7 @@ from bolna.constants import (
 )
 from bolna.helpers.function_calling_helpers import (
     redacted_url,
+    resolve_tool_name,
     trigger_api,
     computed_api_response,
     prepare_api_request,
@@ -3612,6 +3613,14 @@ class TaskManager(BaseManager):
             )
             self.execute_function_call_task = None
             return
+
+        tools_params = self.kwargs.get("api_tools", {}).get("tools_params", {}) or {}
+        tool_name = resolve_tool_name(called_fun, tools_params)
+        if tool_name != called_fun:
+            tool_conf = tools_params[tool_name]
+            called_fun, url, param = tool_name, tool_conf.get("url"), tool_conf.get("param")
+            api_token, headers = tool_conf.get("api_token"), tool_conf.get("headers")
+            method = (tool_conf.get("method") or "GET").lower()
 
         await self.wait_for_current_message()
 
@@ -8668,7 +8677,7 @@ class TaskManager(BaseManager):
         s2s = self.tools["s2s"]
         meta_info = {"request_id": self.task_id, "sequence_id": -1, "turn_id": None}
         tools_params = self.kwargs.get("api_tools", {}).get("tools_params", {}) or {}
-        params = tools_params.get(event.name, {}) or {}
+        params = tools_params.get(resolve_tool_name(event.name, tools_params), {}) or {}
         try:
             args = json.loads(event.arguments or "{}")
         except ValueError:
