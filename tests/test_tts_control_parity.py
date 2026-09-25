@@ -157,6 +157,22 @@ def test_sarvam_v2_loudness_is_on_http_and_websocket_payloads():
     assert synth._http_payload("hello")["loudness"] == 1.8
 
 
+@pytest.mark.parametrize("model", ["bulbul:v2", "bulbul:v3"])
+def test_sarvam_speed_is_on_http_and_websocket_payloads(model):
+    synth = SarvamSynthesizer(
+        voice="Ritu",
+        voice_id="ritu",
+        model=model,
+        language="hi-IN",
+        speed=1.4,
+        synthesizer_key="test-key",
+        task_manager_instance=_task_manager(),
+    )
+
+    assert synth._config_message()["data"]["pace"] == 1.4
+    assert synth._http_payload("hello")["pace"] == 1.4
+
+
 def test_sarvam_v2_accepts_documented_loudness_minimum():
     synth = SarvamSynthesizer(
         voice="Ritu",
