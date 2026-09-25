@@ -70,6 +70,7 @@ class LiteLLM(BaseLLM):
 
         answer, buffer = "", ""
         first_token_time = None
+        finish_reason = None
 
         model_args = self.model_args.copy()
         model_args["messages"] = strip_internal_keys(messages)
@@ -128,6 +129,7 @@ class LiteLLM(BaseLLM):
 
             choice = chunk["choices"][0]
             delta = choice.get("delta", {})
+            finish_reason = choice.get("finish_reason") or finish_reason
 
             if hasattr(delta, "tool_calls") and delta.tool_calls and accumulator:
                 if buffer:
@@ -158,6 +160,8 @@ class LiteLLM(BaseLLM):
 
         if latency_data:
             latency_data.total_stream_duration_ms = now_ms() - start_time
+        if isinstance(meta_info, dict):
+            meta_info["llm_finish_reason"] = finish_reason
 
         if accumulator and accumulator.final_tool_calls:
             api_call_payload = accumulator.build_api_payload(model_args, meta_info, answer)

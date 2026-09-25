@@ -69,6 +69,7 @@ Pre-recorded personal greetings
 (e.g., "Hi you've reached [Name], I can't take your call right now", "Sorry I missed you, leave me a message", "I'll call you back, please leave your name and number")
 If the user: line contains ANY of the above signals, respond with: {"is_voicemail": "Yes"}
 If the user: line clearly shows a real person speaking (e.g., "Hello?", "Haan", "Haan bolo", "Bol", "Who is this?", any natural two-way greeting), respond with: {"is_voicemail": "No"}
+Call-recording notices are NOT voicemail signals, even under approximate matching: "This call is now being recorded", "This call is being recorded", "This call may be recorded for quality and training purposes", "यह कॉल रिकॉर्ड की जा रही है" are played by the person's phone or network while a real person is on the line. If the user: line is only such a notice, with or without a greeting, respond with: {"is_voicemail": "No"}. It is voicemail only if the same line also contains one of the signals above, such as "leave a message" or "after the tone".
 
 
 Respond only in this JSON format:
