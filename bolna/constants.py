@@ -264,8 +264,12 @@ TRANSFERING_CALL_FILLER = {
 TRANSFER_FAILED_RESUME_MESSAGE = (
     "[transfer failed] The transfer to the human agent did not connect ({cause}). Tell the caller and continue."
 )
-# /process_transfer runs inside one LLM generation, so it must answer well within LLM_GENERATION_TIMEOUT_S.
-TRANSFER_WEBHOOK_TIMEOUT_S = 15.0
+# Above the backend's own originate budget (15 s plus its DB work), inside LLM_GENERATION_TIMEOUT_S.
+TRANSFER_WEBHOOK_TIMEOUT_S = 25.0
+# A trunk target rings this long unless the transfer tool sets ring_timeout.
+TRUNK_TRANSFER_RING_TIMEOUT_S = 30
+# How long past the ring timeout to wait for the fork's transfer_failed before resuming anyway.
+TRANSFER_DEADLINE_MARGIN_S = 15.0
 
 DEFAULT_USER_ONLINE_MESSAGE = "Hey, are you still there?"
 DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION = 6

@@ -350,10 +350,13 @@ def _make_transfer_self(tool_conf):
         _start_api_call_detail=MagicMock(return_value={"latency_ms": 1.0}),
         _extract_api_call_runtime_args=MagicMock(return_value={}),
         _finalize_api_call_detail=MagicMock(),
+        _transfer_failure_followup=False,
     )
     # The POST itself lives in _execute_transfer_call_webhook; bind the real one so the
     # branch still runs end to end.
     me._execute_transfer_call_webhook = types.MethodType(TaskManager._execute_transfer_call_webhook, me)
+    me._post_transfer_webhook = types.MethodType(TaskManager._post_transfer_webhook, me)
+    me._is_trunk_call = types.MethodType(TaskManager._is_trunk_call, me)
     me._transfer_provider = types.MethodType(TaskManager._transfer_provider, me)
     me._transfer_refusal = types.MethodType(TaskManager._transfer_refusal, me)
     return me
@@ -417,4 +420,4 @@ def test_transfer_branch_fires_before_transfer_post():
     handoff_idx = src.index("_execute_transfer_call_webhook", transfer_idx)
     assert transfer_idx < fire_idx < handoff_idx, "pre-call webhook must fire before the transfer POST"
     # The POST now lives in the extracted helper.
-    assert "session.post" in inspect.getsource(TaskManager._execute_transfer_call_webhook)
+    assert "session.post" in inspect.getsource(TaskManager._post_transfer_webhook)

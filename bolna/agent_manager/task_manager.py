@@ -45,6 +45,8 @@ from bolna.constants import (
     SWITCH_LANGUAGE_TOOL_DEFINITION,
     TRANSFER_FAILED_RESUME_MESSAGE,
     TRANSFER_WEBHOOK_TIMEOUT_S,
+    TRUNK_TRANSFER_RING_TIMEOUT_S,
+    TRANSFER_DEADLINE_MARGIN_S,
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
     RESPONSES_API_MODEL_PREFIXES,
@@ -454,7 +456,10 @@ class TaskManager(BaseManager):
         self._end_call_tool_call_id = None
         self._end_call_hangup_task = None
         self._transfer_tool_call_id = ""
-        self._transfer_reconcile_task = None
+        self._transfer_posting = False
+        self._transfer_early_failure = None
+        self._transfer_failure_followup = False
+        self._transfer_deadline: asyncio.TimerHandle | None = None
         self._transfer_tasks: set[asyncio.Task] = set()
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
@@ -1484,7 +1489,7 @@ class TaskManager(BaseManager):
                     input_kwargs["ws_context_data"] = self.context_data
                     input_kwargs["agent_config"] = {"tasks": [self.task_config]}
             self.tools["input"] = input_handler_class(**input_kwargs)
-            if self.task_config["tools_config"]["input"]["provider"] == TelephonyProvider.FREESWITCH.value:
+            if isinstance(self.tools["input"], FreeSwitchInputHandler):
                 self._attach_freeswitch_input()
             if (
                 not turn_based_conversation
@@ -3457,6 +3462,16 @@ class TaskManager(BaseManager):
                 self.execute_function_call_task = None
                 return
 
+            if self._transfer_failure_followup:
+                # The turn telling the caller a transfer failed must not dial it again straight away.
+                logger.info(f"transfer_call re-emitted right after a failed transfer for run_id={self.run_id}")
+                self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
+                self.conversation_history.append_tool_result(
+                    resp.get("tool_call_id", ""),
+                    json.dumps({"status": "failed", "message": "The transfer just failed. Do not retry it now."}),
+                )
+                return
+
             if self.has_transfer:
                 logger.info(f"transfer_call already initiated for run_id={self.run_id}; ignoring duplicate trigger")
                 duplicate_tool_result = json.dumps(
@@ -3503,16 +3518,20 @@ class TaskManager(BaseManager):
                     meta_info,
                     tool_conf.get("pre_call_webhook_param"),
                 )
-            refusal = await self._execute_transfer_call_webhook(called_fun, url, param, resp, meta_info)
-            if refusal is not None:
+            failure = await self._execute_transfer_call_webhook(called_fun, url, param, resp, meta_info)
+            if failure is not None:
                 # The rewritten tool result carries the failure; this follow-up tells the caller.
-                await self.__do_llm_generation(
-                    self.conversation_history.get_copy(),
-                    self._spawn_followup_meta_info(meta_info),
-                    next_step,
-                    should_bypass_synth=meta_info.get("bypass_synth", False),
-                    should_trigger_function_call=True,
-                )
+                self._transfer_failure_followup = True
+                try:
+                    await self.__do_llm_generation(
+                        self.conversation_history.get_copy(),
+                        self._spawn_followup_meta_info(meta_info),
+                        next_step,
+                        should_bypass_synth=meta_info.get("bypass_synth", False),
+                        should_trigger_function_call=True,
+                    )
+                finally:
+                    self._transfer_failure_followup = False
             return
 
         # switch_language tool handler (injected in BOTH flows): waits for in-flight
@@ -4622,10 +4641,10 @@ class TaskManager(BaseManager):
         return (self.transfer_call_params or {}).get("provider") or self.tools["input"].io_provider
 
     def _is_trunk_call(self) -> bool:
-        return self._transfer_provider() == TelephonyProvider.TRUNK.value
+        return (self.transfer_call_params or {}).get("provider") == TelephonyProvider.TRUNK.value
 
     def _transfer_refusal(self, status: int, body: str) -> str | None:
-        """Reason when /process_transfer refused the transfer, None when it was accepted."""
+        """Reason when /process_transfer refused the transfer, None when it was accepted or is unknown."""
         try:
             parsed = json.loads(body)
         except (TypeError, ValueError):
@@ -4633,27 +4652,60 @@ class TaskManager(BaseManager):
         # The backend answers every provider's refusal with success:false, so each one resumes.
         if isinstance(parsed, dict) and parsed.get("success") is False:
             return str(parsed.get("message") or parsed.get("detail") or f"HTTP {status}")
-        if status >= 400 and self._is_trunk_call():
+        # A bare 5xx may have dialled before failing, so it waits on the deadline instead.
+        if 400 <= status < 500 and self._is_trunk_call():
             return f"HTTP {status}"
         return None
+
+    def _transfer_ring_timeout(self, param) -> int:
+        """How long the trunk target rings: the transfer tool's ring_timeout, else the default."""
+        try:
+            params = json.loads(param) if isinstance(param, str) else (param or {})
+            return int(params.get("ring_timeout") or TRUNK_TRANSFER_RING_TIMEOUT_S)
+        except (AttributeError, TypeError, ValueError):
+            return TRUNK_TRANSFER_RING_TIMEOUT_S
 
     def _fail_transfer(self, reason: str) -> None:
         """Clear the transfer and correct its pre-recorded success so the model knows it failed."""
         self.has_transfer = False
+        self._cancel_transfer_deadline()
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
-        self._cancel_transfer_reconcile()
+        # The ring was not silence: restart the watchdog clocks, as a language switch does.
+        self.last_transmitted_timestamp = time.time()
+        self.time_since_last_spoken_human_word = time.time()
         self.conversation_history.replace_tool_result(
             self._transfer_tool_call_id, json.dumps({"status": "failed", "message": reason})
         )
 
     async def _execute_transfer_call_webhook(self, called_fun, url, param, resp, meta_info) -> str | None:
+        """POST the transfer and settle it: the failure reason when known by then, else None.
+
+        This turn owns the outcome while the POST is in flight, so a fork transfer_failed that beats
+        the backend's answer is only recorded and the caller is resumed once, by this turn.
+        """
+        self._transfer_tool_call_id = resp.get("tool_call_id", "")
+        ring_timeout = self._transfer_ring_timeout(param) if self._is_trunk_call() else None
+        self._transfer_posting, self._transfer_early_failure = True, None
+        try:
+            refusal = await self._post_transfer_webhook(called_fun, url, param, resp, meta_info, ring_timeout)
+        finally:
+            self._transfer_posting = False
+        failure = refusal if refusal is not None else self._transfer_early_failure
+        if failure is not None:
+            logger.warning(f"transfer failed ({failure}) for run_id={self.run_id}; resuming conversation")
+            self._fail_transfer(failure)
+        elif ring_timeout is not None and self.has_transfer:
+            # Accepted or unknown: bound the wait for the fork's transfer_failed.
+            self._arm_transfer_deadline(ring_timeout + TRANSFER_DEADLINE_MARGIN_S)
+        return failure
+
+    async def _post_transfer_webhook(self, called_fun, url, param, resp, meta_info, ring_timeout) -> str | None:
         """POST the transfer payload to the telephony webhook and record transfer_start/end.
 
         Split out of __execute_function_call so the speech-to-speech path can hand off a call
         without duplicating the payload, mock-provider and event-recording behaviour.
         Returns the refusal reason when the webhook rejected the transfer, else None.
         """
-        self._transfer_tool_call_id = resp.get("tool_call_id", "")
         await asyncio.sleep(2)
         try:
             from_number = self.context_data["recipient_data"]["from_number"]
@@ -4694,6 +4746,9 @@ class TaskManager(BaseManager):
 
         if self.tools["input"].io_provider != "default":
             payload["call_sid"] = self.tools["input"].get_call_sid()
+        if ring_timeout is not None:
+            # Sent explicitly so the backend rings exactly as long as the deadline waits.
+            payload["ring_timeout"] = ring_timeout
 
         self.transfer_call_events.append(
             {
@@ -4833,8 +4888,6 @@ class TaskManager(BaseManager):
                     )
                     _transfer_end_recorded = True
                     if refusal is not None:
-                        logger.warning(f"transfer refused ({refusal}) for run_id={self.run_id}; resuming conversation")
-                        self._fail_transfer(refusal)
                         return refusal
             except Exception as transfer_exc:
                 if self._is_trunk_call():
@@ -4873,9 +4926,6 @@ class TaskManager(BaseManager):
                             "success": None,
                         }
                     )
-            # Accepted or unknown: bound the wait for the fork's transfer_failed.
-            if self._is_trunk_call():
-                self._arm_transfer_reconcile()
             return None
 
     async def _listen_llm_input_queue(self):
@@ -4966,7 +5016,9 @@ class TaskManager(BaseManager):
                 await self._process_conversation_task(message, sequence, meta_info)
             else:
                 logger.error("unsupported task type: {}".format(self.task_config["task_type"]))
-            self.llm_task = None
+            # A turn started meanwhile (e.g. a transfer resume) owns llm_task now; keep it cancellable.
+            if self.llm_task is asyncio.current_task():
+                self.llm_task = None
         except BolnaComponentError as e:
             self.response_in_pipeline = False
             self._synthesis_awaiting_first_audio = False
@@ -7890,8 +7942,12 @@ class TaskManager(BaseManager):
 
     def on_transfer_failed(self, cause: str) -> None:
         """The trunk target never connected: record the failure and resume with one turn."""
-        if not self._transfer_pending:
+        if self.conversation_ended or not self._transfer_pending:
             logger.info(f"transfer_failed ({cause}) with no transfer pending for run_id={self.run_id}; ignoring")
+            return
+        if self._transfer_posting:
+            # The transfer's own turn resumes the caller once its POST returns.
+            self._transfer_early_failure = cause
             return
         logger.info(f"transfer_failed ({cause}) for run_id={self.run_id}; resuming conversation")
         self._fail_transfer(cause)
@@ -7901,22 +7957,17 @@ class TaskManager(BaseManager):
             return
         self._track_transfer_task(self._inject_and_run_llm(message))
 
-    def _arm_transfer_reconcile(self) -> None:
-        """Resume once unless the fork or teardown settles the transfer first."""
-        delay = float(os.getenv("TRANSFER_RECONCILE_S", "45"))
-        self._transfer_reconcile_task = self._track_transfer_task(self._reconcile_transfer(delay))
+    def _arm_transfer_deadline(self, delay: float) -> None:
+        """Resume once if the fork never reports how the transfer ended."""
+        self._cancel_transfer_deadline()
+        self._transfer_deadline = asyncio.get_running_loop().call_later(
+            delay, self.on_transfer_failed, "transfer status unknown"
+        )
 
-    async def _reconcile_transfer(self, delay: float) -> None:
-        await asyncio.sleep(delay)
-        if self.conversation_ended or not self.has_transfer:
-            return
-        logger.warning(f"transfer outcome still unknown after {delay}s for run_id={self.run_id}; resuming")
-        self.on_transfer_failed("transfer status unknown")
-
-    def _cancel_transfer_reconcile(self) -> None:
-        task, self._transfer_reconcile_task = self._transfer_reconcile_task, None
-        if task is not None and task is not asyncio.current_task() and not task.done():
-            task.cancel()
+    def _cancel_transfer_deadline(self) -> None:
+        if self._transfer_deadline is not None:
+            self._transfer_deadline.cancel()
+            self._transfer_deadline = None
 
     def _track_transfer_task(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -8837,11 +8888,11 @@ class TaskManager(BaseManager):
                 # param is the configured tool body, which is where call_transfer_number
                 # lives; the model's own arguments go in as the response, same as the llm
                 # path. Passing the arguments as both leaves the webhook no destination.
-                refusal = await self._execute_transfer_call_webhook(
+                failure = await self._execute_transfer_call_webhook(
                     event.name, params.get("url"), params.get("param"), args, meta_info
                 )
-                if refusal is not None:
-                    result = json.dumps({"status": "failed", "message": refusal})
+                if failure is not None:
+                    result = json.dumps({"status": "failed", "message": failure})
                 else:
                     result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
         else:
@@ -9120,6 +9171,7 @@ class TaskManager(BaseManager):
             )
             tasks_to_cancel.append(process_task_cancellation(self._lid_idle_watcher_task, "lid_idle_watcher_task"))
             tasks_to_cancel.append(process_task_cancellation(self.regen_settle_task, "regen_settle_task"))
+            self._cancel_transfer_deadline()
             for task in list(self._transfer_tasks):
                 tasks_to_cancel.append(process_task_cancellation(task, "transfer_task"))
             # Sync cancel BEFORE clearing, so an in-flight render can't repopulate the
