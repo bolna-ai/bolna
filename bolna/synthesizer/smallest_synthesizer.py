@@ -8,6 +8,7 @@ import aiohttp
 import websockets
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.constants import SMALLEST_TTS_SPEED_MAX, SMALLEST_TTS_SPEED_MIN
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 
@@ -28,6 +29,7 @@ class SmallestSynthesizer(StreamSynthesizer):
         stream=False,
         buffer_size=400,
         synthesizer_key=None,
+        speed=1.0,
         **kwargs,
     ):
         super().__init__(
@@ -41,6 +43,9 @@ class SmallestSynthesizer(StreamSynthesizer):
         self.model = model
         self.sampling_rate = int(sampling_rate)
         self.language = language
+        self.speed = float(speed)
+        if not SMALLEST_TTS_SPEED_MIN <= self.speed <= SMALLEST_TTS_SPEED_MAX:
+            raise ValueError(f"Smallest speed must be between {SMALLEST_TTS_SPEED_MIN} and {SMALLEST_TTS_SPEED_MAX}")
 
         # Unified Waves endpoints (docs.smallest.ai -> /text-to-speech).
         # HTTP: POST /waves/v1/tts, streaming: WSS /waves/v1/tts/live
@@ -61,6 +66,7 @@ class SmallestSynthesizer(StreamSynthesizer):
             "model": self.model,
             "language": self.language,
             "sample_rate": self.sampling_rate,
+            "speed": self.speed,
         }
 
     # ------------------------------------------------------------------
@@ -167,15 +173,19 @@ class SmallestSynthesizer(StreamSynthesizer):
     # HTTP
     # ------------------------------------------------------------------
 
-    async def _generate_http(self, text):
-        logger.info(f"text {text}")
-        payload = {
+    def _http_payload(self, text):
+        return {
             "text": text,
             "voice_id": self.voice_id,
             "model": self.model,
             "sample_rate": self.sampling_rate,
             "output_format": self._get_audio_format(),
+            "speed": self.speed,
         }
+
+    async def _generate_http(self, text):
+        logger.info(f"text {text}")
+        payload = self._http_payload(text)
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",

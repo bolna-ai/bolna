@@ -351,6 +351,27 @@ END_CALL_TOOL_DEFINITION = {
     },
 }
 
+# Provider TTS controls. Config models and synthesizer adapters share these
+# bounds so validation cannot drift between agent setup and direct package use.
+CARTESIA_VOLUME_MIN = 0.5
+CARTESIA_VOLUME_MAX = 2.0
+CARTESIA_VOLUME_MODELS = {"sonic-3", "sonic-3.5", "sonic-3.6", "sonic-preview"}
+
+DEEPGRAM_AURA_2_SPEED_MIN = 0.7
+DEEPGRAM_AURA_2_SPEED_MAX = 1.5
+
+OPENAI_TTS_SPEED_MIN = 0.25
+OPENAI_TTS_SPEED_MAX = 4.0
+
+RIME_TIME_SCALE_FACTOR_MIN = 0.4
+RIME_TIME_SCALE_FACTOR_MAX = 2.5
+
+SMALLEST_TTS_SPEED_MIN = 0.5
+SMALLEST_TTS_SPEED_MAX = 2.0
+
+SARVAM_LOUDNESS_MIN = 0.3
+SARVAM_LOUDNESS_MAX = 3.0
+
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
     "bulbul:v3": 22050,  # NOTE: Documentation claims 24000, but WAV header shows 22050
