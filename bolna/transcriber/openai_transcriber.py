@@ -245,7 +245,14 @@ class OpenAITranscriber(BaseTranscriber):
             logger.error(f"Error in OpenAI heartbeat: {e}")
 
     async def monitor_utterance_timeout(self):
-        """Force-finalize a committed turn if completed event never arrives."""
+        """Force-finalize a committed turn if completed event never arrives.
+
+        This is a last-resort safety net, not a normal-path timeout — see the comment on
+        OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S. When it does fire, use whatever interim
+        deltas already arrived as a best-effort fallback transcript instead of silently
+        discarding the turn: dropping it with no downstream signal at all means the agent
+        never even knows the caller said anything, and looks like a dead call.
+        """
         try:
             while True:
                 await asyncio.sleep(0.1)
@@ -256,12 +263,27 @@ class OpenAITranscriber(BaseTranscriber):
                 ):
                     elapsed = time.time() - self._commit_time
                     if elapsed > OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S:
+                        turn_id = self.current_turn_id
                         logger.warning(
                             f"Utterance timeout: completed event missing for {elapsed:.1f}s "
-                            f"after commit on turn {self.current_turn_id}. Force-finalizing."
+                            f"after commit on turn {turn_id}. Force-finalizing."
                         )
+                        fallback_transcript = "".join(
+                            d.get("transcript", "") for d in self.current_turn_interim_details
+                        ).strip()
                         self._final_transcript_event.set()
                         self._reset_turn_state()
+                        if fallback_transcript:
+                            logger.warning(
+                                f"Utterance timeout: using {len(fallback_transcript)}-char interim "
+                                f"fallback transcript for turn {turn_id}"
+                            )
+                            await self.push_to_transcriber_queue(
+                                create_ws_data_packet(
+                                    {"type": "transcript", "content": fallback_transcript},
+                                    dict(self.meta_info),
+                                )
+                            )
         except asyncio.CancelledError:
             logger.info("OpenAI utterance timeout task cancelled")
             raise
