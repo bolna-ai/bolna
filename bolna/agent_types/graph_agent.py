@@ -24,7 +24,7 @@ from bolna.helpers.expression_evaluator import evaluate_edge_expression, describ
 from bolna.enums import EdgeConditionType, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM, LiteLLM
-from bolna.providers import SUPPORTED_LLM_PROVIDERS
+from bolna.providers import ORCAROUTER_DEFAULT_BASE_URL, SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 from bolna.constants import (
     LANGUAGE_NAMES,
@@ -38,7 +38,9 @@ from typing import List, Tuple, AsyncGenerator, Optional, Dict, Any
 
 # Conversation providers whose own key authenticates the hangup/voicemail OpenAiLLM hops; any
 # other provider (Gemini, Azure, the LiteLLM backends) needs the platform OpenAI key instead.
-OPENAI_KEYED_PROVIDERS = frozenset(p for p, cls in SUPPORTED_LLM_PROVIDERS.items() if cls is OpenAiLLM)
+OPENAI_KEYED_PROVIDERS = frozenset(
+    p for p, cls in SUPPORTED_LLM_PROVIDERS.items() if isinstance(cls, type) and issubclass(cls, OpenAiLLM)
+)
 
 load_dotenv()
 logger = configure_logger(__name__)
@@ -76,9 +78,16 @@ class GraphAgent(BaseAgent):
         self.variable_types = self.config.get("variable_types") or {}
         self.llm_model = self.config.get("model")
 
-        # Get credentials from config (injected by task_manager) or fall back to env vars
-        self.llm_key = self.config.get("llm_key") or os.getenv("OPENAI_API_KEY")
-        self.base_url = self.config.get("base_url")
+        # Get credentials from config (injected by task_manager) or provider-specific env vars.
+        provider = self.config.get("provider") or self.config.get("llm_provider", "openai")
+        if provider == "orcarouter":
+            self.llm_key = self.config.get("llm_key") or os.getenv("ORCAROUTER_API_KEY")
+            self.base_url = self.config.get("base_url") or os.getenv(
+                "ORCAROUTER_BASE_URL", ORCAROUTER_DEFAULT_BASE_URL
+            )
+        else:
+            self.llm_key = self.config.get("llm_key") or os.getenv("OPENAI_API_KEY")
+            self.base_url = self.config.get("base_url")
         self._base_url_validated = False
 
         self.node_history = [self.current_node_id]
