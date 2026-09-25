@@ -34,7 +34,7 @@ async def generate_via_wrapper(tm, meta_info):
 
 async def test_a_tool_follow_up_keeps_its_empty_turn_event():
     tm = make_tm()
-    outer_meta = {"sequence_id": 3, "turn_id": 3}
+    seen = {}
 
     async def impl(messages, meta_info, *args):
         if meta_info["sequence_id"] == 3:
@@ -42,16 +42,56 @@ async def test_a_tool_follow_up_keeps_its_empty_turn_event():
             # The real tool path hands the follow-up a copy: FunctionCallPayload -> model_dump -> **kwargs.
             copied = FunctionCallPayload(meta_info=meta_info).model_dump()["meta_info"]
             await generate_via_wrapper(tm, {**copied, "sequence_id": 4, "turn_id": 6})
+            seen["outer_list_after_follow_up"] = list(meta_info["_non_fatal_errors"])
         else:
             meta_info.setdefault("_non_fatal_errors", []).append(EMPTY)
 
     tm._TaskManager__do_llm_generation_impl = impl
-    await generate_via_wrapper(tm, outer_meta)
+    await generate_via_wrapper(tm, {"sequence_id": 3, "turn_id": 3})
 
-    assert EMPTY not in outer_meta["_non_fatal_errors"]  # why draining only the turn's own list lost it
+    assert seen["outer_list_after_follow_up"] == [STALE_ID]  # why draining only the turn's own list lost it
     assert tm.non_fatal_llm_error_events == [
         {**EMPTY, "sequence_id": 4, "turn_id": 6},
         {**STALE_ID, "sequence_id": 3, "turn_id": 3},
+    ]
+
+
+async def test_errors_recorded_by_the_hangup_check_are_kept():
+    tm = make_tm()
+    tm._get_next_step = MagicMock(return_value="synthesizer")
+    tm._append_eager_llm_stub = MagicMock()
+    tm.turn_based_conversation = False
+    tm.conversation_history = MagicMock(get_copy=MagicMock(return_value=[]))
+    tm._TaskManager__is_knowledgebase_agent = MagicMock(return_value=True)
+    tm._TaskManager__is_graph_agent = MagicMock(return_value=False)
+    tm.task_id = 1
+    tm.use_llm_to_determine_hangup = True
+    tm.end_call_primary = False
+    tm.conversation_ended = False
+    tm.llm_latencies = SimpleNamespace(turn_latencies=[], other_latencies=[])
+    tm.conversation_start_init_ts = time.time() * 1000
+    tm.check_for_completion_llm = "gpt-4.1-mini"
+    tm.check_for_completion_prompt = "prompt"
+    tm.history = []
+    tm.run_id = None
+    tm.llm_processed_request_ids = set()
+    tm.current_request_id = "r1"
+
+    async def impl(messages, meta_info, *args):
+        meta_info.setdefault("_non_fatal_errors", []).append(EMPTY)
+
+    async def check_for_completion(messages, prompt, meta_info=None):
+        meta_info.setdefault("_non_fatal_errors", []).append(STALE_ID)  # what a Responses API retry records
+        return {"hangup": "No"}, {}
+
+    tm._TaskManager__do_llm_generation_impl = impl
+    tm.tools = {"llm_agent": MagicMock(check_for_completion=check_for_completion)}
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+        await tm._process_conversation_task({"data": "hi"}, 0, {"sequence_id": 5, "turn_id": 7})
+
+    assert tm.non_fatal_llm_error_events == [
+        {**EMPTY, "sequence_id": 5, "turn_id": 7},
+        {**STALE_ID, "sequence_id": 5, "turn_id": 7},
     ]
 
 

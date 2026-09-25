@@ -3899,7 +3899,7 @@ class TaskManager(BaseManager):
         """Bounds one generation call to LLM_GENERATION_TIMEOUT_S. Scoped here (not around the
         whole conversation task) so a hung LLM raises promptly without also racing the
         hangup-decision call or the hangup teardown that can follow it - those can legitimately
-        take a while and must not be cut off mid-way. BOLNA-2563."""
+        take a while and must not be cut off mid-way."""
         # Per generation: tool follow-ups run on a copied meta_info that no caller reads back.
         generation_errors = []
         if isinstance(meta_info, dict):
@@ -3913,10 +3913,16 @@ class TaskManager(BaseManager):
                 timeout=LLM_GENERATION_TIMEOUT_S,
             )
         finally:
-            for error in generation_errors:
-                self.non_fatal_llm_error_events.append(
-                    {**error, "sequence_id": meta_info.get("sequence_id"), "turn_id": meta_info.get("turn_id")}
-                )
+            self.record_non_fatal_llm_errors(meta_info, generation_errors)
+
+    def record_non_fatal_llm_errors(self, meta_info, errors):
+        """Runs as each generation ends, so a follow-up's events precede its parent's: sort by sequence_id."""
+        for error in errors:
+            self.non_fatal_llm_error_events.append(
+                {**error, "sequence_id": meta_info.get("sequence_id"), "turn_id": meta_info.get("turn_id")}
+            )
+        # Cleared so a later writer of the same list (the hangup check) is recorded once, not twice.
+        errors.clear()
 
     async def __do_llm_generation_impl(
         self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False
@@ -4443,6 +4449,8 @@ class TaskManager(BaseManager):
             completion_res, metadata = await self.tools["llm_agent"].check_for_completion(
                 messages, self.check_for_completion_prompt, meta_info=meta_info
             )
+            # The generation's errors were already written out; this records what the hangup check added.
+            self.record_non_fatal_llm_errors(meta_info, meta_info.get("_non_fatal_errors", []))
 
             should_hangup = (
                 str(completion_res.get("hangup", "")).lower() == "yes" if isinstance(completion_res, dict) else False
