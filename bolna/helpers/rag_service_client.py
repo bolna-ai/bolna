@@ -2,6 +2,7 @@ import aiohttp  # type: ignore
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from typing import List, Dict, Any, Optional
@@ -279,11 +280,18 @@ Please respond to the user's query using the above context when relevant. If the
 
 class RAGServiceClientSingleton:
     """
-    Singleton wrapper for RAG service client to avoid creating multiple sessions.
+    URL-keyed pool of RAG service clients.
+
+    A client is reused for requests to the same normalized server URL, while
+    distinct servers receive distinct clients and aiohttp sessions.
     """
 
-    _instance = None
-    _client = None
+    _clients: Dict[str, RAGServiceClient] = {}
+    _clients_lock = threading.Lock()
+
+    @staticmethod
+    def _normalize_url(rag_server_url: str) -> str:
+        return rag_server_url.rstrip("/")
 
     @classmethod
     async def get_client(cls, rag_server_url: str) -> RAGServiceClient:
@@ -296,16 +304,29 @@ class RAGServiceClientSingleton:
         Returns:
             RAGServiceClient instance
         """
-        if cls._instance is None or cls._client is None:
-            cls._client = RAGServiceClient(rag_server_url)
-            cls._instance = cls
+        normalized_url = cls._normalize_url(rag_server_url)
+        with cls._clients_lock:
+            client = cls._clients.get(normalized_url)
+            if client is None:
+                client = RAGServiceClient(normalized_url)
+                cls._clients[normalized_url] = client
 
-        return cls._client
+        return client
+
+    @classmethod
+    async def close_all_clients(cls):
+        """Close every pooled client and empty the pool."""
+        with cls._clients_lock:
+            clients = list(cls._clients.values())
+            cls._clients.clear()
+
+        if clients:
+            await asyncio.gather(*(client.close() for client in clients))
 
     @classmethod
     async def close_client(cls):
-        """Close the client if it exists."""
-        if cls._client:
-            await cls._client.close()
-            cls._client = None
-            cls._instance = None
+        """Close all pooled clients.
+
+        Retained as a compatibility alias for callers of the former singleton.
+        """
+        await cls.close_all_clients()

@@ -2,6 +2,7 @@ import os
 import asyncio
 import uuid
 import traceback
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 import redis.asyncio as redis
@@ -12,6 +13,7 @@ from bolna.helpers.logger_config import configure_logger
 from bolna.models import *
 from bolna.llms import LiteLLM
 from bolna.agent_manager.assistant_manager import AssistantManager
+from bolna.helpers.rag_service_client import RAGServiceClientSingleton
 
 load_dotenv()
 logger = configure_logger(__name__)
@@ -20,7 +22,14 @@ redis_pool = redis.ConnectionPool.from_url(os.getenv("REDIS_URL"), decode_respon
 redis_client = redis.Redis.from_pool(redis_pool)
 active_websockets: List[WebSocket] = []
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    await RAGServiceClientSingleton.close_all_clients()
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
