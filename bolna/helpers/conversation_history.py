@@ -111,6 +111,15 @@ class ConversationHistory:
             }
         )
 
+    def replace_tool_result(self, tool_call_id: str, content: str) -> bool:
+        """Rewrite the most recent tool result recorded for tool_call_id; False when none exists."""
+        for i in range(len(self._messages) - 1, -1, -1):
+            msg = self._messages[i]
+            if msg.get("role") == ChatRole.TOOL and msg.get("tool_call_id") == tool_call_id:
+                msg["content"] = content
+                return True
+        return False
+
     def attach_tool_calls_to_last_response(self, tool_calls: list):
         if self._messages and self._messages[-1].get("role") == ChatRole.ASSISTANT:
             self._messages[-1]["tool_calls"] = tool_calls
