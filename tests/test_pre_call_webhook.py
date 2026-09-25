@@ -350,7 +350,7 @@ def _make_transfer_self(tool_conf):
         _start_api_call_detail=MagicMock(return_value={"latency_ms": 1.0}),
         _extract_api_call_runtime_args=MagicMock(return_value={}),
         _finalize_api_call_detail=MagicMock(),
-        _transfer_failure_followup=False,
+        _transfer_retry_blocked=False,
     )
     # The POST itself lives in _execute_transfer_call_webhook; bind the real one so the
     # branch still runs end to end.

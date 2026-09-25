@@ -460,7 +460,8 @@ class TaskManager(BaseManager):
         self._transfer_tool_call_id = ""
         self._transfer_posting = False
         self._transfer_early_failure = None
-        self._transfer_failure_followup = False
+        self._transfer_connected = False
+        self._transfer_failed_at: float | None = None
         self._transfer_retry_declined = False
         self._transfer_deadline: asyncio.TimerHandle | None = None
         self._transfer_tasks: set[asyncio.Task] = set()
@@ -1511,8 +1512,7 @@ class TaskManager(BaseManager):
         """The fork reports trunk transfer outcomes back and needs a call id for /process_transfer."""
         handler = self.tools["input"]
         handler.on_transfer_failed = self.on_transfer_failed
-        # Bridged: the fork stops next, so only the deadline has to go.
-        handler.on_transfer_connected = self._cancel_transfer_deadline
+        handler.on_transfer_connected = self.on_transfer_connected
         recipient_data = (self.context_data or {}).get("recipient_data") or {}
         handler.call_sid = recipient_data.get("call_sid") or self.run_id
 
@@ -3467,8 +3467,8 @@ class TaskManager(BaseManager):
                 self.execute_function_call_task = None
                 return
 
-            if self._transfer_failure_followup:
-                # The turn telling the caller a transfer failed must not dial it again straight away.
+            if self._transfer_retry_blocked:
+                # Until the caller speaks, a retry is the model's own idea (the explanation, a nudge).
                 logger.info(f"transfer_call re-emitted right after a failed transfer for run_id={self.run_id}")
                 self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
                 self.conversation_history.append_tool_result(
@@ -3536,14 +3536,12 @@ class TaskManager(BaseManager):
             failure = await self._execute_transfer_call_webhook(called_fun, url, param, resp, meta_info)
             if failure is not None:
                 # The rewritten tool result carries the failure; this follow-up tells the caller.
-                await self._explain_failed_transfer(
-                    lambda: self.__do_llm_generation(
-                        self.conversation_history.get_copy(),
-                        self._spawn_followup_meta_info(meta_info),
-                        next_step,
-                        should_bypass_synth=meta_info.get("bypass_synth", False),
-                        should_trigger_function_call=True,
-                    )
+                await self.__do_llm_generation(
+                    self.conversation_history.get_copy(),
+                    self._spawn_followup_meta_info(meta_info),
+                    next_step,
+                    should_bypass_synth=meta_info.get("bypass_synth", False),
+                    should_trigger_function_call=True,
                 )
             return
 
@@ -4690,8 +4688,9 @@ class TaskManager(BaseManager):
         self._cancel_transfer_deadline()
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
         # The ring was not silence: restart the watchdog clocks, as a language switch does.
-        self.last_transmitted_timestamp = time.time()
-        self.time_since_last_spoken_human_word = time.time()
+        now = time.time()
+        self.last_transmitted_timestamp = self.time_since_last_spoken_human_word = now
+        self._transfer_failed_at, self._transfer_retry_declined = now, False
         self.conversation_history.replace_tool_result(
             self._transfer_tool_call_id, json.dumps({"status": "failed", "message": reason})
         )
@@ -4704,7 +4703,7 @@ class TaskManager(BaseManager):
         """
         self._transfer_tool_call_id = resp.get("tool_call_id", "")
         ring_timeout = self._transfer_ring_timeout(param) if self._is_trunk_call() else None
-        self._transfer_posting, self._transfer_early_failure = True, None
+        self._transfer_posting, self._transfer_early_failure, self._transfer_connected = True, None, False
         try:
             refusal = await self._post_transfer_webhook(called_fun, url, param, resp, meta_info, ring_timeout)
         finally:
@@ -4713,7 +4712,7 @@ class TaskManager(BaseManager):
         if failure is not None:
             logger.warning(f"transfer failed ({failure}) for run_id={self.run_id}; resuming conversation")
             self._fail_transfer(failure)
-        elif ring_timeout is not None and self.has_transfer:
+        elif ring_timeout is not None and self.has_transfer and not self._transfer_connected:
             # Accepted or unknown: bound the wait for the fork's transfer_failed.
             self._arm_transfer_deadline(ring_timeout + TRANSFER_DEADLINE_MARGIN_S)
         return failure
@@ -7975,19 +7974,21 @@ class TaskManager(BaseManager):
         self._fail_transfer(cause)
         message = TRANSFER_FAILED_RESUME_MESSAGE.format(cause=cause)
         if self.__is_s2s():
-            # The model answers on its own schedule, so the guard holds until the caller next speaks.
-            self._transfer_failure_followup = True
             self._track_transfer_task(self.tools["s2s"].trigger_response(instructions=message))
             return
-        self._track_transfer_task(self._explain_failed_transfer(lambda: self._inject_and_run_llm(message)))
+        self._track_transfer_task(self._inject_and_run_llm(message))
 
-    async def _explain_failed_transfer(self, turn) -> None:
-        """Run the turn that tells the caller a transfer failed; that turn may not dial it again."""
-        self._transfer_failure_followup, self._transfer_retry_declined = True, False
-        try:
-            await turn()
-        finally:
-            self._transfer_failure_followup = False
+    def on_transfer_connected(self) -> None:
+        """Bridged: the fork stops next, so no deadline is needed, not even one armed after the POST."""
+        self._transfer_connected = True
+        self._cancel_transfer_deadline()
+
+    @property
+    def _transfer_retry_blocked(self) -> bool:
+        """A transfer failed and the caller has not spoken since, so a retry would be the model's alone."""
+        return (
+            self._transfer_failed_at is not None and self.time_since_last_spoken_human_word <= self._transfer_failed_at
+        )
 
     def _arm_transfer_deadline(self, delay: float) -> None:
         """Resume once if the fork never reports how the transfer ended."""
@@ -8681,15 +8682,16 @@ class TaskManager(BaseManager):
                     self.conversation_history.append_assistant(event.content)
 
             elif isinstance(event, s2s_events.InputTranscript):
+                if event.content:
+                    # Final or not, this is the caller speaking; Gemini can flush it after a FunctionCall.
+                    self.time_since_last_spoken_human_word = time.time()
                 if event.is_final and event.content:
                     logger.info(f"S2S caller: {event.content[:200]}")
                     self.user_spoke = True
                     self.conversation_history.append_user(event.content)
-                    self.time_since_last_spoken_human_word = time.time()
                     # Cleared here rather than in the output loop: the prompt's audio is not
                     # distinguishable from any other turn, but the caller answering is.
                     self.asked_if_user_is_still_there = False
-                    self._transfer_failure_followup = False  # the caller may ask for the transfer again
                     self.interruption_manager.on_user_speech_ended()
 
             elif isinstance(event, s2s_events.FunctionCall):
@@ -8913,7 +8915,7 @@ class TaskManager(BaseManager):
                 }
             )
         elif event.name.startswith("transfer_call"):
-            if self._transfer_failure_followup:
+            if self._transfer_retry_blocked:
                 result = json.dumps({"status": "failed", "message": TRANSFER_RETRY_DECLINED_MESSAGE})
             elif self.has_transfer:
                 result = json.dumps({"status": "success", "message": "Transfer already in progress; wait silently."})
@@ -8927,7 +8929,6 @@ class TaskManager(BaseManager):
                     event.name, params.get("url"), params.get("param"), args, meta_info
                 )
                 if failure is not None:
-                    self._transfer_failure_followup = True
                     result = json.dumps({"status": "failed", "message": failure})
                 else:
                     result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})

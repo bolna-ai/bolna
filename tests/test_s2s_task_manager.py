@@ -52,7 +52,7 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
     tm.task_config = {"tools_config": {"input": {"provider": io_provider}}}
     tm._s2s_tool_tasks = set()
     tm._s2s_hangup_after_response = False
-    tm._transfer_failure_followup = False
+    tm._transfer_failed_at = None
     tm._s2s_started_at = 0  # welcome gate already elapsed
     tm._s2s_welcome_gate_ms = 0
     tm._s2s_welcome_sent = True
@@ -772,9 +772,19 @@ class TestToolDispatch:
         tm._execute_transfer_call_webhook.assert_not_awaited()
         assert "already in progress" in tm.tools["s2s"].send_function_result.await_args.args[2]
 
+    @staticmethod
+    def _refusing_transfer(tm):
+        tm.conversation_config, tm._transfer_tool_call_id, tm._transfer_deadline = {}, "", None
+
+        async def refused(*args):
+            tm._fail_transfer("USER_BUSY")
+            return "USER_BUSY"
+
+        tm._execute_transfer_call_webhook = AsyncMock(side_effect=refused)
+
     async def test_a_transfer_re_emitted_after_a_failure_is_declined(self):
         tm = make_tm(tools_params={"transfer_call": {"url": "https://hook.example/transfer"}})
-        tm._execute_transfer_call_webhook = AsyncMock(return_value="USER_BUSY")
+        self._refusing_transfer(tm)
         with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
             for call_id in ("c1", "c2"):
                 await tm._s2s_execute_tool(
@@ -783,6 +793,29 @@ class TestToolDispatch:
 
         tm._execute_transfer_call_webhook.assert_awaited_once()
         assert "Do not retry" in tm.tools["s2s"].send_function_result.await_args.args[2]
+
+    @pytest.mark.parametrize(
+        "caller_event",
+        [s2s_events.InputTranscript(content="try again", is_final=False), s2s_events.Interrupted()],
+        ids=["partial_transcript", "speech_start"],
+    )
+    async def test_the_caller_speaking_lets_the_transfer_be_retried(self, caller_event):
+        # Gemini can flush the caller's transcript after the FunctionCall it prompted.
+        tm = make_tm(tools_params={"transfer_call": {"url": "https://hook.example/transfer"}})
+        self._refusing_transfer(tm)
+        call = s2s_events.FunctionCall(name="transfer_call", call_id="c1", arguments="{}")
+        with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+            await tm._s2s_execute_tool(call)
+            await asyncio.sleep(0.01)
+
+            async def stream():
+                yield caller_event
+
+            tm.tools["s2s"].receive_events = stream
+            await tm._s2s_event_loop()
+            await tm._s2s_execute_tool(call)
+
+        assert tm._execute_transfer_call_webhook.await_count == 2
 
     async def test_custom_tool_goes_through_trigger_api(self):
         tm = make_tm(tools_params={"book": {"url": "https://api.example/book", "method": "POST"}})

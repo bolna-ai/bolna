@@ -162,7 +162,8 @@ def _transfer_call(has_transfer=False, *, transfer_call_params=None, context_dat
     tm._transfer_tool_call_id = ""
     tm._transfer_posting = False
     tm._transfer_early_failure = None
-    tm._transfer_failure_followup = False
+    tm._transfer_connected = False
+    tm._transfer_failed_at = None
     tm._transfer_retry_declined = False
     tm._transfer_deadline = None
     tm._transfer_tasks = set()
@@ -429,7 +430,7 @@ async def test_the_failure_follow_up_cannot_dial_the_transfer_again(transfer_web
     assert tm.has_transfer is False
 
 
-async def test_the_resume_turn_cannot_dial_the_transfer_again(transfer_webhook):
+async def test_only_the_callers_next_utterance_lets_the_transfer_be_retried(transfer_webhook):
     tm, handler = _transfer_call(transfer_call_params={"provider": "trunk"})
     session = transfer_webhook()
 
@@ -441,10 +442,15 @@ async def test_the_resume_turn_cannot_dial_the_transfer_again(transfer_webhook):
     await _call_transfer_tool(tm)
     await handler.process_message({"type": "transfer_failed", "cause": "NO_ANSWER"})
     await asyncio.gather(*tm._transfer_tasks)
-
+    # A later silence nudge is still the model's own idea.
+    await _call_transfer_tool(tm, tool_call_id="call-3")
     assert session.post_count == 1
     assert _tool_result(tm, "call-2")["status"] == "failed"
-    assert tm._transfer_failure_followup is False
+    assert _tool_result(tm, "call-3")["status"] == "failed"
+
+    tm.time_since_last_spoken_human_word = time.time() + 1  # what the caller's interim transcript stamps
+    await _call_transfer_tool(tm, tool_call_id="call-4")
+    assert session.post_count == 2
 
 
 async def test_no_hangup_while_a_trunk_transfer_rings():
@@ -455,6 +461,16 @@ async def test_no_hangup_while_a_trunk_transfer_rings():
     await tm.process_call_hangup()
 
     assert tm.hangup_triggered is False
+
+
+async def test_a_bridge_reported_during_the_post_arms_no_deadline(transfer_webhook):
+    tm, handler = _transfer_call(transfer_call_params={"provider": "trunk"})
+    transfer_webhook(during=lambda: handler.process_message({"type": "transfer_connected"}))
+
+    await _call_transfer_tool(tm)
+
+    assert tm.has_transfer is True
+    assert tm._transfer_deadline is None
 
 
 async def test_transfer_connected_only_cancels_the_deadline(transfer_webhook):
