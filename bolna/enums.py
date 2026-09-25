@@ -98,6 +98,7 @@ class LLMProvider(str, Enum):
     """Enum for LLM providers."""
 
     OPENAI = "openai"
+    ATLASCLOUD = "atlascloud"
     COHERE = "cohere"
     OLLAMA = "ollama"
     DEEPINFRA = "deepinfra"
