@@ -10,6 +10,7 @@ import websockets
 from websockets.exceptions import InvalidHandshake
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.constants import CARTESIA_VOLUME_MAX, CARTESIA_VOLUME_MIN, CARTESIA_VOLUME_MODELS
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 
@@ -31,6 +32,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
         synthesizer_key=None,
         caching=True,
         speed=1.0,
+        volume=1.0,
         **kwargs,
     ):
         super().__init__(
@@ -45,6 +47,9 @@ class CartesiaSynthesizer(StreamSynthesizer):
         self.language = language
         self.sampling_rate = sampling_rate
         self.speed = speed
+        self.volume = float(volume)
+        if not CARTESIA_VOLUME_MIN <= self.volume <= CARTESIA_VOLUME_MAX:
+            raise ValueError(f"Cartesia volume must be between {CARTESIA_VOLUME_MIN} and {CARTESIA_VOLUME_MAX}")
         self.use_mulaw = kwargs.get("use_mulaw", True)  # web/freeswitch pass False → raw PCM @sampling_rate
         self.stream = True
 
@@ -115,6 +120,12 @@ class CartesiaSynthesizer(StreamSynthesizer):
     # Payload
     # ------------------------------------------------------------------
 
+    def _generation_config(self):
+        generation_config = {"speed": self.speed}
+        if self.model in CARTESIA_VOLUME_MODELS:
+            generation_config["volume"] = self.volume
+        return generation_config
+
     def form_payload(self, text):
         payload = {
             "context_id": self.context_id,
@@ -127,7 +138,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 if self.use_mulaw
                 else {"container": "raw", "encoding": "pcm_s16le", "sample_rate": int(self.sampling_rate)}
             ),
-            "generation_config": {"speed": self.speed},
+            "generation_config": self._generation_config(),
         }
         if text:
             payload["continue"] = True
@@ -284,7 +295,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
             "voice": {"mode": "id", "id": self.voice_id},
             "output_format": output_format or {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
             "language": self.language,
-            "generation_config": {"speed": self.speed},
+            "generation_config": self._generation_config(),
         }
         headers = {"X-API-Key": self.api_key, "Cartesia-Version": "2024-06-10"}
         async with aiohttp.ClientSession() as session:
