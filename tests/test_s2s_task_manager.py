@@ -789,13 +789,13 @@ class TestToolDispatch:
         assert tm.tools["s2s"].send_function_result.await_args.args[2] == '{"ok":1}'
 
     async def test_a_bare_name_runs_the_prefixed_custom_tool(self):
-        # A model may call a custom tool without its prefix; it must still reach the tool and get
-        # the result back under the name it called.
+        # A model may call a custom tool without its prefix; it must still reach the tool, be
+        # recorded under the configured name, and get the result back under the name it called.
         tm = make_tm(tools_params={"custom_task_book": {"url": "https://api.example/book", "method": "POST"}})
         tm._start_api_call_detail = MagicMock(return_value={})
         tm._finalize_api_call_detail = MagicMock()
         with (
-            patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+            patch("bolna.agent_manager.task_manager.convert_to_request_log") as log,
             patch(
                 "bolna.agent_manager.task_manager.trigger_api",
                 new=AsyncMock(return_value={"body": '{"ok":1}', "status_code": 200}),
@@ -804,6 +804,9 @@ class TestToolDispatch:
             await tm._s2s_execute_tool(s2s_events.FunctionCall(name="book", call_id="c1", arguments='{"day":"mon"}'))
 
         assert api.await_args.kwargs["url"] == "https://api.example/book"
+        assert api.await_args.kwargs["called_fun"] == "custom_task_book"
+        assert tm._start_api_call_detail.call_args.kwargs["called_fun"] == "custom_task_book"
+        assert {c.kwargs["tool_name"] for c in log.call_args_list} == {"custom_task_book"}
         assert tm.tools["s2s"].send_function_result.await_args.args[:2] == ("c1", "book")
 
     async def test_custom_tool_forwards_the_configured_headers(self):

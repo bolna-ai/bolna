@@ -3615,14 +3615,6 @@ class TaskManager(BaseManager):
             self.execute_function_call_task = None
             return
 
-        tools_params = self.kwargs.get("api_tools", {}).get("tools_params", {}) or {}
-        tool_name = resolve_tool_name(called_fun, tools_params)
-        if tool_name != called_fun:
-            tool_conf = tools_params[tool_name]
-            called_fun, url, param = tool_name, tool_conf.get("url"), tool_conf.get("param")
-            api_token, headers = tool_conf.get("api_token"), tool_conf.get("headers")
-            method = (tool_conf.get("method") or "GET").lower()
-
         await self.wait_for_current_message()
 
         if self.hangup_triggered or self.conversation_ended:
@@ -8702,25 +8694,26 @@ class TaskManager(BaseManager):
         s2s = self.tools["s2s"]
         meta_info = {"request_id": self.task_id, "sequence_id": -1, "turn_id": None}
         tools_params = self.kwargs.get("api_tools", {}).get("tools_params", {}) or {}
-        params = tools_params.get(resolve_tool_name(event.name, tools_params), {}) or {}
+        tool_name = resolve_tool_name(event.name, tools_params)
+        params = tools_params.get(tool_name, {}) or {}
         try:
             args = json.loads(event.arguments or "{}")
         except ValueError:
             args = {}
 
-        logger.info(f"S2S tool call: {event.name} args={args}")
+        logger.info(f"S2S tool call: {tool_name} args={args}")
         convert_to_request_log(
-            json.dumps({"called_fun": event.name, **args}),
+            json.dumps({"called_fun": tool_name, **args}),
             meta_info,
             self.s2s_model,
             LogComponent.FUNCTION_CALL,
             direction=LogDirection.REQUEST,
             is_cached=False,
             run_id=self.run_id,
-            tool_name=event.name,
+            tool_name=tool_name,
         )
 
-        ends_call = event.name.startswith(END_CALL_FUNCTION_PREFIX)
+        ends_call = tool_name.startswith(END_CALL_FUNCTION_PREFIX)
         if ends_call:
             # A configured hangup message is the goodbye for an s2s call: there is no
             # synthesizer to play it separately, so the model has to speak it.
@@ -8735,22 +8728,22 @@ class TaskManager(BaseManager):
                     ),
                 }
             )
-        elif event.name.startswith("transfer_call"):
+        elif tool_name.startswith("transfer_call"):
             if self.has_transfer:
                 result = json.dumps({"status": "success", "message": "Transfer already in progress; wait silently."})
             else:
                 self.has_transfer = True
-                await self._s2s_before_tool_request(event, args, params, meta_info)
+                await self._s2s_before_tool_request(tool_name, args, params, meta_info)
                 # param is the configured tool body, which is where call_transfer_number
                 # lives; the model's own arguments go in as the response, same as the llm
                 # path. Passing the arguments as both leaves the webhook no destination.
                 await self._execute_transfer_call_webhook(
-                    event.name, params.get("url"), params.get("param"), args, meta_info
+                    tool_name, params.get("url"), params.get("param"), args, meta_info
                 )
                 result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
         else:
-            await self._s2s_before_tool_request(event, args, params, meta_info)
-            result = await self._s2s_call_api_tool(event, args, params, meta_info)
+            await self._s2s_before_tool_request(tool_name, args, params, meta_info)
+            result = await self._s2s_call_api_tool(tool_name, args, params, meta_info)
 
         convert_to_request_log(
             result,
@@ -8760,7 +8753,7 @@ class TaskManager(BaseManager):
             direction=LogDirection.RESPONSE,
             is_cached=False,
             run_id=self.run_id,
-            tool_name=event.name,
+            tool_name=tool_name,
         )
         await s2s.send_function_result(event.call_id, event.name, result)
         await s2s.commit_function_results()
@@ -8772,25 +8765,25 @@ class TaskManager(BaseManager):
             self._s2s_hangup_after_response = True
             self._s2s_track_task(asyncio.create_task(self._s2s_hangup_if_goodbye_never_comes()))
 
-    async def _s2s_before_tool_request(self, event, args, params, meta_info):
+    async def _s2s_before_tool_request(self, tool_name, args, params, meta_info):
         """Pre-call webhook and filler, the same two things the llm path does before a tool."""
         webhook_url = params.get("pre_call_webhook_url")
         if webhook_url:
-            self.fire_pre_call_webhook(webhook_url, event.name, args, meta_info, params.get("pre_call_webhook_param"))
+            self.fire_pre_call_webhook(webhook_url, tool_name, args, meta_info, params.get("pre_call_webhook_param"))
         # Without this the caller hears dead air for as long as the tool takes, and the
         # are-you-still-there watchdog fires into the gap.
-        filler = compute_function_pre_call_message(self.language, event.name, params.get("pre_call_message"))
+        filler = compute_function_pre_call_message(self.language, tool_name, params.get("pre_call_message"))
         if filler:
             await self.tools["s2s"].trigger_response(instructions=f"Say exactly this, and nothing else: {filler}")
 
-    async def _s2s_call_api_tool(self, event, args, params, meta_info):
+    async def _s2s_call_api_tool(self, tool_name, args, params, meta_info):
         url = params.get("url")
         if not url:
-            return json.dumps({"status": "error", "message": f"Tool '{event.name}' has no URL configured."})
+            return json.dumps({"status": "error", "message": f"Tool '{tool_name}' has no URL configured."})
 
         method = (params.get("method") or "POST").lower()
         call_log = self._start_api_call_detail(
-            called_fun=event.name,
+            called_fun=tool_name,
             url=url,
             method=method,
             param=params.get("param"),
@@ -8810,7 +8803,7 @@ class TaskManager(BaseManager):
                 meta_info=meta_info,
                 run_id=self.run_id,
                 return_response_metadata=True,
-                called_fun=event.name,
+                called_fun=tool_name,
                 **args,
             )
         except asyncio.CancelledError:

@@ -31,7 +31,7 @@ class ToolCallAccumulator:
         for tool_call in tool_calls_delta or []:
             idx = tool_call.index
             if idx not in self.final_tool_calls:
-                self.called_fun = tool_call.function.name
+                self.called_fun = resolve_tool_name(tool_call.function.name, self.api_params)
                 logger.info(f"Function given by LLM to trigger is - {self.called_fun}")
                 self.final_tool_calls[idx] = {
                     "index": tool_call.index,
@@ -69,7 +69,7 @@ class ToolCallAccumulator:
         if not self.final_tool_calls:
             return None
 
-        first_func_name = resolve_tool_name(self.final_tool_calls[0]["function"]["name"], self.api_params)
+        first_func_name = self.final_tool_calls[0]["function"]["name"]
         if first_func_name not in self.api_params:
             return None
 

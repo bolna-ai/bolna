@@ -411,7 +411,7 @@ class OpenAICompatibleLLM(BaseLLM):
             return None
 
         first_item_id = next(iter(func_call_args))
-        func_name = resolve_tool_name(func_call_names[first_item_id], self.api_params)
+        func_name = func_call_names[first_item_id]
         call_id = func_call_ids[first_item_id]
         arguments_str = func_call_args[first_item_id]
 
@@ -642,26 +642,27 @@ class OpenAICompatibleLLM(BaseLLM):
                         yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
                         buffer = ""
                     func_call_args[item.id] = ""
-                    func_call_names[item.id] = item.name
+                    func_name = resolve_tool_name(item.name, self.api_params)
+                    func_call_names[item.id] = func_name
                     func_call_ids[item.id] = item.call_id
 
                     if not gave_pre_call_msg and not received_textual and self.trigger_function_call:
                         gave_pre_call_msg = True
-                        func_params = self.api_params.get(item.name)
+                        func_params = self.api_params.get(func_name)
                         api_tool_pre_call_message = (
                             APIParams.model_validate(func_params).pre_call_message if func_params else None
                         )
                         detected_lang = meta_info.get("detected_language") if meta_info else None
                         active_language = detected_lang or self.language
                         pre_msg = compute_function_pre_call_message(
-                            active_language, item.name, api_tool_pre_call_message
+                            active_language, func_name, api_tool_pre_call_message
                         )
                         if pre_msg:
                             yield LLMStreamChunk(
                                 data=pre_msg,
                                 end_of_stream=True,
                                 latency=latency_data,
-                                function_name=item.name,
+                                function_name=func_name,
                                 function_message=api_tool_pre_call_message,
                             )
 
