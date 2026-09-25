@@ -26,7 +26,7 @@ from bolna.constants import DEFAULT_LANGUAGE_CODE, default_reasoning_effort, is_
 from bolna.enums import ResponseStreamEvent, ResponseItemType, Verbosity
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
-from bolna.helpers.function_calling_helpers import guard_llm_base_url, tool_names
+from bolna.helpers.function_calling_helpers import guard_llm_base_url, resolve_tool_name, tool_names
 from .openai_base import OpenAICompatibleLLM
 from .message_models import strip_internal_keys
 from .tool_call_accumulator import ToolCallAccumulator
@@ -718,12 +718,12 @@ class OpenAiLLM(OpenAICompatibleLLM):
                             buffer = ""
                         item_id = item.get("id", "")
                         func_call_args[item_id] = ""
-                        func_call_names[item_id] = item.get("name", "")
+                        func_call_names[item_id] = resolve_tool_name(item.get("name", ""), self.api_params)
                         func_call_ids[item_id] = item.get("call_id", "")
 
                         if not gave_pre_call_msg and not received_textual and self.trigger_function_call:
                             gave_pre_call_msg = True
-                            func_name = item.get("name", "")
+                            func_name = func_call_names[item_id]
                             func_params = self.api_params.get(func_name)
                             api_tool_pre_call_message = (
                                 APIParams.model_validate(func_params).pre_call_message if func_params else None

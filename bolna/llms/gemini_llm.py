@@ -6,6 +6,7 @@ from typing import AsyncIterable
 from google import genai
 from google.genai import types
 from bolna.constants import default_thinking_level
+from bolna.helpers.function_calling_helpers import resolve_tool_name
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import (
     now_ms,
@@ -355,6 +356,7 @@ class GeminiLLM(BaseLLM):
 
                         if part.function_call:
                             fn_name = part.function_call.name
+                            tool_name = resolve_tool_name(fn_name, self.api_params)
                             raw_id = part.function_call.id
                             call_id = raw_id or ("call_" + str(uuid.uuid4())[:8])
                             chunk_args = dict(part.function_call.args) if part.function_call.args else {}
@@ -383,17 +385,17 @@ class GeminiLLM(BaseLLM):
                                 buffer = ""
 
                             if not self.gave_out_prefunction_call_message:
-                                pre_msg_config = self.api_params.get(fn_name, {}).get("pre_call_message")
+                                pre_msg_config = self.api_params.get(tool_name, {}).get("pre_call_message")
                                 detected_lang = meta_info.get("detected_language") if meta_info else None
                                 active_lang = detected_lang or self.language
-                                pre_msg = compute_function_pre_call_message(active_lang, fn_name, pre_msg_config)
+                                pre_msg = compute_function_pre_call_message(active_lang, tool_name, pre_msg_config)
                                 self.gave_out_prefunction_call_message = True
                                 if pre_msg:
                                     yield LLMStreamChunk(
                                         data=pre_msg,
                                         end_of_stream=True,
                                         latency=latency_data,
-                                        function_name=fn_name,
+                                        function_name=tool_name,
                                         function_message=pre_msg_config,
                                     )
 
@@ -406,7 +408,8 @@ class GeminiLLM(BaseLLM):
                                 pending_thought_signature = None
                                 _pending_dispatch[call_id] = {
                                     "fn_name": fn_name,
-                                    "func_conf": self.api_params.get(fn_name, {}),
+                                    "tool_name": tool_name,
+                                    "func_conf": self.api_params.get(tool_name, {}),
                                     "model_resp_prefix": model_resp_prefix,
                                     "sig_bytes": sig_bytes,
                                 }
@@ -439,6 +442,7 @@ class GeminiLLM(BaseLLM):
 
         for call_id, ctx in _pending_dispatch.items():
             fn_name = ctx["fn_name"]
+            tool_name = ctx["tool_name"]
             fn_args = _pending_fn_args.get(call_id, {})
             func_conf = ctx["func_conf"]
 
@@ -446,7 +450,8 @@ class GeminiLLM(BaseLLM):
                 (
                     t
                     for t in self.bolna_tools_raw
-                    if (t.get("type") == "function" and t["function"]["name"] == fn_name) or (t.get("name") == fn_name)
+                    if (t.get("type") == "function" and t["function"]["name"] == tool_name)
+                    or (t.get("name") == tool_name)
                 ),
                 None,
             )
@@ -460,7 +465,7 @@ class GeminiLLM(BaseLLM):
                 if not all(k in fn_args for k in required_keys):
                     missing = [k for k in required_keys if k not in fn_args]
                     logger.warning(
-                        f"[GeminiLLM] Tool call {fn_name} still missing params after full stream: "
+                        f"[GeminiLLM] Tool call {tool_name} still missing params after full stream: "
                         f"missing={missing}, got={list(fn_args.keys())} — "
                         f"dispatching anyway (OpenAI-parity; downstream will validate)"
                     )
@@ -487,7 +492,7 @@ class GeminiLLM(BaseLLM):
                 headers=func_conf.get("headers"),
                 model_args={"model": self.model},
                 meta_info=meta_info or {},
-                called_fun=fn_name,
+                called_fun=tool_name,
                 model_response=model_resp,
                 tool_call_id=call_id,
                 textual_response=answer.strip() if answer else None,
