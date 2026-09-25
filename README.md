@@ -121,7 +121,10 @@ Once the docker containers are up, you can now start to create your agents and i
 
 
 ## Example agents to create, use and start making calls
-You may try out different agents from [example.bolna.dev](https://examples.bolna.dev).
+You can start with the sample agents in this repository:
+
+* [Simple voice assistant](examples/simple_assistant.py)
+* [Text-only assistant](examples/text_only_assistant.py)
 
 ## Programmatic usage (minimal example)
 
