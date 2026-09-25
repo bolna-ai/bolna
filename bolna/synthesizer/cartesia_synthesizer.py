@@ -10,6 +10,7 @@ import websockets
 from websockets.exceptions import InvalidHandshake
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.constants import CARTESIA_VOLUME_MAX, CARTESIA_VOLUME_MIN, CARTESIA_VOLUME_MODELS
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 
@@ -47,8 +48,10 @@ class CartesiaSynthesizer(StreamSynthesizer):
         self.sampling_rate = sampling_rate
         self.speed = speed
         self.volume = float(volume)
-        if not 0.5 <= self.volume <= 2.0:
-            raise ValueError("Cartesia volume must be between 0.5 and 2.0")
+        if not CARTESIA_VOLUME_MIN <= self.volume <= CARTESIA_VOLUME_MAX:
+            raise ValueError(
+                f"Cartesia volume must be between {CARTESIA_VOLUME_MIN} and {CARTESIA_VOLUME_MAX}"
+            )
         self.use_mulaw = kwargs.get("use_mulaw", True)  # web/freeswitch pass False → raw PCM @sampling_rate
         self.stream = True
 
@@ -121,7 +124,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
 
     def _generation_config(self):
         generation_config = {"speed": self.speed}
-        if self.model == "sonic-3":
+        if self.model in CARTESIA_VOLUME_MODELS:
             generation_config["volume"] = self.volume
         return generation_config
 

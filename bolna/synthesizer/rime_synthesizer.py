@@ -10,6 +10,7 @@ import websockets
 from dotenv import load_dotenv
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.constants import RIME_TIME_SCALE_FACTOR_MAX, RIME_TIME_SCALE_FACTOR_MIN
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import convert_audio_to_wav
@@ -46,8 +47,11 @@ class RimeSynthesizer(StreamSynthesizer):
         self.sample_rate = str(sampling_rate)
         self.model = model
         self.time_scale_factor = float(time_scale_factor)
-        if not 0.4 <= self.time_scale_factor <= 2.5:
-            raise ValueError("Rime time_scale_factor must be between 0.4 and 2.5")
+        if not RIME_TIME_SCALE_FACTOR_MIN <= self.time_scale_factor <= RIME_TIME_SCALE_FACTOR_MAX:
+            raise ValueError(
+                f"Rime time_scale_factor must be between "
+                f"{RIME_TIME_SCALE_FACTOR_MIN} and {RIME_TIME_SCALE_FACTOR_MAX}"
+            )
         self.supports_time_scale = self.model.lower() in {"coda", "mistv3"}
         self.api_key = os.environ["RIME_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.use_mulaw = True

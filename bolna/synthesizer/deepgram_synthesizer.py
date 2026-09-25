@@ -11,6 +11,7 @@ import websockets
 from dotenv import load_dotenv
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.constants import DEEPGRAM_AURA_2_SPEED_MAX, DEEPGRAM_AURA_2_SPEED_MIN
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, resolve_deepgram_mip_opt_out
@@ -59,8 +60,11 @@ class DeepgramSynthesizer(StreamSynthesizer):
             self.model = f"{self.model}-{self.voice_id}"
         self.speed = float(speed)
         self.supports_voice_controls = self.model.startswith("aura-2-")
-        if self.supports_voice_controls and not 0.7 <= self.speed <= 1.5:
-            raise ValueError("Deepgram Aura-2 speed must be between 0.7 and 1.5")
+        if self.supports_voice_controls and not DEEPGRAM_AURA_2_SPEED_MIN <= self.speed <= DEEPGRAM_AURA_2_SPEED_MAX:
+            raise ValueError(
+                f"Deepgram Aura-2 speed must be between "
+                f"{DEEPGRAM_AURA_2_SPEED_MIN} and {DEEPGRAM_AURA_2_SPEED_MAX}"
+            )
 
         self.caching = caching
         if caching:

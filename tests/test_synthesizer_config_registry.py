@@ -163,6 +163,19 @@ def test_elevenlabs_rejects_out_of_range_controls(field, value):
         )
 
 
+def test_sarvam_loudness_uses_documented_bounds():
+    kwargs = {
+        "voice": "Ritu",
+        "voice_id": "ritu",
+        "model": "bulbul:v2",
+        "language": "hi-IN",
+    }
+
+    assert SarvamConfig(**kwargs, loudness=0.3).loudness == 0.3
+    with pytest.raises(ValueError):
+        SarvamConfig(**kwargs, loudness=0.29)
+
+
 def test_an_unknown_provider_is_rejected():
     with pytest.raises(ValueError):
         Synthesizer(provider="nope", provider_config={"voice": "x"})

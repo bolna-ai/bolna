@@ -112,11 +112,12 @@ def test_rime_does_not_send_time_scale_to_unsupported_models():
     assert "timeScaleFactor" not in synth._http_payload("hello")
 
 
-def test_cartesia_sonic_3_volume_is_on_streaming_and_http_generation_config():
+@pytest.mark.parametrize("model", ["sonic-3", "sonic-3.5", "sonic-3.6", "sonic-preview"])
+def test_cartesia_sonic_3_series_volume_is_on_streaming_and_http_generation_config(model):
     synth = CartesiaSynthesizer(
         voice="Sonic",
         voice_id="voice-id",
-        model="sonic-3",
+        model=model,
         language="en",
         volume=1.6,
         synthesizer_key="test-key",
@@ -156,6 +157,20 @@ def test_sarvam_v2_loudness_is_on_http_and_websocket_payloads():
     assert synth._http_payload("hello")["loudness"] == 1.8
 
 
+def test_sarvam_v2_accepts_documented_loudness_minimum():
+    synth = SarvamSynthesizer(
+        voice="Ritu",
+        voice_id="ritu",
+        model="bulbul:v2",
+        language="hi-IN",
+        loudness=0.3,
+        synthesizer_key="test-key",
+        task_manager_instance=_task_manager(),
+    )
+
+    assert synth._config_message()["data"]["loudness"] == 0.3
+
+
 def test_sarvam_v3_omits_unsupported_loudness_on_both_transports():
     synth = SarvamSynthesizer(
         voice="Shubh",
@@ -179,6 +194,7 @@ def test_sarvam_v3_omits_unsupported_loudness_on_both_transports():
         (SmallestSynthesizer, {"voice_id": "meher", "speed": 2.1, "synthesizer_key": "k"}),
         (RimeSynthesizer, {"voice": "A", "voice_id": "a", "model": "coda", "time_scale_factor": 2.6, "synthesizer_key": "k"}),
         (CartesiaSynthesizer, {"voice": "C", "voice_id": "c", "volume": 2.1, "synthesizer_key": "k"}),
+        (SarvamSynthesizer, {"voice_id": "ritu", "model": "bulbul:v2", "language": "hi-IN", "loudness": 0.29, "synthesizer_key": "k"}),
         (SarvamSynthesizer, {"voice_id": "ritu", "model": "bulbul:v2", "language": "hi-IN", "loudness": 3.1, "synthesizer_key": "k"}),
     ],
 )

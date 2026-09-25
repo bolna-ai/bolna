@@ -16,7 +16,21 @@ from .enums import (
     NodeType,
     VariableType,
 )
-from .constants import MODEL_REASONING_EFFORT_MAP
+from .constants import (
+    CARTESIA_VOLUME_MAX,
+    CARTESIA_VOLUME_MIN,
+    DEEPGRAM_AURA_2_SPEED_MAX,
+    DEEPGRAM_AURA_2_SPEED_MIN,
+    MODEL_REASONING_EFFORT_MAP,
+    OPENAI_TTS_SPEED_MAX,
+    OPENAI_TTS_SPEED_MIN,
+    RIME_TIME_SCALE_FACTOR_MAX,
+    RIME_TIME_SCALE_FACTOR_MIN,
+    SARVAM_LOUDNESS_MAX,
+    SARVAM_LOUDNESS_MIN,
+    SMALLEST_TTS_SPEED_MAX,
+    SMALLEST_TTS_SPEED_MIN,
+)
 
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
 
@@ -63,7 +77,7 @@ class ElevenLabsConfig(BaseModel):
 class OpenAIConfig(BaseModel):
     voice: str
     model: str
-    speed: Optional[float] = Field(default=1.0, ge=0.25, le=4.0)
+    speed: Optional[float] = Field(default=1.0, ge=OPENAI_TTS_SPEED_MIN, le=OPENAI_TTS_SPEED_MAX)
 
 
 class DeepgramConfig(BaseModel):
@@ -72,7 +86,11 @@ class DeepgramConfig(BaseModel):
     model: str
     # Opt out of Deepgram's Model Improvement Program (zero retention after processing).
     mip_opt_out: Optional[bool] = None
-    speed: Optional[float] = Field(default=1.0, ge=0.7, le=1.5)
+    speed: Optional[float] = Field(
+        default=1.0,
+        ge=DEEPGRAM_AURA_2_SPEED_MIN,
+        le=DEEPGRAM_AURA_2_SPEED_MAX,
+    )
 
 
 class StandardVoiceConfig(BaseModel):
@@ -86,20 +104,24 @@ class StandardVoiceConfig(BaseModel):
 
 class CartesiaConfig(StandardVoiceConfig):
     speed: Optional[float] = Field(default=1.0, ge=0.6, le=1.5)
-    volume: Optional[float] = Field(default=1.0, ge=0.5, le=2.0)
+    volume: Optional[float] = Field(default=1.0, ge=CARTESIA_VOLUME_MIN, le=CARTESIA_VOLUME_MAX)
 
 
 class RimeConfig(StandardVoiceConfig):
-    time_scale_factor: Optional[float] = Field(default=1.0, ge=0.4, le=2.5)
+    time_scale_factor: Optional[float] = Field(
+        default=1.0,
+        ge=RIME_TIME_SCALE_FACTOR_MIN,
+        le=RIME_TIME_SCALE_FACTOR_MAX,
+    )
 
 
 class SmallestConfig(StandardVoiceConfig):
-    speed: Optional[float] = Field(default=1.0, ge=0.5, le=2.0)
+    speed: Optional[float] = Field(default=1.0, ge=SMALLEST_TTS_SPEED_MIN, le=SMALLEST_TTS_SPEED_MAX)
 
 
 class SarvamConfig(StandardVoiceConfig):
     speed: Optional[float] = Field(default=1.0, ge=0.3, le=3.0)
-    loudness: Optional[float] = Field(default=1.0, ge=0.1, le=3.0)
+    loudness: Optional[float] = Field(default=1.0, ge=SARVAM_LOUDNESS_MIN, le=SARVAM_LOUDNESS_MAX)
 
     @model_validator(mode="after")
     def validate_model_controls(self):

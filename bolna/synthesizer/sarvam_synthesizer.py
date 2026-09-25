@@ -15,6 +15,8 @@ from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, get_synth_audio_format, resample, wav_bytes_to_pcm
 from bolna.constants import (
+    SARVAM_LOUDNESS_MAX,
+    SARVAM_LOUDNESS_MIN,
     SARVAM_MODEL_SAMPLING_RATE_MAPPING,
     SARVAM_STREAMING_WAV_HEADER_MODELS,
     SARVAM_TTS_SUPPORTED_LANGUAGES,
@@ -58,8 +60,10 @@ class SarvamSynthesizer(StreamSynthesizer):
 
         self.language = language
         self.loudness = float(loudness)
-        if not 0.1 <= self.loudness <= 3.0:
-            raise ValueError("Sarvam loudness must be between 0.1 and 3.0")
+        if not SARVAM_LOUDNESS_MIN <= self.loudness <= SARVAM_LOUDNESS_MAX:
+            raise ValueError(
+                f"Sarvam loudness must be between {SARVAM_LOUDNESS_MIN} and {SARVAM_LOUDNESS_MAX}"
+            )
         self.pitch = 0.0
         self.pace = speed
         self.enable_preprocessing = True
