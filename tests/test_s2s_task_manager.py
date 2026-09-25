@@ -52,6 +52,7 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
     tm.task_config = {"tools_config": {"input": {"provider": io_provider}}}
     tm._s2s_tool_tasks = set()
     tm._s2s_hangup_after_response = False
+    tm._transfer_failure_followup = False
     tm._s2s_started_at = 0  # welcome gate already elapsed
     tm._s2s_welcome_gate_ms = 0
     tm._s2s_welcome_sent = True
@@ -770,6 +771,18 @@ class TestToolDispatch:
 
         tm._execute_transfer_call_webhook.assert_not_awaited()
         assert "already in progress" in tm.tools["s2s"].send_function_result.await_args.args[2]
+
+    async def test_a_transfer_re_emitted_after_a_failure_is_declined(self):
+        tm = make_tm(tools_params={"transfer_call": {"url": "https://hook.example/transfer"}})
+        tm._execute_transfer_call_webhook = AsyncMock(return_value="USER_BUSY")
+        with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+            for call_id in ("c1", "c2"):
+                await tm._s2s_execute_tool(
+                    s2s_events.FunctionCall(name="transfer_call", call_id=call_id, arguments="{}")
+                )
+
+        tm._execute_transfer_call_webhook.assert_awaited_once()
+        assert "Do not retry" in tm.tools["s2s"].send_function_result.await_args.args[2]
 
     async def test_custom_tool_goes_through_trigger_api(self):
         tm = make_tm(tools_params={"book": {"url": "https://api.example/book", "method": "POST"}})

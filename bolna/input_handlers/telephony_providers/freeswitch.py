@@ -33,8 +33,9 @@ class FreeSwitchInputHandler(DefaultInputHandler):
         self.on_playout_done = None
         # set by FreeSwitchOutputHandler: per-mark playback echoes from the module
         self.on_mark_played = None
-        # set by TaskManager: the media node reporting a consultative transfer that never connected
+        # set by TaskManager: the media node reporting a consultative transfer that never / did connect
         self.on_transfer_failed = None
+        self.on_transfer_connected = None
         # set by TaskManager: the call id /process_transfer requires (the trunk plane keys on the run)
         self.call_sid = None
         self._dtmf = DtmfAccumulator(self.queues["dtmf"].put_nowait)
@@ -61,6 +62,10 @@ class FreeSwitchInputHandler(DefaultInputHandler):
         if message.get("type") == "transfer_failed":
             if self.on_transfer_failed:
                 self.on_transfer_failed(message.get("cause") or "")
+            return
+        if message.get("type") == "transfer_connected":
+            if self.on_transfer_connected:
+                self.on_transfer_connected()
             return
         if message.get("type") == "playoutDone":
             # mod_audio_stream: all queued TTS has really been played to the caller — hand the

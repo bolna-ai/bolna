@@ -163,6 +163,7 @@ def _transfer_call(has_transfer=False, *, transfer_call_params=None, context_dat
     tm._transfer_posting = False
     tm._transfer_early_failure = None
     tm._transfer_failure_followup = False
+    tm._transfer_retry_declined = False
     tm._transfer_deadline = None
     tm._transfer_tasks = set()
     tm._inject_and_run_llm = AsyncMock()
@@ -330,7 +331,11 @@ async def test_a_frame_that_beats_the_backend_answer_resumes_exactly_once(transf
     assert tm._transfer_deadline is None
 
 
-@pytest.mark.parametrize("param,ring_timeout", [(None, 30), ({"ring_timeout": 90}, 90)], ids=["default", "tool"])
+@pytest.mark.parametrize(
+    "param,ring_timeout",
+    [(None, 30), ({"ring_timeout": 90}, 90), ({"ring_timeout": 900}, 120)],
+    ids=["default", "tool", "capped"],
+)
 async def test_an_accepted_transfer_waits_past_the_ring_it_asked_for(transfer_webhook, param, ring_timeout):
     tm, _ = _transfer_call(transfer_call_params={"provider": "trunk"})
     session = transfer_webhook()
@@ -345,8 +350,9 @@ async def test_an_accepted_transfer_waits_past_the_ring_it_asked_for(transfer_we
 
 
 async def test_the_deadline_resumes_once_when_the_fork_never_reports(transfer_webhook, monkeypatch):
-    monkeypatch.setattr(task_manager_module, "TRUNK_TRANSFER_RING_TIMEOUT_S", 0)
-    monkeypatch.setattr(task_manager_module, "TRANSFER_DEADLINE_MARGIN_S", 0.01)
+    # The shortest ring is 1 s; this margin leaves a 10 ms deadline.
+    monkeypatch.setattr(task_manager_module, "TRUNK_TRANSFER_RING_TIMEOUT_S", 1)
+    monkeypatch.setattr(task_manager_module, "TRANSFER_DEADLINE_MARGIN_S", -0.99)
     tm, _ = _transfer_call(transfer_call_params={"provider": "trunk"})
     transfer_webhook(error=ConnectionError("backend unreachable"))
 
@@ -388,6 +394,7 @@ async def test_a_bare_trunk_5xx_waits_on_the_deadline(transfer_webhook):
 
     assert tm.has_transfer is True
     assert tm._transfer_deadline is not None
+    assert tm.transfer_call_events[-1]["success"] is None
     tm._cancel_transfer_deadline()
 
 
@@ -405,20 +412,63 @@ async def test_another_providers_bare_4xx_keeps_the_transfer_as_on_master(transf
 async def test_the_failure_follow_up_cannot_dial_the_transfer_again(transfer_webhook):
     tm, _ = _transfer_call(transfer_call_params={"provider": "trunk"})
     session = transfer_webhook(status=409, body='{"success": false, "message": "at channel limit"}')
-    retried = []
+    retries = []
 
     async def follow_up_retries(*args, **kwargs):
-        if not retried:
-            retried.append(True)
-            await _call_transfer_tool(tm, tool_call_id="call-2")
+        retries.append(f"retry-{len(retries)}")
+        await _call_transfer_tool(tm, tool_call_id=retries[-1])
 
     tm._TaskManager__do_llm_generation = AsyncMock(side_effect=follow_up_retries)
 
     await _call_transfer_tool(tm)
 
+    # The refusal's follow-up and one declined retry each speak; the next retry is dropped.
+    assert session.post_count == 1
+    assert tm._TaskManager__do_llm_generation.await_count == 2
+    assert _tool_result(tm, "retry-0")["status"] == "failed"
+    assert tm.has_transfer is False
+
+
+async def test_the_resume_turn_cannot_dial_the_transfer_again(transfer_webhook):
+    tm, handler = _transfer_call(transfer_call_params={"provider": "trunk"})
+    session = transfer_webhook()
+
+    async def resume_retries(message):
+        await _call_transfer_tool(tm, tool_call_id="call-2")
+
+    tm._inject_and_run_llm = AsyncMock(side_effect=resume_retries)
+
+    await _call_transfer_tool(tm)
+    await handler.process_message({"type": "transfer_failed", "cause": "NO_ANSWER"})
+    await asyncio.gather(*tm._transfer_tasks)
+
     assert session.post_count == 1
     assert _tool_result(tm, "call-2")["status"] == "failed"
-    assert tm.has_transfer is False
+    assert tm._transfer_failure_followup is False
+
+
+async def test_no_hangup_while_a_trunk_transfer_rings():
+    # hangup_after_LLMCall reads the transfer's own turn; a "yes" there must not drop the caller.
+    tm, _ = _transfer_call(True, transfer_call_params={"provider": "trunk"})
+    tm.hangup_triggered = False
+
+    await tm.process_call_hangup()
+
+    assert tm.hangup_triggered is False
+
+
+async def test_transfer_connected_only_cancels_the_deadline(transfer_webhook):
+    tm, handler = _transfer_call(transfer_call_params={"provider": "trunk"})
+    transfer_webhook()
+
+    await _call_transfer_tool(tm)
+    deadline = tm._transfer_deadline
+    await handler.process_message({"type": "transfer_connected"})
+
+    assert deadline.cancelled()
+    assert tm._transfer_deadline is None
+    assert tm.has_transfer is True
+    assert tm._transfer_tasks == set()
 
 
 async def test_transfer_provider_comes_from_transfer_call_params(transfer_webhook):
