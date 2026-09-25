@@ -31,9 +31,7 @@ class OPENAISynthesizer(BaseSynthesizer):
         self.sample_rate = int(sampling_rate) if isinstance(sampling_rate, str) else sampling_rate
         self.speed = float(speed)
         if not OPENAI_TTS_SPEED_MIN <= self.speed <= OPENAI_TTS_SPEED_MAX:
-            raise ValueError(
-                f"OpenAI speed must be between {OPENAI_TTS_SPEED_MIN} and {OPENAI_TTS_SPEED_MAX}"
-            )
+            raise ValueError(f"OpenAI speed must be between {OPENAI_TTS_SPEED_MIN} and {OPENAI_TTS_SPEED_MAX}")
         self.stream = False
         api_key = kwargs.get("synthesizer_key", os.getenv("OPENAI_API_KEY"))
         self.async_client = AsyncOpenAI(api_key=api_key)

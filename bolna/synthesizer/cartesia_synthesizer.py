@@ -49,9 +49,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
         self.speed = speed
         self.volume = float(volume)
         if not CARTESIA_VOLUME_MIN <= self.volume <= CARTESIA_VOLUME_MAX:
-            raise ValueError(
-                f"Cartesia volume must be between {CARTESIA_VOLUME_MIN} and {CARTESIA_VOLUME_MAX}"
-            )
+            raise ValueError(f"Cartesia volume must be between {CARTESIA_VOLUME_MIN} and {CARTESIA_VOLUME_MAX}")
         self.use_mulaw = kwargs.get("use_mulaw", True)  # web/freeswitch pass False → raw PCM @sampling_rate
         self.stream = True
 

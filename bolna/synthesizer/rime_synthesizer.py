@@ -49,8 +49,7 @@ class RimeSynthesizer(StreamSynthesizer):
         self.time_scale_factor = float(time_scale_factor)
         if not RIME_TIME_SCALE_FACTOR_MIN <= self.time_scale_factor <= RIME_TIME_SCALE_FACTOR_MAX:
             raise ValueError(
-                f"Rime time_scale_factor must be between "
-                f"{RIME_TIME_SCALE_FACTOR_MIN} and {RIME_TIME_SCALE_FACTOR_MAX}"
+                f"Rime time_scale_factor must be between {RIME_TIME_SCALE_FACTOR_MIN} and {RIME_TIME_SCALE_FACTOR_MAX}"
             )
         self.supports_time_scale = self.model.lower() in {"coda", "mistv3"}
         self.api_key = os.environ["RIME_API_KEY"] if synthesizer_key is None else synthesizer_key

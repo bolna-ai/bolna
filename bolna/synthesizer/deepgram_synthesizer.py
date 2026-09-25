@@ -62,8 +62,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
         self.supports_voice_controls = self.model.startswith("aura-2-")
         if self.supports_voice_controls and not DEEPGRAM_AURA_2_SPEED_MIN <= self.speed <= DEEPGRAM_AURA_2_SPEED_MAX:
             raise ValueError(
-                f"Deepgram Aura-2 speed must be between "
-                f"{DEEPGRAM_AURA_2_SPEED_MIN} and {DEEPGRAM_AURA_2_SPEED_MAX}"
+                f"Deepgram Aura-2 speed must be between {DEEPGRAM_AURA_2_SPEED_MIN} and {DEEPGRAM_AURA_2_SPEED_MAX}"
             )
 
         self.caching = caching

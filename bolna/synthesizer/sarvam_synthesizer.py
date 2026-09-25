@@ -61,9 +61,7 @@ class SarvamSynthesizer(StreamSynthesizer):
         self.language = language
         self.loudness = float(loudness)
         if not SARVAM_LOUDNESS_MIN <= self.loudness <= SARVAM_LOUDNESS_MAX:
-            raise ValueError(
-                f"Sarvam loudness must be between {SARVAM_LOUDNESS_MIN} and {SARVAM_LOUDNESS_MAX}"
-            )
+            raise ValueError(f"Sarvam loudness must be between {SARVAM_LOUDNESS_MIN} and {SARVAM_LOUDNESS_MAX}")
         self.pitch = 0.0
         self.pace = speed
         self.enable_preprocessing = True

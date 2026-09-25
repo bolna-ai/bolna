@@ -45,9 +45,7 @@ class SmallestSynthesizer(StreamSynthesizer):
         self.language = language
         self.speed = float(speed)
         if not SMALLEST_TTS_SPEED_MIN <= self.speed <= SMALLEST_TTS_SPEED_MAX:
-            raise ValueError(
-                f"Smallest speed must be between {SMALLEST_TTS_SPEED_MIN} and {SMALLEST_TTS_SPEED_MAX}"
-            )
+            raise ValueError(f"Smallest speed must be between {SMALLEST_TTS_SPEED_MIN} and {SMALLEST_TTS_SPEED_MAX}")
 
         # Unified Waves endpoints (docs.smallest.ai -> /text-to-speech).
         # HTTP: POST /waves/v1/tts, streaming: WSS /waves/v1/tts/live

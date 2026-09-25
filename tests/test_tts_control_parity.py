@@ -189,13 +189,25 @@ def test_sarvam_v3_omits_unsupported_loudness_on_both_transports():
 @pytest.mark.parametrize(
     ("factory", "kwargs"),
     [
-        (DeepgramSynthesizer, {"voice": "T", "voice_id": "t-en", "model": "aura-2", "speed": 1.6, "transcriber_key": "k"}),
+        (
+            DeepgramSynthesizer,
+            {"voice": "T", "voice_id": "t-en", "model": "aura-2", "speed": 1.6, "transcriber_key": "k"},
+        ),
         (OPENAISynthesizer, {"voice": "alloy", "speed": 4.1, "synthesizer_key": "k"}),
         (SmallestSynthesizer, {"voice_id": "meher", "speed": 2.1, "synthesizer_key": "k"}),
-        (RimeSynthesizer, {"voice": "A", "voice_id": "a", "model": "coda", "time_scale_factor": 2.6, "synthesizer_key": "k"}),
+        (
+            RimeSynthesizer,
+            {"voice": "A", "voice_id": "a", "model": "coda", "time_scale_factor": 2.6, "synthesizer_key": "k"},
+        ),
         (CartesiaSynthesizer, {"voice": "C", "voice_id": "c", "volume": 2.1, "synthesizer_key": "k"}),
-        (SarvamSynthesizer, {"voice_id": "ritu", "model": "bulbul:v2", "language": "hi-IN", "loudness": 0.29, "synthesizer_key": "k"}),
-        (SarvamSynthesizer, {"voice_id": "ritu", "model": "bulbul:v2", "language": "hi-IN", "loudness": 3.1, "synthesizer_key": "k"}),
+        (
+            SarvamSynthesizer,
+            {"voice_id": "ritu", "model": "bulbul:v2", "language": "hi-IN", "loudness": 0.29, "synthesizer_key": "k"},
+        ),
+        (
+            SarvamSynthesizer,
+            {"voice_id": "ritu", "model": "bulbul:v2", "language": "hi-IN", "loudness": 3.1, "synthesizer_key": "k"},
+        ),
     ],
 )
 def test_out_of_range_controls_fail_at_setup(monkeypatch, factory, kwargs):
