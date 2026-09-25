@@ -15,6 +15,7 @@ import bolna.output_handlers.telephony as telephony_module
 from bolna.helpers.mark_event_meta_data import MarkEventMetaData
 from bolna.output_handlers.telephony_providers.exotel import ExotelOutputHandler
 from bolna.output_handlers.telephony_providers.plivo import PlivoOutputHandler
+from bolna.output_handlers.telephony_providers.telnyx import TelnyxOutputHandler
 from bolna.output_handlers.telephony_providers.twilio import TwilioOutputHandler
 from bolna.output_handlers.telephony_providers.vobiz import VobizOutputHandler
 
@@ -45,7 +46,7 @@ def _fast_send_timeout(monkeypatch):
 
 @pytest.mark.parametrize(
     "handler_cls",
-    [PlivoOutputHandler, TwilioOutputHandler, ExotelOutputHandler, VobizOutputHandler],
+    [PlivoOutputHandler, TwilioOutputHandler, ExotelOutputHandler, VobizOutputHandler, TelnyxOutputHandler],
 )
 async def test_handle_interruption_does_not_hang_on_a_dead_socket(handler_cls):
     handler = handler_cls(websocket=_HangingWebSocket(), mark_event_meta_data=MarkEventMetaData())
