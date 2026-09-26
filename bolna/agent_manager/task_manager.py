@@ -639,7 +639,7 @@ class TaskManager(BaseManager):
                         "temperature": self.llm_agent_config["temperature"],
                     }
 
-                for key in ("reasoning_effort", "verbosity", "reasoning_summary", "thinking_budget"):
+                for key in ("reasoning_effort", "verbosity", "reasoning_summary", "thinking_budget", "extra_body"):
                     if key in self.llm_agent_config:
                         self.llm_config[key] = self.llm_agent_config[key]
 

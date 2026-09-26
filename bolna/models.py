@@ -8,6 +8,7 @@ from .enums import (
     SynthesizerProvider,
     TranscriberProvider,
     S2SProvider,
+    LLMProvider,
     ReasoningEffort,
     Verbosity,
     ExpressionOperator,
@@ -22,6 +23,7 @@ from .constants import (
     DEEPGRAM_AURA_2_SPEED_MAX,
     DEEPGRAM_AURA_2_SPEED_MIN,
     MODEL_REASONING_EFFORT_MAP,
+    RESERVED_LLM_REQUEST_KEYS,
     OPENAI_TTS_SPEED_MAX,
     OPENAI_TTS_SPEED_MIN,
     RIME_TIME_SCALE_FACTOR_MAX,
@@ -368,12 +370,24 @@ class Llm(BaseModel):
     verbosity: Optional[Verbosity] = None
     use_responses_api: Optional[bool] = False
     compact_threshold: Optional[int] = None
+    extra_body: Optional[Dict[str, Any]] = None
 
     @model_validator(mode="after")
     def validate_reasoning_effort_for_model(self):
         if self.reasoning_effort is not None and self.model is not None:
             effort_value = self.reasoning_effort.value
             validate_reasoning_effort_for_model(self.model, effort_value)
+        return self
+
+    @model_validator(mode="after")
+    def validate_extra_body(self):
+        if not self.extra_body:
+            return self
+        if self.provider != LLMProvider.CUSTOM.value:
+            raise ValueError("extra_body is only supported for custom LLM providers")
+        reserved = sorted(RESERVED_LLM_REQUEST_KEYS.intersection(self.extra_body))
+        if reserved:
+            raise ValueError(f"extra_body cannot override request fields: {', '.join(reserved)}")
         return self
 
 
