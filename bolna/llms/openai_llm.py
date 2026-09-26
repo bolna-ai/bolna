@@ -23,7 +23,7 @@ import websockets
 from websockets.protocol import State as WSState
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE, default_reasoning_effort, is_reasoning_model
-from bolna.enums import ResponseStreamEvent, ResponseItemType, Verbosity
+from bolna.enums import LLMProvider, ResponseStreamEvent, ResponseItemType, Verbosity
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
 from bolna.helpers.function_calling_helpers import guard_llm_base_url, resolve_tool_name, tool_names
@@ -216,12 +216,17 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
-        self.model_args["service_tier"] = kwargs.get("service_tier", "default")
+        is_custom = kwargs.get("provider") == LLMProvider.CUSTOM.value
+        if is_custom:
+            if kwargs.get("extra_body"):
+                self.model_args["extra_body"] = kwargs["extra_body"]
+        else:
+            self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
         # http2=False: cancelled h2 requests leak streams until the connection pins at 100 (barge-in)
         http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False)
 
-        if kwargs.get("provider", "openai") == "custom":
+        if is_custom:
             base_url = kwargs.get("base_url")
             api_key = kwargs.get("llm_key", None)
             self.async_client = AsyncOpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
@@ -235,7 +240,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             api_key = llm_key
         self.llm_host = urlparse(base_url).netloc if base_url else None
         # Only a customer endpoint is guarded; platform ones keep the SDK's connection retries.
-        self._base_url = base_url if kwargs.get("provider", "openai") == "custom" else None
+        self._base_url = base_url if is_custom else None
         self._base_url_validated = False
         self.assistant_id = kwargs.get("assistant_id", None)
         if self.assistant_id:
@@ -250,11 +255,11 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.run_id = kwargs.get("run_id", None)
 
         # Self-hosted endpoints speak chat completions only; Responses-API chaining is OpenAI-specific.
-        use_responses_api = kwargs.get("use_responses_api", False) and kwargs.get("provider", "openai") != "custom"
+        use_responses_api = kwargs.get("use_responses_api", False) and not is_custom
         self._init_responses_api(use_responses_api, compact_threshold=kwargs.get("compact_threshold"))
 
         self._ws_transport = None
-        if self.use_responses_api and kwargs.get("provider", "openai") != "custom" and not base_url:
+        if self.use_responses_api and not is_custom and not base_url:
             self._ws_transport = OpenAIWSConnection(api_key=api_key)
             self._ws_transport.start_connect()
 
@@ -519,6 +524,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 messages=strip_internal_keys(messages),
                 stream=False,
                 response_format=response_format,
+                extra_body=self.model_args.get("extra_body"),
             )
             res = completion.choices[0].message.content
             if ret_metadata:

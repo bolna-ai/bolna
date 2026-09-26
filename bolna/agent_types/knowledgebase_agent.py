@@ -77,6 +77,7 @@ class KnowledgeBaseAgent(BaseAgent):
                 "use_responses_api",
                 "compact_threshold",
                 "overflow_llm",
+                "extra_body",
             ]:
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]

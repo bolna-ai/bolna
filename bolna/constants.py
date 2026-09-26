@@ -289,6 +289,11 @@ LANGUAGE_NAMES = {
     "od": "Odia",
 }
 
+# Request fields the pipeline owns; a custom LLM's extra_body may not override them.
+RESERVED_LLM_REQUEST_KEYS = frozenset(
+    {"model", "messages", "stream", "stream_options", "tools", "tool_choice", "parallel_tool_calls", "response_format"}
+)
+
 LLM_DEFAULT_CONFIGS = {
     "summarization": {"model": "gpt-4.1-mini", "provider": "openai"},
     "extraction": {"model": "gpt-4.1-mini", "provider": "openai"},
