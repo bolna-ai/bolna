@@ -93,6 +93,8 @@ LLM_GENERATION_TIMEOUT_S = 60.0
 LANGUAGE_SWITCH_DECIDE_TIMEOUT_S = 6.0
 # Let the detector's socket deliver this turn's tail before draining its buffer.
 LANGUAGE_SWITCH_SETTLE_MS = 300
+# Keypad input reaches the LLM as a user turn with this prefix (inject_digits_to_conversation).
+DTMF_MESSAGE_PREFIX = "dtmf_number: "
 # Silence between cutting audible old-language audio and the first new-language audio.
 LANGUAGE_SWITCH_AUDIO_GAP_S = 0.2
 # Ceiling on how long a mismatched turn's AUDIO waits for the switch decision. Generation is not

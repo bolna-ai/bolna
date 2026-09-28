@@ -27,6 +27,7 @@ from bolna.constants import (
     CHAT_WATCHDOG_TICK_S,
     DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION,
+    DTMF_MESSAGE_PREFIX,
     DUPLICATE_RESPONSE_SIMILARITY,
     FILLER_DICT,
     DEFAULT_LANGUAGE_CODE,
@@ -218,6 +219,7 @@ def build_lid_decision_record(
     detector_lang_confidence=None,
     detector_segments=None,
     inflight_activity=None,
+    detector_fallback=None,
 ):
     """Build one telemetry record for a Switch-LLM firing (switch / stay / gated).
 
@@ -238,6 +240,8 @@ def build_lid_decision_record(
         # Per-segment detections (a turn can span languages); the tag above is just the latest.
         "detector_lang_confidence": detector_lang_confidence,
         "detector_segments": detector_segments or [],
+        # "main_asr" when the detector sent nothing and detector_transcript is the main ASR's text.
+        "detector_fallback": detector_fallback,
         "active_transcript": active_transcript,
         # What the caller is speaking, independent of support (set even when staying).
         "detected_language": dec.get("detected_language"),
@@ -2976,7 +2980,7 @@ class TaskManager(BaseManager):
                 for _digit in dtmf_digits:
                     self.dtmf_events.append({"digit": _digit, "ts_ms": _dtmf_ts})
 
-                dtmf_message = "dtmf_number: " + dtmf_digits
+                dtmf_message = DTMF_MESSAGE_PREFIX + dtmf_digits
                 base_meta_info = {
                     "io": self.tools["input"].io_provider,
                     "type": "text",
@@ -6398,8 +6402,26 @@ class TaskManager(BaseManager):
         detector_lang_confidence = pool.lid_buffer_language_confidence()
         detector_segments = pool.lid_buffer_segments()
         detector_transcript, detected_lang = pool.take_lid_transcript()
+        detector_fallback = None
         if not detector_transcript:
-            return
+            # Explicit-only mode switches only on the turn that names a language, and the detector
+            # sometimes sends nothing for a one-word answer ("Tamil.") the main ASR did hear. Judge
+            # that text instead of dropping the one turn that could switch. Keypad turns are not speech.
+            main_text = (active_transcript or "").strip()
+            if self.language_switcher.explicit_only and main_text and not main_text.startswith(DTMF_MESSAGE_PREFIX):
+                detector_transcript = main_text
+                detector_fallback = "main_asr"
+                logger.info(
+                    "LanguageSwitcher: detector buffer empty — explicit-only mode, judging the main ASR "
+                    "transcript instead (%r)",
+                    safe_log_text(detector_transcript, 60),
+                )
+            else:
+                logger.info(
+                    f"LanguageSwitcher: detector buffer empty — no decision "
+                    f"(path={'turn_boundary' if active_transcript else 'idle_flush'}, active={self.language!r})"
+                )
+                return
         # One selection, used by BOTH the speculative copy and the real history append —
         idle_flush_user_text = trailing_utterance_text(detector_segments) or detector_transcript
         # Pre-decide snapshot: a turn landing meanwhile would be duplicated below.
@@ -6499,6 +6521,7 @@ class TaskManager(BaseManager):
                     switched_to=switched_to,
                     context_note=context_note,
                     inflight_activity=activity,
+                    detector_fallback=detector_fallback,
                 )
             )
 
