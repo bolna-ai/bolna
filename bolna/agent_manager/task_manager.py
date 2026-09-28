@@ -6412,8 +6412,9 @@ class TaskManager(BaseManager):
                 detector_transcript = main_text
                 detector_fallback = "main_asr"
                 logger.info(
-                    f"LanguageSwitcher: detector buffer empty — explicit-only mode, judging the main ASR "
-                    f"transcript instead ({detector_transcript[:60]!r})"
+                    "LanguageSwitcher: detector buffer empty — explicit-only mode, judging the main ASR "
+                    "transcript instead (%r)",
+                    safe_log_text(detector_transcript, 60),
                 )
             else:
                 logger.info(
