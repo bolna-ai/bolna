@@ -93,6 +93,8 @@ LLM_GENERATION_TIMEOUT_S = 60.0
 LANGUAGE_SWITCH_DECIDE_TIMEOUT_S = 6.0
 # Let the detector's socket deliver this turn's tail before draining its buffer.
 LANGUAGE_SWITCH_SETTLE_MS = 300
+# Keypad input reaches the LLM as a user turn with this prefix (inject_digits_to_conversation).
+DTMF_MESSAGE_PREFIX = "dtmf_number: "
 # Silence between cutting audible old-language audio and the first new-language audio.
 LANGUAGE_SWITCH_AUDIO_GAP_S = 0.2
 # Ceiling on how long a mismatched turn's AUDIO waits for the switch decision. Generation is not
@@ -303,6 +305,11 @@ LANGUAGE_NAMES = {
     "od": "Odia",
 }
 
+# Request fields the pipeline owns; a custom LLM's extra_body may not override them.
+RESERVED_LLM_REQUEST_KEYS = frozenset(
+    {"model", "messages", "stream", "stream_options", "tools", "tool_choice", "parallel_tool_calls", "response_format"}
+)
+
 LLM_DEFAULT_CONFIGS = {
     "summarization": {"model": "gpt-4.1-mini", "provider": "openai"},
     "extraction": {"model": "gpt-4.1-mini", "provider": "openai"},
@@ -364,6 +371,27 @@ END_CALL_TOOL_DEFINITION = {
         "strict": True,
     },
 }
+
+# Provider TTS controls. Config models and synthesizer adapters share these
+# bounds so validation cannot drift between agent setup and direct package use.
+CARTESIA_VOLUME_MIN = 0.5
+CARTESIA_VOLUME_MAX = 2.0
+CARTESIA_VOLUME_MODELS = {"sonic-3", "sonic-3.5", "sonic-3.6", "sonic-preview"}
+
+DEEPGRAM_AURA_2_SPEED_MIN = 0.7
+DEEPGRAM_AURA_2_SPEED_MAX = 1.5
+
+OPENAI_TTS_SPEED_MIN = 0.25
+OPENAI_TTS_SPEED_MAX = 4.0
+
+RIME_TIME_SCALE_FACTOR_MIN = 0.4
+RIME_TIME_SCALE_FACTOR_MAX = 2.5
+
+SMALLEST_TTS_SPEED_MIN = 0.5
+SMALLEST_TTS_SPEED_MAX = 2.0
+
+SARVAM_LOUDNESS_MIN = 0.3
+SARVAM_LOUDNESS_MAX = 3.0
 
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,

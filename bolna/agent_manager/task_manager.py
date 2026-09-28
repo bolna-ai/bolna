@@ -27,6 +27,7 @@ from bolna.constants import (
     CHAT_WATCHDOG_TICK_S,
     DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION,
+    DTMF_MESSAGE_PREFIX,
     DUPLICATE_RESPONSE_SIMILARITY,
     FILLER_DICT,
     DEFAULT_LANGUAGE_CODE,
@@ -62,6 +63,7 @@ from bolna.constants import (
 )
 from bolna.helpers.function_calling_helpers import (
     redacted_url,
+    resolve_tool_name,
     trigger_api,
     computed_api_response,
     prepare_api_request,
@@ -223,6 +225,7 @@ def build_lid_decision_record(
     detector_lang_confidence=None,
     detector_segments=None,
     inflight_activity=None,
+    detector_fallback=None,
 ):
     """Build one telemetry record for a Switch-LLM firing (switch / stay / gated).
 
@@ -243,6 +246,8 @@ def build_lid_decision_record(
         # Per-segment detections (a turn can span languages); the tag above is just the latest.
         "detector_lang_confidence": detector_lang_confidence,
         "detector_segments": detector_segments or [],
+        # "main_asr" when the detector sent nothing and detector_transcript is the main ASR's text.
+        "detector_fallback": detector_fallback,
         "active_transcript": active_transcript,
         # What the caller is speaking, independent of support (set even when staying).
         "detected_language": dec.get("detected_language"),
@@ -557,6 +562,7 @@ class TaskManager(BaseManager):
         self.synthesizer_tasks = []
         self.synthesizer_task = None
         self._component_error = None
+        self.component_error_event = None
         self._error_logged = False
         self.synthesizer_monitor_task = None
         self.dtmf_task = None
@@ -651,7 +657,7 @@ class TaskManager(BaseManager):
                         "temperature": self.llm_agent_config["temperature"],
                     }
 
-                for key in ("reasoning_effort", "verbosity", "reasoning_summary", "thinking_budget"):
+                for key in ("reasoning_effort", "verbosity", "reasoning_summary", "thinking_budget", "extra_body"):
                     if key in self.llm_agent_config:
                         self.llm_config[key] = self.llm_agent_config[key]
 
@@ -3001,7 +3007,7 @@ class TaskManager(BaseManager):
                 for _digit in dtmf_digits:
                     self.dtmf_events.append({"digit": _digit, "ts_ms": _dtmf_ts})
 
-                dtmf_message = "dtmf_number: " + dtmf_digits
+                dtmf_message = DTMF_MESSAGE_PREFIX + dtmf_digits
                 base_meta_info = {
                     "io": self.tools["input"].io_provider,
                     "type": "text",
@@ -3954,13 +3960,30 @@ class TaskManager(BaseManager):
         """Bounds one generation call to LLM_GENERATION_TIMEOUT_S. Scoped here (not around the
         whole conversation task) so a hung LLM raises promptly without also racing the
         hangup-decision call or the hangup teardown that can follow it - those can legitimately
-        take a while and must not be cut off mid-way. BOLNA-2563."""
-        await asyncio.wait_for(
-            self.__do_llm_generation_impl(
-                messages, meta_info, next_step, should_bypass_synth, should_trigger_function_call
-            ),
-            timeout=LLM_GENERATION_TIMEOUT_S,
-        )
+        take a while and must not be cut off mid-way."""
+        # Per generation: tool follow-ups run on a copied meta_info that no caller reads back.
+        generation_errors = []
+        if isinstance(meta_info, dict):
+            meta_info["_non_fatal_errors"] = generation_errors
+            meta_info.pop("llm_finish_reason", None)
+        try:
+            await asyncio.wait_for(
+                self.__do_llm_generation_impl(
+                    messages, meta_info, next_step, should_bypass_synth, should_trigger_function_call
+                ),
+                timeout=LLM_GENERATION_TIMEOUT_S,
+            )
+        finally:
+            self.record_non_fatal_llm_errors(meta_info, generation_errors)
+
+    def record_non_fatal_llm_errors(self, meta_info, errors):
+        """Runs as each generation ends, so a follow-up's events precede its parent's: sort by sequence_id."""
+        for error in errors:
+            self.non_fatal_llm_error_events.append(
+                {**error, "sequence_id": meta_info.get("sequence_id"), "turn_id": meta_info.get("turn_id")}
+            )
+        # Cleared so a later writer of the same list (the hangup check) is recorded once, not twice.
+        errors.clear()
 
     async def __do_llm_generation_impl(
         self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False
@@ -4346,12 +4369,13 @@ class TaskManager(BaseManager):
             # records both, and the later error is the one that silenced it.
             errors = meta_info.get("_non_fatal_errors", [])
             reason = next((e.get("error") for e in reversed(errors) if e.get("error")), None)
-            empty_turn_detail = f"LLM returned no output ({reason})" if reason else "LLM returned no output"
             if reason is None:
                 # Chat-completions has no incomplete event, so record the empty turn here to keep it observable.
+                reason = meta_info.get("llm_finish_reason")
                 meta_info.setdefault("_non_fatal_errors", []).append(
-                    {"error_type": "empty_response", "error": None, "model": self.llm_config.get("model")}
+                    {"error_type": "empty_response", "error": reason, "model": self.llm_config.get("model")}
                 )
+            empty_turn_detail = f"LLM returned no output ({reason})" if reason else "LLM returned no output"
 
         if self.stream and llm_response != filler_message:
             self.__store_into_history(
@@ -4433,7 +4457,6 @@ class TaskManager(BaseManager):
         should_bypass_synth = "bypass_synth" in meta_info and meta_info["bypass_synth"] is True
         next_step = self._get_next_step(sequence, "llm")
         meta_info["llm_start_time"] = time.time()
-        meta_info["_non_fatal_errors"] = []
         self._append_eager_llm_stub(meta_info)
 
         if self.turn_based_conversation:
@@ -4472,9 +4495,6 @@ class TaskManager(BaseManager):
                     break
             raise
 
-        for _err in meta_info.get("_non_fatal_errors", []):
-            self.non_fatal_llm_error_events.append(_err)
-
         # TODO : Write a better check for completion prompt
 
         # Hangup detection - now supported for all agent types including graph_agent.
@@ -4491,6 +4511,8 @@ class TaskManager(BaseManager):
             completion_res, metadata = await self.tools["llm_agent"].check_for_completion(
                 messages, self.check_for_completion_prompt, meta_info=meta_info
             )
+            # The generation's errors were already written out; this records what the hangup check added.
+            self.record_non_fatal_llm_errors(meta_info, meta_info.get("_non_fatal_errors", []))
 
             should_hangup = (
                 str(completion_res.get("hangup", "")).lower() == "yes" if isinstance(completion_res, dict) else False
@@ -5473,6 +5495,14 @@ class TaskManager(BaseManager):
                 "message": str(error),
                 "provider": getattr(error, "provider", None),
                 "model": getattr(error, "model", None),
+            }
+            # _component_error is cleared before the output is built; this copy reaches progression_data.
+            self.component_error_event = {
+                "component": getattr(error, "component", None),
+                "provider": getattr(error, "provider", None),
+                "model": getattr(error, "model", None),
+                "error": str(error),
+                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
             }
             await self._report_provider_health(
                 getattr(error, "component", "unknown"),
@@ -6515,8 +6545,26 @@ class TaskManager(BaseManager):
         detector_lang_confidence = pool.lid_buffer_language_confidence()
         detector_segments = pool.lid_buffer_segments()
         detector_transcript, detected_lang = pool.take_lid_transcript()
+        detector_fallback = None
         if not detector_transcript:
-            return
+            # Explicit-only mode switches only on the turn that names a language, and the detector
+            # sometimes sends nothing for a one-word answer ("Tamil.") the main ASR did hear. Judge
+            # that text instead of dropping the one turn that could switch. Keypad turns are not speech.
+            main_text = (active_transcript or "").strip()
+            if self.language_switcher.explicit_only and main_text and not main_text.startswith(DTMF_MESSAGE_PREFIX):
+                detector_transcript = main_text
+                detector_fallback = "main_asr"
+                logger.info(
+                    "LanguageSwitcher: detector buffer empty — explicit-only mode, judging the main ASR "
+                    "transcript instead (%r)",
+                    safe_log_text(detector_transcript, 60),
+                )
+            else:
+                logger.info(
+                    f"LanguageSwitcher: detector buffer empty — no decision "
+                    f"(path={'turn_boundary' if active_transcript else 'idle_flush'}, active={self.language!r})"
+                )
+                return
         # One selection, used by BOTH the speculative copy and the real history append —
         idle_flush_user_text = trailing_utterance_text(detector_segments) or detector_transcript
         # Pre-decide snapshot: a turn landing meanwhile would be duplicated below.
@@ -6616,6 +6664,7 @@ class TaskManager(BaseManager):
                     switched_to=switched_to,
                     context_note=context_note,
                     inflight_activity=activity,
+                    detector_fallback=detector_fallback,
                 )
             )
 
@@ -8881,25 +8930,26 @@ class TaskManager(BaseManager):
         s2s = self.tools["s2s"]
         meta_info = {"request_id": self.task_id, "sequence_id": -1, "turn_id": None}
         tools_params = self.kwargs.get("api_tools", {}).get("tools_params", {}) or {}
-        params = tools_params.get(event.name, {}) or {}
+        tool_name = resolve_tool_name(event.name, tools_params)
+        params = tools_params.get(tool_name, {}) or {}
         try:
             args = json.loads(event.arguments or "{}")
         except ValueError:
             args = {}
 
-        logger.info(f"S2S tool call: {event.name} args={args}")
+        logger.info(f"S2S tool call: {tool_name} args={args}")
         convert_to_request_log(
-            json.dumps({"called_fun": event.name, **args}),
+            json.dumps({"called_fun": tool_name, **args}),
             meta_info,
             self.s2s_model,
             LogComponent.FUNCTION_CALL,
             direction=LogDirection.REQUEST,
             is_cached=False,
             run_id=self.run_id,
-            tool_name=event.name,
+            tool_name=tool_name,
         )
 
-        ends_call = event.name.startswith(END_CALL_FUNCTION_PREFIX)
+        ends_call = tool_name.startswith(END_CALL_FUNCTION_PREFIX)
         if ends_call:
             # A configured hangup message is the goodbye for an s2s call: there is no
             # synthesizer to play it separately, so the model has to speak it.
@@ -8914,27 +8964,27 @@ class TaskManager(BaseManager):
                     ),
                 }
             )
-        elif event.name.startswith("transfer_call"):
+        elif tool_name.startswith("transfer_call"):
             if self._transfer_retry_blocked:
                 result = json.dumps({"status": "failed", "message": TRANSFER_RETRY_DECLINED_MESSAGE})
             elif self.has_transfer:
                 result = json.dumps({"status": "success", "message": "Transfer already in progress; wait silently."})
             else:
                 self.has_transfer = True
-                await self._s2s_before_tool_request(event, args, params, meta_info)
+                await self._s2s_before_tool_request(tool_name, args, params, meta_info)
                 # param is the configured tool body, which is where call_transfer_number
                 # lives; the model's own arguments go in as the response, same as the llm
                 # path. Passing the arguments as both leaves the webhook no destination.
                 failure = await self._execute_transfer_call_webhook(
-                    event.name, params.get("url"), params.get("param"), args, meta_info
+                    tool_name, params.get("url"), params.get("param"), args, meta_info
                 )
                 if failure is not None:
                     result = json.dumps({"status": "failed", "message": failure})
                 else:
                     result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
         else:
-            await self._s2s_before_tool_request(event, args, params, meta_info)
-            result = await self._s2s_call_api_tool(event, args, params, meta_info)
+            await self._s2s_before_tool_request(tool_name, args, params, meta_info)
+            result = await self._s2s_call_api_tool(tool_name, args, params, meta_info)
 
         convert_to_request_log(
             result,
@@ -8944,7 +8994,7 @@ class TaskManager(BaseManager):
             direction=LogDirection.RESPONSE,
             is_cached=False,
             run_id=self.run_id,
-            tool_name=event.name,
+            tool_name=tool_name,
         )
         await s2s.send_function_result(event.call_id, event.name, result)
         await s2s.commit_function_results()
@@ -8956,25 +9006,25 @@ class TaskManager(BaseManager):
             self._s2s_hangup_after_response = True
             self._s2s_track_task(asyncio.create_task(self._s2s_hangup_if_goodbye_never_comes()))
 
-    async def _s2s_before_tool_request(self, event, args, params, meta_info):
+    async def _s2s_before_tool_request(self, tool_name, args, params, meta_info):
         """Pre-call webhook and filler, the same two things the llm path does before a tool."""
         webhook_url = params.get("pre_call_webhook_url")
         if webhook_url:
-            self.fire_pre_call_webhook(webhook_url, event.name, args, meta_info, params.get("pre_call_webhook_param"))
+            self.fire_pre_call_webhook(webhook_url, tool_name, args, meta_info, params.get("pre_call_webhook_param"))
         # Without this the caller hears dead air for as long as the tool takes, and the
         # are-you-still-there watchdog fires into the gap.
-        filler = compute_function_pre_call_message(self.language, event.name, params.get("pre_call_message"))
+        filler = compute_function_pre_call_message(self.language, tool_name, params.get("pre_call_message"))
         if filler:
             await self.tools["s2s"].trigger_response(instructions=f"Say exactly this, and nothing else: {filler}")
 
-    async def _s2s_call_api_tool(self, event, args, params, meta_info):
+    async def _s2s_call_api_tool(self, tool_name, args, params, meta_info):
         url = params.get("url")
         if not url:
-            return json.dumps({"status": "error", "message": f"Tool '{event.name}' has no URL configured."})
+            return json.dumps({"status": "error", "message": f"Tool '{tool_name}' has no URL configured."})
 
         method = (params.get("method") or "POST").lower()
         call_log = self._start_api_call_detail(
-            called_fun=event.name,
+            called_fun=tool_name,
             url=url,
             method=method,
             param=params.get("param"),
@@ -8994,7 +9044,7 @@ class TaskManager(BaseManager):
                 meta_info=meta_info,
                 run_id=self.run_id,
                 return_response_metadata=True,
-                called_fun=event.name,
+                called_fun=tool_name,
                 **args,
             )
         except asyncio.CancelledError:
@@ -9379,6 +9429,7 @@ class TaskManager(BaseManager):
                     "voicemail_check_count": self.voicemail_handler.check_count,
                     "dtmf_events": list(self.dtmf_events),
                     "non_fatal_llm_error_events": list(self.non_fatal_llm_error_events),
+                    "component_error": self.component_error_event,
                     "language_switch_events": list(self.language_switch_events),
                     "transfer_call_events": list(self.transfer_call_events),
                     "interruptible_hangup_message": self.interruptible_hangup_message,

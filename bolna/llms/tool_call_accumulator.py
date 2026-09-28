@@ -1,6 +1,6 @@
 import json
 from bolna.constants import END_CALL_FUNCTION_PREFIX
-from bolna.helpers.function_calling_helpers import redacted_url
+from bolna.helpers.function_calling_helpers import redacted_url, resolve_tool_name
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message
 from bolna.helpers.logger_config import configure_logger
 from .types import FunctionCallPayload
@@ -31,7 +31,7 @@ class ToolCallAccumulator:
         for tool_call in tool_calls_delta or []:
             idx = tool_call.index
             if idx not in self.final_tool_calls:
-                self.called_fun = tool_call.function.name
+                self.called_fun = resolve_tool_name(tool_call.function.name, self.api_params)
                 logger.info(f"Function given by LLM to trigger is - {self.called_fun}")
                 self.final_tool_calls[idx] = {
                     "index": tool_call.index,

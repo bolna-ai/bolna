@@ -21,7 +21,7 @@ from bolna.helpers.utils import (
     select_message_by_language,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
-from bolna.enums import EdgeConditionType, NodeType, ToolScope
+from bolna.enums import EdgeConditionType, LLMProvider, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -135,6 +135,9 @@ class GraphAgent(BaseAgent):
                 llm_kwargs["llm_key"] = self.llm_key
             if self.base_url:
                 llm_kwargs["base_url"] = self.base_url
+            if aux_provider == LLMProvider.CUSTOM.value:
+                llm_kwargs["provider"] = aux_provider
+                llm_kwargs["extra_body"] = self.config.get("extra_body")
         self.conversation_completion_llm = OpenAiLLM(
             model=os.getenv("CHECK_FOR_COMPLETION_LLM", aux_model or "gpt-4o-mini"), **llm_kwargs
         )
@@ -169,6 +172,7 @@ class GraphAgent(BaseAgent):
                 "use_responses_api",
                 "compact_threshold",
                 "overflow_llm",
+                "extra_body",
             ]:
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]
@@ -452,7 +456,7 @@ class GraphAgent(BaseAgent):
             # follow_conversation (a PTU swap) overrides these: routing then rides the conversation's own.
             base_kwargs.update({k: v for k, v in explicit_routing_creds.items() if v})
         elif self.routing_provider == conv_provider:
-            for key in ("llm_key", "base_url", "api_version"):
+            for key in ("llm_key", "base_url", "api_version", "extra_body"):
                 if self.config.get(key):
                     base_kwargs[key] = self.config[key]
         if self.service_tier:

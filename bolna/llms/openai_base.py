@@ -17,7 +17,7 @@ from .llm import BaseLLM
 from .message_models import MessageFormatAdapter, strip_internal_keys
 from .routing_stream import read_routing_stream
 from .types import APIParams, LLMStreamChunk, LatencyData, FunctionCallPayload
-from bolna.helpers.function_calling_helpers import redacted_url
+from bolna.helpers.function_calling_helpers import redacted_url, resolve_tool_name
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -209,6 +209,7 @@ class OpenAICompatibleLLM(BaseLLM):
                 return None
             args_str, args_recovered = "{}", True
 
+        func_name = resolve_tool_name(func_name, self.api_params)
         if func_name not in self.api_params:
             logger.warning(f"Text tool call rescue: '{func_name}' not in api_params, falling back to TTS")
             return None
@@ -641,26 +642,27 @@ class OpenAICompatibleLLM(BaseLLM):
                         yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
                         buffer = ""
                     func_call_args[item.id] = ""
-                    func_call_names[item.id] = item.name
+                    func_name = resolve_tool_name(item.name, self.api_params)
+                    func_call_names[item.id] = func_name
                     func_call_ids[item.id] = item.call_id
 
                     if not gave_pre_call_msg and not received_textual and self.trigger_function_call:
                         gave_pre_call_msg = True
-                        func_params = self.api_params.get(item.name)
+                        func_params = self.api_params.get(func_name)
                         api_tool_pre_call_message = (
                             APIParams.model_validate(func_params).pre_call_message if func_params else None
                         )
                         detected_lang = meta_info.get("detected_language") if meta_info else None
                         active_language = detected_lang or self.language
                         pre_msg = compute_function_pre_call_message(
-                            active_language, item.name, api_tool_pre_call_message
+                            active_language, func_name, api_tool_pre_call_message
                         )
                         if pre_msg:
                             yield LLMStreamChunk(
                                 data=pre_msg,
                                 end_of_stream=True,
                                 latency=latency_data,
-                                function_name=item.name,
+                                function_name=func_name,
                                 function_message=api_tool_pre_call_message,
                             )
 

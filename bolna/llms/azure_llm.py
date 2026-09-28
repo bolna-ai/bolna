@@ -212,6 +212,7 @@ class AzureLLM(OpenAICompatibleLLM):
         first_token_time = None
         latency_data = None
         stream_usage = None
+        finish_reason = None
 
         try:
             completion_stream, turn_overflowed = await self._create_completion(model_args)
@@ -259,6 +260,7 @@ class AzureLLM(OpenAICompatibleLLM):
                 self._log_llm_request_id(completion_stream, getattr(chunk, "id", None))
 
             delta = choice.delta
+            finish_reason = getattr(choice, "finish_reason", None) or finish_reason
 
             if hasattr(delta, "tool_calls") and delta.tool_calls and accumulator:
                 if buffer:
@@ -326,6 +328,8 @@ class AzureLLM(OpenAICompatibleLLM):
 
         if latency_data:
             latency_data.total_stream_duration_ms = now_ms() - start_time
+        if isinstance(meta_info, dict):
+            meta_info["llm_finish_reason"] = finish_reason
 
         if text_tool_buffer is not None:
             captured_tool_text = text_tool_buffer

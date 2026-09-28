@@ -29,13 +29,39 @@ EXPECTED_FIELDS = {
         "speed": False,
         "style": False,
     },
-    "openai": {"voice": True, "model": True},
-    "deepgram": {"voice_id": True, "voice": True, "model": True, "mip_opt_out": False},
+    "openai": {"voice": True, "model": True, "speed": False},
+    "deepgram": {
+        "voice_id": True,
+        "voice": True,
+        "model": True,
+        "mip_opt_out": False,
+        "speed": False,
+    },
     "azuretts": {"voice": True, "model": True, "language": True, "speed": False},
-    "cartesia": {"voice": True, "voice_id": True, "model": True, "language": True, "speed": False},
-    "smallest": {"voice": True, "voice_id": True, "model": True, "language": True},
-    "sarvam": {"voice": True, "voice_id": True, "model": True, "language": True, "speed": False},
-    "rime": {"voice": True, "voice_id": True, "model": True, "language": True},
+    "cartesia": {
+        "voice": True,
+        "voice_id": True,
+        "model": True,
+        "language": True,
+        "speed": False,
+        "volume": False,
+    },
+    "smallest": {"voice": True, "voice_id": True, "model": True, "language": True, "speed": False},
+    "sarvam": {
+        "voice": True,
+        "voice_id": True,
+        "model": True,
+        "language": True,
+        "speed": False,
+        "loudness": False,
+    },
+    "rime": {
+        "voice": True,
+        "voice_id": True,
+        "model": True,
+        "language": True,
+        "time_scale_factor": False,
+    },
     "pixa": {
         "voice": True,
         "voice_id": True,
@@ -46,6 +72,14 @@ EXPECTED_FIELDS = {
     },
     "maya": {"voice_id": True, "voice": True, "model": True, "language": False},
     "gemini": {"voice": True, "voice_id": True, "model": True, "language": True, "style": False},
+    "soniox": {
+        "voice": True,
+        "voice_id": True,
+        "model": True,
+        "language": True,
+        "speed": False,
+        "reduce_silence": False,
+    },
     "kalpa": {
         "voice": False,
         "voice_id": False,
@@ -95,6 +129,51 @@ def test_an_already_built_config_is_left_alone():
 def test_elevenlabs_still_requires_both_voice_and_voice_id():
     with pytest.raises(ValueError):
         Synthesizer(provider="elevenlabs", provider_config={"voice": "George", "model": "eleven_turbo_v2_5"})
+
+
+def test_elevenlabs_control_defaults_are_stable():
+    config = ElevenLabsConfig(voice="George", voice_id="voice-id", model="eleven_turbo_v2_5")
+
+    assert config.temperature == 0.5
+    assert config.similarity_boost == 0.75
+    assert config.speed == 1.0
+    assert config.style == 0.0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("temperature", -0.01),
+        ("temperature", 1.01),
+        ("similarity_boost", -0.01),
+        ("similarity_boost", 1.01),
+        ("speed", 0.69),
+        ("speed", 1.21),
+        ("style", -0.01),
+        ("style", 1.01),
+    ],
+)
+def test_elevenlabs_rejects_out_of_range_controls(field, value):
+    with pytest.raises(ValueError):
+        ElevenLabsConfig(
+            voice="George",
+            voice_id="voice-id",
+            model="eleven_turbo_v2_5",
+            **{field: value},
+        )
+
+
+def test_sarvam_loudness_uses_documented_bounds():
+    kwargs = {
+        "voice": "Ritu",
+        "voice_id": "ritu",
+        "model": "bulbul:v2",
+        "language": "hi-IN",
+    }
+
+    assert SarvamConfig(**kwargs, loudness=0.3).loudness == 0.3
+    with pytest.raises(ValueError):
+        SarvamConfig(**kwargs, loudness=0.29)
 
 
 def test_an_unknown_provider_is_rejected():

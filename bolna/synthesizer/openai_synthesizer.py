@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 from .base_synthesizer import BaseSynthesizer
+from bolna.constants import OPENAI_TTS_SPEED_MAX, OPENAI_TTS_SPEED_MIN
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import convert_audio_to_wav, resample
 
@@ -14,12 +15,23 @@ load_dotenv()
 
 class OPENAISynthesizer(BaseSynthesizer):
     def __init__(
-        self, voice, audio_format="mp3", model="tts-1", stream=False, sampling_rate=8000, buffer_size=400, **kwargs
+        self,
+        voice,
+        audio_format="mp3",
+        model="tts-1",
+        stream=False,
+        sampling_rate=8000,
+        buffer_size=400,
+        speed=1.0,
+        **kwargs,
     ):
         super().__init__(kwargs.get("task_manager_instance"), stream, buffer_size)
         self.voice = voice
         self.model = model
         self.sample_rate = int(sampling_rate) if isinstance(sampling_rate, str) else sampling_rate
+        self.speed = float(speed)
+        if not OPENAI_TTS_SPEED_MIN <= self.speed <= OPENAI_TTS_SPEED_MAX:
+            raise ValueError(f"OpenAI speed must be between {OPENAI_TTS_SPEED_MIN} and {OPENAI_TTS_SPEED_MAX}")
         self.stream = False
         api_key = kwargs.get("synthesizer_key", os.getenv("OPENAI_API_KEY"))
         self.async_client = AsyncOpenAI(api_key=api_key)
@@ -41,6 +53,7 @@ class OPENAISynthesizer(BaseSynthesizer):
             voice=self.voice,
             response_format="mp3",
             input=text,
+            speed=self.speed,
         )
         buffer = io.BytesIO()
         for chunk in spoken_response.iter_bytes(chunk_size=4096):
