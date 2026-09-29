@@ -8805,10 +8805,10 @@ class TaskManager(BaseManager):
         webhook_url = params.get("pre_call_webhook_url")
         if webhook_url:
             self.fire_pre_call_webhook(webhook_url, tool_name, args, meta_info, params.get("pre_call_webhook_param"))
-        # Without this the caller hears dead air for as long as the tool takes, and the
-        # are-you-still-there watchdog fires into the gap.
+        # A model that blocks on the tool goes silent; without this the caller hears dead air
+        # for as long as the tool takes, and the are-you-still-there watchdog fires into the gap.
         filler = compute_function_pre_call_message(self.language, tool_name, params.get("pre_call_message"))
-        if filler:
+        if filler and not self.tools["s2s"].speaks_during_tool_call(tool_name):
             await self.tools["s2s"].trigger_response(instructions=f"Say exactly this, and nothing else: {filler}")
 
     async def _s2s_call_api_tool(self, tool_name, args, params, meta_info):

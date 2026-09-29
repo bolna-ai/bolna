@@ -73,6 +73,7 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
         send_function_result=AsyncMock(),
         commit_function_results=AsyncMock(),
         trigger_response=AsyncMock(),
+        speaks_during_tool_call=MagicMock(return_value=False),
     )
     output = SimpleNamespace(
         handle=AsyncMock(), handle_interruption=AsyncMock(), get_provider=MagicMock(return_value=io_provider)
@@ -611,6 +612,24 @@ class TestHangupAndFillerParity:
 
         tm.tools["s2s"].trigger_response.assert_awaited_once()
         assert "One moment." in tm.tools["s2s"].trigger_response.await_args.kwargs["instructions"]
+
+    async def test_model_that_talks_through_the_tool_gets_no_filler(self):
+        # An injected turn would talk over the model's own "let me check".
+        tm = make_tm(tools_params={"book": {"url": "https://api.example/book", "pre_call_message": "One moment."}})
+        tm.language = "en"
+        tm.tools["s2s"].speaks_during_tool_call.return_value = True
+        tm._start_api_call_detail = MagicMock(return_value={})
+        tm._finalize_api_call_detail = MagicMock()
+        with (
+            patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+            patch(
+                "bolna.agent_manager.task_manager.trigger_api",
+                new=AsyncMock(return_value={"body": "{}", "status_code": 200}),
+            ),
+        ):
+            await tm._s2s_execute_tool(s2s_events.FunctionCall(name="book", call_id="c1", arguments="{}"))
+
+        tm.tools["s2s"].trigger_response.assert_not_awaited()
 
     async def test_end_call_gets_no_filler(self):
         tm = make_tm()

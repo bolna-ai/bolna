@@ -6,7 +6,8 @@ from typing import AsyncGenerator, List, Optional
 
 import websockets
 
-from bolna.constants import gemini_live_capabilities
+from bolna.constants import END_CALL_FUNCTION_PREFIX, gemini_live_capabilities
+from bolna.enums import GeminiToolBehavior
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import clean_gemini_schema
 from .base_s2s import MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAY_S, BaseS2SProvider
@@ -167,8 +168,9 @@ class GeminiLiveS2S(BaseS2SProvider):
                 logger.warning(f"S2S: dropping malformed tool entry: {tool!r}")
                 continue
             declaration = {"name": spec["name"], "description": spec.get("description", "")}
-            if self.capabilities.tool_behavior:
-                declaration["behavior"] = self.capabilities.tool_behavior.value
+            behavior = self._tool_behavior(spec["name"])
+            if behavior:
+                declaration["behavior"] = behavior.value
             parameters = spec.get("parameters")
             if parameters:
                 # An unsupported schema key does not just drop the tool: Gemini rejects the
@@ -176,6 +178,16 @@ class GeminiLiveS2S(BaseS2SProvider):
                 declaration["parameters"] = clean_gemini_schema(parameters)
             declarations.append(declaration)
         return declarations
+
+    def _tool_behavior(self, name: str) -> Optional[GeminiToolBehavior]:
+        # end_call blocks: the goodbye has to be the next turn to complete, and a model
+        # still talking beside the call would complete its own turn first.
+        if self.capabilities.tool_behavior and name.startswith(END_CALL_FUNCTION_PREFIX):
+            return GeminiToolBehavior.BLOCKING
+        return self.capabilities.tool_behavior
+
+    def speaks_during_tool_call(self, name: str) -> bool:
+        return self._tool_behavior(name) is GeminiToolBehavior.NON_BLOCKING
 
     async def send_audio(self, pcm_bytes: bytes) -> None:
         if self._reconnecting:

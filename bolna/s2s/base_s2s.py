@@ -108,6 +108,10 @@ class BaseS2SProvider(ABC):
     async def disconnect(self) -> None:
         """Close the session."""
 
+    def speaks_during_tool_call(self, name: str) -> bool:
+        """Whether the model keeps talking while this tool runs, so no filler is needed."""
+        return False
+
     async def send_dtmf(self, digits: str) -> None:
         """Forward telephony keypad digits to the model."""
         raise NotImplementedError(f"{type(self).__name__} does not support DTMF")

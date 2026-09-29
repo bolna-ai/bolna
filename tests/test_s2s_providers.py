@@ -471,10 +471,28 @@ class TestGeminiModelCapabilities:
         declaration = provider._build_setup()["tools"][0]["functionDeclarations"][0]
         assert declaration.get("behavior") == behavior
 
+    def test_end_call_blocks_on_an_async_model(self):
+        # The goodbye has to be the next turn to complete, so the model must not keep talking.
+        provider = make_gemini(
+            model="gemini-3.8-live",
+            tools=[
+                {"function": {"name": "book", "description": "d"}},
+                {"function": {"name": "end_call", "description": "d"}},
+            ],
+        )
+        behaviors = [d["behavior"] for d in provider._build_setup()["tools"][0]["functionDeclarations"]]
+        assert behaviors == ["NON_BLOCKING", "BLOCKING"]
+        assert provider.speaks_during_tool_call("book")
+        assert not provider.speaks_during_tool_call("end_call")
+
+    def test_blocking_model_never_speaks_during_a_tool(self):
+        assert not make_gemini(tools=[{"function": {"name": "book", "description": "d"}}]).speaks_during_tool_call(
+            "book"
+        )
+
     @pytest.mark.parametrize("model", ["gemini-3.8-live", "gemini-3.8-live-extended-thinking"])
     async def test_async_tool_result_interrupts_the_model(self, model):
-        # After end_call the goodbye must be the next turn to complete; a result that waited
-        # for the model to finish its sentence would let that sentence complete first.
+        # The caller is waiting on the answer, not on the end of the model's filler sentence.
         provider = make_gemini(model=model)
         provider._ws = FakeWS()
         await provider.send_function_result("c1", "book", '{"ok":true}')

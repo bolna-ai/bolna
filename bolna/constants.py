@@ -506,9 +506,8 @@ class GeminiLiveCapabilities:
 
 
 # 3.8 picks its own language and rejects a language code, and only the extended-thinking
-# variant takes a thinking level. Both run tools async, Google's default for 3.8. Results
-# interrupt: the caller is waiting on the answer, and after end_call the goodbye has to be
-# the next turn to complete, not the sentence the model was midway through.
+# variant takes a thinking level. Both run tools async, Google's default for 3.8, and
+# results interrupt because the caller is waiting on the answer.
 _GEMINI_3_8_TOOLS = {
     "tool_behavior": GeminiToolBehavior.NON_BLOCKING,
     "tool_scheduling": GeminiToolScheduling.INTERRUPT,
