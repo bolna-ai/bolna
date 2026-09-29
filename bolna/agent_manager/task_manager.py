@@ -45,6 +45,7 @@ from bolna.constants import (
     NON_EVIDENCE_MARK_TYPES,
     SWITCH_LANGUAGE_TOOL_DEFINITION,
     END_CALL_FUNCTION_PREFIX,
+    TRANSFER_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
     RESPONSES_API_MODEL_PREFIXES,
     LLM_GENERATION_TIMEOUT_S,
@@ -8311,6 +8312,7 @@ class TaskManager(BaseManager):
         self._s2s_started_at = time.time()
         self._s2s_agent_speaking = False
         self._s2s_turn_seq = 0
+        self._s2s_usage_logged = s2s_events.S2SUsage()
         self._s2s_playout_until = 0.0
 
         logger.info(f"S2S connecting | provider={self.s2s_provider_name} model={self.s2s_model}")
@@ -8389,6 +8391,11 @@ class TaskManager(BaseManager):
                 await asyncio.gather(*self._s2s_tool_tasks, return_exceptions=True)
             await asyncio.gather(*loops, return_exceptions=True)
             await s2s.disconnect()
+            # Usage the provider reported for a response that never completed, typically the
+            # one the caller hung up during, is otherwise never billed.
+            unlogged = s2s.usage_total - self._s2s_usage_logged
+            if unlogged.has_tokens:
+                self._s2s_log_usage("", unlogged)
         logger.info("S2S conversation completed")
 
     async def _hangup_after_goodbye(self, reason) -> None:
@@ -8623,6 +8630,32 @@ class TaskManager(BaseManager):
             except asyncio.QueueEmpty:
                 break
 
+    def _s2s_log_usage(self, transcript: str, usage: s2s_events.S2SUsage | None) -> None:
+        """Write one response's usage to the request log, which is what the call is billed from."""
+        if usage is not None:
+            self._s2s_usage_logged = self._s2s_usage_logged + usage
+            if self.task_id == 0 and self.on_turn_usage:
+                self._s2s_track_task(
+                    asyncio.create_task(
+                        self.on_turn_usage(usage.input_tokens, usage.output_tokens, usage.cached_tokens)
+                    )
+                )
+        # A turn whose usage never arrived must stay distinguishable from one that spent
+        # nothing: zeros would stamp it api_reported and billing would trust that.
+        split = (usage or s2s_events.S2SUsage()).modality_split()
+        convert_to_request_log(
+            transcript,
+            {"request_id": self.task_id, "sequence_id": -1, "s2s_usage": split},
+            model=self.s2s_model,
+            component=LogComponent.S2S,
+            direction=LogDirection.RESPONSE,
+            is_cached=False,
+            run_id=self.run_id,
+            input_tokens=usage.input_tokens if usage is not None else None,
+            output_tokens=usage.output_tokens if usage is not None else None,
+            cached_tokens=usage.cached_tokens if usage is not None else None,
+        )
+
     async def _s2s_finish_turn(self, event):
         if self._s2s_agent_speaking:
             self.interruption_manager.on_agent_speech_ended()
@@ -8632,28 +8665,8 @@ class TaskManager(BaseManager):
             self._s2s_agent_speaking = False
         self._s2s_turn_seq += 1
 
-        usage = event.usage
-        if usage and self.task_id == 0 and self.on_turn_usage:
-            self._s2s_track_task(
-                asyncio.create_task(self.on_turn_usage(usage.input_tokens, usage.output_tokens, usage.cached_tokens))
-            )
-
-        if event.transcript or usage:
-            # A turn whose usage never arrived must stay distinguishable from one that spent
-            # nothing: zeros would stamp it api_reported and billing would trust that.
-            split = (usage or s2s_events.S2SUsage()).modality_split()
-            convert_to_request_log(
-                event.transcript,
-                {"request_id": self.task_id, "sequence_id": -1, "s2s_usage": split},
-                model=self.s2s_model,
-                component=LogComponent.S2S,
-                direction=LogDirection.RESPONSE,
-                is_cached=False,
-                run_id=self.run_id,
-                input_tokens=usage.input_tokens if usage else None,
-                output_tokens=usage.output_tokens if usage else None,
-                cached_tokens=usage.cached_tokens if usage else None,
-            )
+        if event.transcript or event.usage:
+            self._s2s_log_usage(event.transcript, event.usage)
 
         # The end-of-stream sentinel makes the output handler emit its final mark, which is
         # how the hangup path learns the audio actually reached the caller.
@@ -8751,7 +8764,7 @@ class TaskManager(BaseManager):
                     ),
                 }
             )
-        elif tool_name.startswith("transfer_call"):
+        elif tool_name.startswith(TRANSFER_CALL_FUNCTION_PREFIX):
             if self.has_transfer:
                 result = json.dumps({"status": "success", "message": "Transfer already in progress; wait silently."})
             else:
@@ -8793,10 +8806,10 @@ class TaskManager(BaseManager):
         webhook_url = params.get("pre_call_webhook_url")
         if webhook_url:
             self.fire_pre_call_webhook(webhook_url, tool_name, args, meta_info, params.get("pre_call_webhook_param"))
-        # Without this the caller hears dead air for as long as the tool takes, and the
-        # are-you-still-there watchdog fires into the gap.
+        # A model that blocks on the tool goes silent; without this the caller hears dead air
+        # for as long as the tool takes, and the are-you-still-there watchdog fires into the gap.
         filler = compute_function_pre_call_message(self.language, tool_name, params.get("pre_call_message"))
-        if filler:
+        if filler and not self.tools["s2s"].speaks_during_tool_call(tool_name):
             await self.tools["s2s"].trigger_response(instructions=f"Say exactly this, and nothing else: {filler}")
 
     async def _s2s_call_api_tool(self, tool_name, args, params, meta_info):

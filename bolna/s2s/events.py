@@ -27,9 +27,18 @@ class S2SUsage:
     input_text_tokens: int = 0
     output_audio_tokens: int = 0
     output_text_tokens: int = 0
+    # Reported apart from the response tokens, and priced as text output.
+    output_thinking_tokens: int = 0
 
     def __add__(self, other: "S2SUsage") -> "S2SUsage":
         return replace(self, **{f: getattr(self, f) + getattr(other, f) for f in _USAGE_FIELDS})
+
+    def __sub__(self, other: "S2SUsage") -> "S2SUsage":
+        return replace(self, **{f: getattr(self, f) - getattr(other, f) for f in _USAGE_FIELDS})
+
+    @property
+    def has_tokens(self) -> bool:
+        return any(getattr(self, f) for f in _USAGE_FIELDS)
 
     def modality_split(self) -> dict:
         """The audio/text breakdown that has to reach billing."""
@@ -38,6 +47,7 @@ class S2SUsage:
             "input_text_tokens": self.input_text_tokens,
             "output_audio_tokens": self.output_audio_tokens,
             "output_text_tokens": self.output_text_tokens,
+            "output_thinking_tokens": self.output_thinking_tokens,
         }
 
     def as_dict(self) -> dict:

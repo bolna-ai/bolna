@@ -117,6 +117,7 @@ class TestS2SUsage:
             input_text_tokens=2,
             output_audio_tokens=3,
             output_text_tokens=4,
+            output_thinking_tokens=5,
         )
         # Flat totals travel in their own log columns, so the split must not repeat them.
         assert usage.modality_split() == {
@@ -124,10 +125,21 @@ class TestS2SUsage:
             "input_text_tokens": 2,
             "output_audio_tokens": 3,
             "output_text_tokens": 4,
+            "output_thinking_tokens": 5,
         }
 
     def test_starts_at_zero(self):
         assert S2SUsage() + S2SUsage() == S2SUsage()
+
+    def test_subtraction_leaves_what_was_never_reported(self):
+        total = S2SUsage(input_tokens=30, output_audio_tokens=12)
+        reported = S2SUsage(input_tokens=20, output_audio_tokens=12)
+        assert total - reported == S2SUsage(input_tokens=10)
+
+    def test_a_zero_turn_is_still_a_usage(self):
+        # Optional checks read `usage is not None`; zero tokens must not look like no report.
+        assert not S2SUsage().has_tokens
+        assert S2SUsage(cached_tokens=1).has_tokens
 
     def test_is_immutable(self):
         with pytest.raises(Exception):
@@ -429,6 +441,84 @@ class TestGeminiSetup:
         assert provider._build_setup()["tools"] == [{"functionDeclarations": [{"name": "book", "description": "d"}]}]
 
 
+class TestGeminiModelCapabilities:
+    """A native-audio model that picks its own language rejects a language code, and 3.8
+    flipped the tool default to async, so each of these is per-model, not per-provider."""
+
+    def test_language_code_sent_only_where_the_model_takes_one(self):
+        speech = make_gemini(language="hi-IN")._build_setup()["generationConfig"]["speechConfig"]
+        assert speech["languageCode"] == "hi-IN"
+        auto = make_gemini(model="gemini-3.8-live", language="hi-IN")._build_setup()
+        assert "languageCode" not in auto["generationConfig"]["speechConfig"]
+
+    def test_thinking_level_reaches_generation_config(self):
+        setup = make_gemini(model="gemini-3.8-live-extended-thinking", thinking_level="low")._build_setup()
+        assert setup["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "low"}
+
+    def test_thinking_config_absent_when_unset(self):
+        assert "thinkingConfig" not in make_gemini()._build_setup()["generationConfig"]
+
+    @pytest.mark.parametrize(
+        "model,behavior",
+        [
+            ("gemini-3.1-flash-live-preview", None),
+            ("gemini-3.8-live", "NON_BLOCKING"),
+            ("gemini-3.8-live-extended-thinking", "NON_BLOCKING"),
+        ],
+    )
+    def test_tool_behavior_is_declared_per_model(self, model, behavior):
+        provider = make_gemini(model=model, tools=[{"function": {"name": "book", "description": "d"}}])
+        declaration = provider._build_setup()["tools"][0]["functionDeclarations"][0]
+        assert declaration.get("behavior") == behavior
+
+    def test_ending_and_transferring_block_on_an_async_model(self):
+        # The goodbye has to be the next turn to complete, and a transfer plays its hold message.
+        provider = make_gemini(
+            model="gemini-3.8-live",
+            tools=[
+                {"function": {"name": "book", "description": "d"}},
+                {"function": {"name": "end_call", "description": "d"}},
+                {"function": {"name": "transfer_call_sales", "description": "d"}},
+            ],
+        )
+        behaviors = [d["behavior"] for d in provider._build_setup()["tools"][0]["functionDeclarations"]]
+        assert behaviors == ["NON_BLOCKING", "BLOCKING", "BLOCKING"]
+        assert provider.speaks_during_tool_call("book")
+        assert not provider.speaks_during_tool_call("end_call")
+        assert not provider.speaks_during_tool_call("transfer_call_sales")
+
+    def test_blocking_model_never_speaks_during_a_tool(self):
+        assert not make_gemini(tools=[{"function": {"name": "book", "description": "d"}}]).speaks_during_tool_call(
+            "book"
+        )
+
+    @pytest.mark.parametrize("model", ["gemini-3.8-live", "gemini-3.8-live-extended-thinking"])
+    async def test_async_tool_result_waits_for_the_model_to_finish_speaking(self, model):
+        # Interrupting would clip the sentence the model is mid-way through.
+        provider = make_gemini(model=model)
+        provider._ws = FakeWS()
+        await provider.send_function_result("c1", "book", '{"ok":true}')
+        await provider.commit_function_results()
+        assert provider._ws.sent[0]["toolResponse"]["functionResponses"][0]["response"] == {
+            "ok": True,
+            "scheduling": "WHEN_IDLE",
+        }
+
+    async def test_blocking_model_result_carries_no_scheduling(self):
+        provider = make_gemini()
+        provider._ws = FakeWS()
+        await provider.send_function_result("c1", "book", '{"ok":true}')
+        await provider.commit_function_results()
+        assert provider._ws.sent[0]["toolResponse"]["functionResponses"][0]["response"] == {"ok": True}
+
+    def test_thinking_level_rejected_for_a_model_without_one(self):
+        GeminiLiveConfig(model="gemini-3.8-live-extended-thinking", thinking_level="low")
+        with pytest.raises(ValueError):
+            GeminiLiveConfig(model="gemini-3.8-live", thinking_level="low")
+        with pytest.raises(ValueError):
+            GeminiLiveConfig(model="gemini-3.8-live-extended-thinking", thinking_level="minimal")
+
+
 class TestGeminiTranscriptBoundaries:
     """Gemini streams both transcripts in fragments and only finalises the agent's at
     turnComplete, so naive mapping splits one caller sentence into many turns and loses
@@ -602,6 +692,27 @@ class TestGeminiEventMapping:
         await drain(provider)
         assert provider.usage_total.input_text_tokens == 137
         assert provider.usage_total.input_audio_tokens == 201
+        assert provider.usage_total.output_audio_tokens == 35
+
+    async def test_thinking_tokens_are_kept_apart_from_the_response(self):
+        # thoughtsTokenCount sits outside responseTokensDetails, so a turn that thinks bills
+        # as if it had not unless the count is carried separately.
+        provider = make_gemini(model="gemini-3.8-live-extended-thinking", thinking_level="low")
+        attach_ws(
+            provider,
+            [
+                {
+                    "usageMetadata": {
+                        "promptTokenCount": 363,
+                        "responseTokenCount": 35,
+                        "thoughtsTokenCount": 128,
+                        "responseTokensDetails": [{"modality": "AUDIO", "tokenCount": 35}],
+                    }
+                }
+            ],
+        )
+        await drain(provider)
+        assert provider.usage_total.output_thinking_tokens == 128
         assert provider.usage_total.output_audio_tokens == 35
 
     async def test_first_audio_latency_measured_from_turn_start(self):

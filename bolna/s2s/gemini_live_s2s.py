@@ -6,6 +6,8 @@ from typing import AsyncGenerator, List, Optional
 
 import websockets
 
+from bolna.constants import END_CALL_FUNCTION_PREFIX, TRANSFER_CALL_FUNCTION_PREFIX, gemini_live_capabilities
+from bolna.enums import GeminiToolBehavior
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import clean_gemini_schema
 from .base_s2s import MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAY_S, BaseS2SProvider
@@ -32,6 +34,9 @@ GEMINI_LIVE_URL = (
 )
 
 
+_BLOCKING_TOOL_PREFIXES = (END_CALL_FUNCTION_PREFIX, TRANSFER_CALL_FUNCTION_PREFIX)
+
+
 class GeminiLiveS2S(BaseS2SProvider):
     """Gemini Live API speech-to-speech provider.
 
@@ -51,6 +56,7 @@ class GeminiLiveS2S(BaseS2SProvider):
         api_key: str,
         tools: Optional[List[dict]] = None,
         language: Optional[str] = None,
+        thinking_level: Optional[str] = None,
         temperature: Optional[float] = None,
         start_sensitivity: Optional[str] = None,
         end_sensitivity: Optional[str] = None,
@@ -68,7 +74,9 @@ class GeminiLiveS2S(BaseS2SProvider):
             tools=tools,
             **kwargs,
         )
+        self.capabilities = gemini_live_capabilities(model)
         self.language = language
+        self.thinking_level = thinking_level
         self.temperature = temperature
         self.start_sensitivity = start_sensitivity
         self.end_sensitivity = end_sensitivity
@@ -118,10 +126,12 @@ class GeminiLiveS2S(BaseS2SProvider):
             "responseModalities": ["AUDIO"],
             "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": self.voice}}},
         }
-        if self.language:
+        if self.language and self.capabilities.language_code:
             generation_config["speechConfig"]["languageCode"] = self.language
         if self.temperature is not None:
             generation_config["temperature"] = self.temperature
+        if self.thinking_level:
+            generation_config["thinkingConfig"] = {"thinkingLevel": self.thinking_level}
 
         setup: dict = {
             "model": self.model if self.model.startswith("models/") else f"models/{self.model}",
@@ -161,6 +171,9 @@ class GeminiLiveS2S(BaseS2SProvider):
                 logger.warning(f"S2S: dropping malformed tool entry: {tool!r}")
                 continue
             declaration = {"name": spec["name"], "description": spec.get("description", "")}
+            behavior = self._tool_behavior(spec["name"])
+            if behavior:
+                declaration["behavior"] = behavior.value
             parameters = spec.get("parameters")
             if parameters:
                 # An unsupported schema key does not just drop the tool: Gemini rejects the
@@ -168,6 +181,16 @@ class GeminiLiveS2S(BaseS2SProvider):
                 declaration["parameters"] = clean_gemini_schema(parameters)
             declarations.append(declaration)
         return declarations
+
+    def _tool_behavior(self, name: str) -> Optional[GeminiToolBehavior]:
+        # Ending and transferring the call block. The goodbye has to be the next turn to
+        # complete, and a transfer plays its hold message while the model stays quiet.
+        if self.capabilities.tool_behavior and name.startswith(_BLOCKING_TOOL_PREFIXES):
+            return GeminiToolBehavior.BLOCKING
+        return self.capabilities.tool_behavior
+
+    def speaks_during_tool_call(self, name: str) -> bool:
+        return self._tool_behavior(name) is GeminiToolBehavior.NON_BLOCKING
 
     async def send_audio(self, pcm_bytes: bytes) -> None:
         if self._reconnecting:
@@ -339,6 +362,8 @@ class GeminiLiveS2S(BaseS2SProvider):
                 payload = {"result": payload}
         except (ValueError, TypeError):
             payload = {"result": result}
+        if self.capabilities.tool_scheduling:
+            payload["scheduling"] = self.capabilities.tool_scheduling.value
         self._pending_tool_results.append({"id": call_id, "name": name, "response": payload})
 
     def _start_turn_clock(self) -> None:
@@ -415,5 +440,6 @@ def _map_usage(usage: dict) -> S2SUsage:
         input_tokens=usage.get("promptTokenCount", 0) or 0,
         output_tokens=usage.get("responseTokenCount", 0) or 0,
         cached_tokens=usage.get("cachedContentTokenCount", 0) or 0,
+        output_thinking_tokens=usage.get("thoughtsTokenCount", 0) or 0,
         **by_modality,
     )
