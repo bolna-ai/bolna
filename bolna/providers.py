@@ -53,10 +53,11 @@ from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, 
 
 
 def elevenlabs_synthesizer(**kwargs):
-    """Eleven v3 is served only from the text-to-dialogue socket; multi-stream-input 403s
+    """Eleven v3 and v4 are served only from the text-to-dialogue socket; multi-stream-input 403s
     on those model ids. Everything else stays on the original synthesizer."""
     # `or ""` rather than a get() default: a stored config can carry an explicit null model.
-    cls = ElevenlabsV3Synthesizer if (kwargs.get("model") or "").startswith("eleven_v3") else ElevenlabsSynthesizer
+    dialogue_model = (kwargs.get("model") or "").startswith(("eleven_v3", "eleven_v4"))
+    cls = ElevenlabsV3Synthesizer if dialogue_model else ElevenlabsSynthesizer
     return cls(**kwargs)
 
 
