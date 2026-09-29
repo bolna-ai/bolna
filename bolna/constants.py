@@ -364,6 +364,9 @@ CARTESIA_VOLUME_MIN = 0.5
 CARTESIA_VOLUME_MAX = 2.0
 CARTESIA_VOLUME_MODELS = {"sonic-3", "sonic-3.5", "sonic-3.6", "sonic-preview"}
 
+# Served only from the text-to-dialogue socket; multi-stream-input 403s on these.
+ELEVENLABS_DIALOGUE_MODEL_PREFIXES = ("eleven_v3", "eleven_v4")
+
 DEEPGRAM_AURA_2_SPEED_MIN = 0.7
 DEEPGRAM_AURA_2_SPEED_MAX = 1.5
 
