@@ -11,7 +11,9 @@ from bolna.models import (
     tts_control_limits,
     tts_control_range,
     tts_provider_config_error,
+    tts_render_settings,
 )
+from bolna.helpers.utils import get_md5_hash, static_node_audio_key
 
 
 def _sarvam(model, **controls):
@@ -139,3 +141,38 @@ def test_config_error_rejects_exactly_what_the_config_model_rejects(provider, ke
         with pytest.raises(ValidationError):
             config_model.model_validate({**BASE_CONFIG, key: value})
         assert tts_provider_config_error(provider, {**BASE_CONFIG, key: value}) is not None
+
+
+@pytest.mark.parametrize(
+    "provider,provider_config,exclude,expected",
+    [
+        ("cartesia", {"model": "sonic-3", "speed": 1.0, "volume": 1.0}, (), ""),
+        ("cartesia", {"model": "sonic-3", "speed": 1, "volume": 1.5}, (), "volume=1.5"),
+        ("cartesia", {"speed": 1.2, "volume": 1.5}, (), "speed=1.2,volume=1.5"),
+        ("cartesia", {"speed": 1.2, "volume": 1.5}, ("speed",), "volume=1.5"),
+        ("elevenlabs", {"similarity_boost": 0.75, "temperature": 0.5, "style": 0}, (), ""),
+        ("elevenlabs", {"similarity_boost": 0.8}, (), "similarity_boost=0.8"),
+        ("sarvam", {"model": "bulbul:v2", "loudness": 1.5}, (), "loudness=1.5"),
+        ("rime", {"model": "coda", "time_scale_factor": 0.8}, (), "time_scale_factor=0.8"),
+        ("soniox", {"speed": 1.0}, (), "speed=1"),
+        ("cartesia", {"voice": "Sonic", "sampling_rate": 8000, "speed": None}, (), ""),
+        ("polly", {"engine": "neural"}, (), ""),
+        ("not-a-provider", {"speed": 2}, (), ""),
+        ("cartesia", None, (), ""),
+    ],
+)
+def test_tts_render_settings(provider, provider_config, exclude, expected):
+    assert tts_render_settings(provider, provider_config, exclude=exclude) == expected
+
+
+def test_static_node_audio_key_is_unchanged_without_render_settings():
+    # Clips pre-rendered before render settings joined the key must still be found.
+    assert static_node_audio_key("Hi", "cartesia", "Sonic", "vid", "sonic-3") == get_md5_hash(
+        "cartesia|Sonic|vid|sonic-3|Hi"
+    )
+
+
+def test_static_node_audio_key_changes_with_render_settings():
+    plain = static_node_audio_key("Hi", "cartesia", "Sonic", "vid", "sonic-3")
+    louder = static_node_audio_key("Hi", "cartesia", "Sonic", "vid", "sonic-3", render_settings="volume=1.5")
+    assert louder != plain

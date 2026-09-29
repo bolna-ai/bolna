@@ -110,6 +110,28 @@ def tts_control_range(provider: str, key: str, model: Optional[str]) -> Optional
     return None if ge is None and le is None else (ge, le)
 
 
+def tts_render_settings(provider: str, provider_config: Optional[dict], exclude=()) -> str:
+    """The provider_config sliders that change how audio sounds, as a stable string for audio cache keys.
+    Values at bolna's default are left out, so keys built before a setting was set still match."""
+    config_model = SYNTHESIZER_CONFIG_MODELS.get(provider)
+    if config_model is None or not isinstance(provider_config, dict):
+        return ""
+    settings = []
+    for key in sorted(provider_config):
+        value = provider_config[key]
+        if key in exclude or value is None or tts_control_range(provider, key, None) is None:
+            continue
+        default = config_model.model_fields[key].default
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if default is not None and number == float(default):
+            continue
+        settings.append(f"{key}={number:g}")
+    return ",".join(settings)
+
+
 def tts_provider_config_error(provider: str, provider_config: Optional[dict]) -> Optional[str]:
     """Why a provider_config value is outside bolna's range for its model, or None when every value fits.
 
