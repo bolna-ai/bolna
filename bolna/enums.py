@@ -72,6 +72,13 @@ class SynthesizerProvider(str, Enum):
         return [provider.value for provider in cls]
 
 
+class ElevenLabsDialogueModel(str, Enum):
+    """ElevenLabs model families served only from the text-to-dialogue socket."""
+
+    V3 = "eleven_v3"
+    V4 = "eleven_v4"
+
+
 class TranscriberProvider(str, Enum):
     """Enum for transcriber (STT) providers."""
 
