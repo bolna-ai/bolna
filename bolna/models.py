@@ -17,6 +17,7 @@ from .enums import (
     NodeType,
     VariableType,
 )
+from .helpers.utils import graph_opening_message
 from .constants import (
     CARTESIA_VOLUME_MAX,
     CARTESIA_VOLUME_MIN,
@@ -816,3 +817,21 @@ class AgentModel(BaseModel):
     agent_type: str = "other"
     tasks: List[Task]
     agent_welcome_message: Optional[str] = AGENT_WELCOME_MESSAGE
+
+    @model_validator(mode="after")
+    def validate_one_opening_message(self):
+        """A graph agent whose start node is static opens with that node's message, so a welcome
+        message that says something else would never be heard."""
+        welcome = (self.agent_welcome_message or "").strip()
+        if "agent_welcome_message" not in self.model_fields_set or not welcome or not self.tasks:
+            return self
+
+        config = self.model_dump(include={"agent_welcome_message": True, "tasks": {0: {"tools_config"}}})
+        transcriber = (config["tasks"][0].get("tools_config") or {}).get("transcriber") or {}
+        opening = graph_opening_message(config, transcriber.get("language")).strip()
+        if opening != welcome:
+            raise ValueError(
+                "The graph starts on a static node, so the call opens with that node's message and the welcome "
+                f"message would never play. Leave the welcome message empty or set it to: {opening!r}"
+            )
+        return self

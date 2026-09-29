@@ -4,8 +4,12 @@ A graph agent whose start node is static opens with that node's own message, so 
 heard instead of being routed past; every other agent opens with its welcome message.
 """
 
+import pytest
+from pydantic import ValidationError
+
 from bolna.agent_manager.assistant_manager import AssistantManager
 from bolna.helpers.utils import graph_opening_message
+from bolna.models import AgentModel
 
 
 WELCOME = "Hello from the welcome message."
@@ -96,3 +100,60 @@ class TestCallOpening:
         cfg = _agent_config([_llm("greeting")], "greeting")
         manager = AssistantManager(cfg, context_data={"recipient_data": {}})
         assert manager.kwargs["agent_welcome_message"] == WELCOME
+
+
+_OMITTED = object()
+
+
+def _agent_model(start_node, welcome=_OMITTED, language="en"):
+    data = {
+        "agent_name": "test",
+        "tasks": [
+            {
+                "tools_config": {
+                    "transcriber": {"provider": "deepgram", "language": language, "stream": True},
+                    "llm_agent": {
+                        "agent_flow_type": "streaming",
+                        "agent_type": "graph_agent",
+                        "llm_config": {
+                            "agent_information": "test",
+                            "model": "gpt-4o-mini",
+                            "provider": "openai",
+                            "current_node_id": start_node["id"],
+                            "nodes": [start_node],
+                        },
+                    },
+                },
+                "toolchain": {"execution": "parallel", "pipelines": [["transcriber", "llm", "synthesizer"]]},
+            }
+        ],
+    }
+    if welcome is not _OMITTED:
+        data["agent_welcome_message"] = welcome
+    return AgentModel(**data)
+
+
+class TestOneOpeningMessage:
+    """An agent is saved with at most one line claiming the start of the call."""
+
+    def test_welcome_that_differs_from_a_static_start_node_is_rejected(self):
+        with pytest.raises(ValidationError, match="Am I speaking with Priya"):
+            _agent_model(_static("greeting", "Am I speaking with Priya?"), welcome="Hello there.")
+
+    def test_welcome_matching_the_static_start_node_is_accepted(self):
+        _agent_model(_static("greeting", "Am I speaking with Priya?"), welcome="  Am I speaking with Priya? ")
+
+    def test_empty_welcome_on_a_static_start_node_is_accepted(self):
+        _agent_model(_static("greeting", "Am I speaking with Priya?"), welcome="")
+
+    def test_omitted_welcome_on_a_static_start_node_is_accepted(self):
+        _agent_model(_static("greeting", "Am I speaking with Priya?"))
+
+    def test_any_welcome_is_accepted_when_the_start_node_is_an_llm_node(self):
+        _agent_model(_llm("greeting"), welcome="Hello there.")
+
+    def test_multilingual_start_node_is_compared_in_the_agent_language(self):
+        node = _static("greeting", {"en": "Hello there.", "hi": "नमस्ते।"})
+        _agent_model(node, welcome="नमस्ते।", language="hi")
+        with pytest.raises(ValidationError):
+            _agent_model(node, welcome="नमस्ते।", language="en")
