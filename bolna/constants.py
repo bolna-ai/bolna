@@ -339,6 +339,7 @@ UNCOMPRESSED_AUDIO_FORMATS = ("pcm", "wav", "mulaw", "ulaw")
 AUDIO_STREAM_END_SENTINELS = (b"\x00", b"\x00\x00")
 
 END_CALL_FUNCTION_PREFIX = "end_call"
+TRANSFER_CALL_FUNCTION_PREFIX = "transfer_call"
 
 END_CALL_TOOL_DEFINITION = {
     "type": "function",
@@ -506,11 +507,12 @@ class GeminiLiveCapabilities:
 
 
 # 3.8 picks its own language and rejects a language code, and only the extended-thinking
-# variant takes a thinking level. Both run tools async, Google's default for 3.8, and
-# results interrupt because the caller is waiting on the answer.
+# variant takes a thinking level. Both run tools async, Google's default for 3.8. A result
+# is spoken once the model is idle: interrupting would cut the sentence it is mid-way
+# through, and the caller would hear a clipped word the model then drops.
 _GEMINI_3_8_TOOLS = {
     "tool_behavior": GeminiToolBehavior.NON_BLOCKING,
-    "tool_scheduling": GeminiToolScheduling.INTERRUPT,
+    "tool_scheduling": GeminiToolScheduling.WHEN_IDLE,
 }
 GEMINI_LIVE_MODEL_CAPABILITIES = {
     "gemini-3.8-live": GeminiLiveCapabilities(language_code=False, **_GEMINI_3_8_TOOLS),

@@ -45,6 +45,7 @@ from bolna.constants import (
     NON_EVIDENCE_MARK_TYPES,
     SWITCH_LANGUAGE_TOOL_DEFINITION,
     END_CALL_FUNCTION_PREFIX,
+    TRANSFER_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
     RESPONSES_API_MODEL_PREFIXES,
     LLM_GENERATION_TIMEOUT_S,
@@ -8763,7 +8764,7 @@ class TaskManager(BaseManager):
                     ),
                 }
             )
-        elif tool_name.startswith("transfer_call"):
+        elif tool_name.startswith(TRANSFER_CALL_FUNCTION_PREFIX):
             if self.has_transfer:
                 result = json.dumps({"status": "success", "message": "Transfer already in progress; wait silently."})
             else:

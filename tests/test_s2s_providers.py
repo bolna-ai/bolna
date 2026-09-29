@@ -471,19 +471,21 @@ class TestGeminiModelCapabilities:
         declaration = provider._build_setup()["tools"][0]["functionDeclarations"][0]
         assert declaration.get("behavior") == behavior
 
-    def test_end_call_blocks_on_an_async_model(self):
-        # The goodbye has to be the next turn to complete, so the model must not keep talking.
+    def test_ending_and_transferring_block_on_an_async_model(self):
+        # The goodbye has to be the next turn to complete, and a transfer plays its hold message.
         provider = make_gemini(
             model="gemini-3.8-live",
             tools=[
                 {"function": {"name": "book", "description": "d"}},
                 {"function": {"name": "end_call", "description": "d"}},
+                {"function": {"name": "transfer_call_sales", "description": "d"}},
             ],
         )
         behaviors = [d["behavior"] for d in provider._build_setup()["tools"][0]["functionDeclarations"]]
-        assert behaviors == ["NON_BLOCKING", "BLOCKING"]
+        assert behaviors == ["NON_BLOCKING", "BLOCKING", "BLOCKING"]
         assert provider.speaks_during_tool_call("book")
         assert not provider.speaks_during_tool_call("end_call")
+        assert not provider.speaks_during_tool_call("transfer_call_sales")
 
     def test_blocking_model_never_speaks_during_a_tool(self):
         assert not make_gemini(tools=[{"function": {"name": "book", "description": "d"}}]).speaks_during_tool_call(
@@ -491,15 +493,15 @@ class TestGeminiModelCapabilities:
         )
 
     @pytest.mark.parametrize("model", ["gemini-3.8-live", "gemini-3.8-live-extended-thinking"])
-    async def test_async_tool_result_interrupts_the_model(self, model):
-        # The caller is waiting on the answer, not on the end of the model's filler sentence.
+    async def test_async_tool_result_waits_for_the_model_to_finish_speaking(self, model):
+        # Interrupting would clip the sentence the model is mid-way through.
         provider = make_gemini(model=model)
         provider._ws = FakeWS()
         await provider.send_function_result("c1", "book", '{"ok":true}')
         await provider.commit_function_results()
         assert provider._ws.sent[0]["toolResponse"]["functionResponses"][0]["response"] == {
             "ok": True,
-            "scheduling": "INTERRUPT",
+            "scheduling": "WHEN_IDLE",
         }
 
     async def test_blocking_model_result_carries_no_scheduling(self):

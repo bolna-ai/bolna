@@ -6,7 +6,7 @@ from typing import AsyncGenerator, List, Optional
 
 import websockets
 
-from bolna.constants import END_CALL_FUNCTION_PREFIX, gemini_live_capabilities
+from bolna.constants import END_CALL_FUNCTION_PREFIX, TRANSFER_CALL_FUNCTION_PREFIX, gemini_live_capabilities
 from bolna.enums import GeminiToolBehavior
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import clean_gemini_schema
@@ -32,6 +32,9 @@ GEMINI_LIVE_URL = (
     "wss://generativelanguage.googleapis.com/ws/"
     "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 )
+
+
+_BLOCKING_TOOL_PREFIXES = (END_CALL_FUNCTION_PREFIX, TRANSFER_CALL_FUNCTION_PREFIX)
 
 
 class GeminiLiveS2S(BaseS2SProvider):
@@ -180,9 +183,9 @@ class GeminiLiveS2S(BaseS2SProvider):
         return declarations
 
     def _tool_behavior(self, name: str) -> Optional[GeminiToolBehavior]:
-        # end_call blocks: the goodbye has to be the next turn to complete, and a model
-        # still talking beside the call would complete its own turn first.
-        if self.capabilities.tool_behavior and name.startswith(END_CALL_FUNCTION_PREFIX):
+        # Ending and transferring the call block. The goodbye has to be the next turn to
+        # complete, and a transfer plays its hold message while the model stays quiet.
+        if self.capabilities.tool_behavior and name.startswith(_BLOCKING_TOOL_PREFIXES):
             return GeminiToolBehavior.BLOCKING
         return self.capabilities.tool_behavior
 
