@@ -1,4 +1,5 @@
 import json
+import annotated_types
 from typing import Any, Literal, Optional, List, Union, Dict, Callable
 from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
 from pydantic_core import PydanticCustomError
@@ -18,6 +19,8 @@ from .enums import (
     VariableType,
 )
 from .constants import (
+    AZURE_TTS_SPEED_MAX,
+    AZURE_TTS_SPEED_MIN,
     CARTESIA_VOLUME_MAX,
     CARTESIA_VOLUME_MIN,
     DEEPGRAM_AURA_2_SPEED_MAX,
@@ -32,6 +35,9 @@ from .constants import (
     SARVAM_LOUDNESS_MIN,
     SMALLEST_TTS_SPEED_MAX,
     SMALLEST_TTS_SPEED_MIN,
+    TTS_CONTROL_MODEL_PREFIXES,
+    TTS_CONTROL_MODELS,
+    TTS_MODEL_CONTROL_LIMITS,
 )
 
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
@@ -56,6 +62,75 @@ def validate_reasoning_effort_for_model(model: str, reasoning_effort: str) -> No
     supported = MODEL_REASONING_EFFORT_MAP.get(model, None)
     if supported is not None and reasoning_effort not in supported:
         raise ValueError(f"reasoning_effort '{reasoning_effort}' is not supported for model '{model}'.")
+
+
+def tts_control_applies(provider: str, key: str, model: Optional[str]) -> bool:
+    """Whether `model` takes the `key` provider_config control; one not listed per model applies to all."""
+    model = (model or "").lower()
+    models = TTS_CONTROL_MODELS.get(provider, {}).get(key)
+    prefixes = TTS_CONTROL_MODEL_PREFIXES.get(provider, {}).get(key)
+    if models is None and prefixes is None:
+        return True
+    return (models is not None and model in models) or (prefixes is not None and model.startswith(prefixes))
+
+
+def tts_control_limits(provider: str, key: str, model: Optional[str]) -> Optional[tuple]:
+    """The (min, max) `model` narrows `key` to, or None when the config field's own bounds apply."""
+    return TTS_MODEL_CONTROL_LIMITS.get(provider, {}).get((model or "").lower(), {}).get(key)
+
+
+def _tts_range_message(provider: str, key: str, low, high, model: Optional[str] = None) -> str:
+    scope = f"{provider.capitalize()} {model}" if model else provider.capitalize()
+    if low is None:
+        return f"{scope} {key} must be at most {high}"
+    if high is None:
+        return f"{scope} {key} must be at least {low}"
+    return f"{scope} {key} must be between {low} and {high}"
+
+
+def validate_tts_model_control_limits(provider: SynthesizerProvider, config: BaseModel) -> None:
+    for key, (low, high) in TTS_MODEL_CONTROL_LIMITS.get(provider, {}).get((config.model or "").lower(), {}).items():
+        value = getattr(config, key, None)
+        if value is not None and not low <= value <= high:
+            raise ValueError(_tts_range_message(provider.value, key, low, high, config.model))
+
+
+def tts_control_range(provider: str, key: str, model: Optional[str]) -> Optional[tuple]:
+    """The (min, max) bolna allows for provider_config.<key> on `model`: the model's own limit, else the
+    config field's ge/le (one side may be None). None when the provider's config has no bounded `key`."""
+    limits = tts_control_limits(provider, key, model)
+    if limits:
+        return limits
+    config_model = SYNTHESIZER_CONFIG_MODELS.get(provider)
+    config_field = config_model.model_fields.get(key) if config_model else None
+    if config_field is None:
+        return None
+    ge = next((m.ge for m in config_field.metadata if isinstance(m, annotated_types.Ge)), None)
+    le = next((m.le for m in config_field.metadata if isinstance(m, annotated_types.Le)), None)
+    return None if ge is None and le is None else (ge, le)
+
+
+def tts_provider_config_error(provider: str, provider_config: Optional[dict]) -> Optional[str]:
+    """Why a provider_config value is outside bolna's range for its model, or None when every value fits.
+
+    Checks each value on its own, so it works on a partial or per-language config that the provider's
+    config model would reject for missing fields. Building the config model enforces the same ranges."""
+    if not isinstance(provider_config, dict):
+        return None
+    model = provider_config.get("model")
+    for key, value in provider_config.items():
+        bounds = tts_control_range(provider, key, model)
+        if bounds is None or value is None:
+            continue
+        low, high = bounds
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return f"{provider.capitalize()} {key} must be a number"
+        if (low is not None and number < low) or (high is not None and number > high):
+            per_model = tts_control_limits(provider, key, model) is not None
+            return _tts_range_message(provider, key, low, high, model if per_model else None)
+    return None
 
 
 class PollyConfig(BaseModel):
@@ -127,8 +202,7 @@ class SarvamConfig(StandardVoiceConfig):
 
     @model_validator(mode="after")
     def validate_model_controls(self):
-        if self.model == "bulbul:v3" and self.speed is not None and not 0.5 <= self.speed <= 2.0:
-            raise ValueError("Sarvam bulbul:v3 speed must be between 0.5 and 2.0")
+        validate_tts_model_control_limits(SynthesizerProvider.SARVAM, self)
         return self
 
 
@@ -163,7 +237,7 @@ class AzureConfig(BaseModel):
     voice: str
     model: str
     language: str
-    speed: Optional[float] = 1.0
+    speed: Optional[float] = Field(default=1.0, ge=AZURE_TTS_SPEED_MIN, le=AZURE_TTS_SPEED_MAX)
 
 
 class GeminiConfig(StandardVoiceConfig):

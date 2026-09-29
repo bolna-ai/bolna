@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timezone
-from bolna.enums import ReasoningEffort as RE, TelephonyProvider
+from bolna.enums import ReasoningEffort as RE, SynthesizerProvider, TelephonyProvider
 
 PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
@@ -384,6 +384,30 @@ SMALLEST_TTS_SPEED_MAX = 2.0
 
 SARVAM_LOUDNESS_MIN = 0.3
 SARVAM_LOUDNESS_MAX = 3.0
+
+AZURE_TTS_SPEED_MIN = 0.5
+AZURE_TTS_SPEED_MAX = 2.0
+
+# Per-model TTS controls, read by the config validators in bolna.models and by the dashboard. A config
+# field's ge/le is the provider-wide range; a control listed here applies only to the models named, or has
+# a narrower range on one model. Model ids are lowercase.
+SARVAM_LOUDNESS_MODELS = frozenset({"bulbul:v2"})
+RIME_TIME_SCALE_MODELS = frozenset({"coda", "mistv3"})
+ELEVENLABS_STYLE_MODELS = frozenset({"eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2"})
+
+TTS_CONTROL_MODELS = {
+    SynthesizerProvider.CARTESIA: {"volume": CARTESIA_VOLUME_MODELS},
+    SynthesizerProvider.ELEVENLABS: {"style": ELEVENLABS_STYLE_MODELS},
+    SynthesizerProvider.RIME: {"time_scale_factor": RIME_TIME_SCALE_MODELS},
+    SynthesizerProvider.SARVAM: {"loudness": SARVAM_LOUDNESS_MODELS},
+}
+# Deepgram model ids can carry the voice ("aura-2-thalia-en"), so its controls match on the family prefix.
+TTS_CONTROL_MODEL_PREFIXES = {
+    SynthesizerProvider.DEEPGRAM: {"speed": ("aura-2",)},
+}
+TTS_MODEL_CONTROL_LIMITS = {
+    SynthesizerProvider.SARVAM: {"bulbul:v3": {"speed": (0.5, 2.0)}},
+}
 
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
