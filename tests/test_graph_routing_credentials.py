@@ -19,7 +19,18 @@ PLATFORM_ENV = {
     "GOOGLE_API_KEY": "platform-google-key",
 }
 
-REGISTRY_PROVIDERS = ["openai", "azure", "azure-openai", "google", "custom", "ola", "groq", "cohere", "anthropic"]
+REGISTRY_PROVIDERS = [
+    "openai",
+    "azure",
+    "azure-openai",
+    "google",
+    "custom",
+    "ola",
+    "groq",
+    "cohere",
+    "anthropic",
+    "orcarouter",
+]
 
 
 def _registry(store):
@@ -181,6 +192,16 @@ def test_gemini_conversation_aux_llm_uses_platform_openai_key():
 def test_openai_conversation_aux_llm_reuses_its_own_key():
     _, aux_calls = _build(provider="openai")
     assert all(call["llm_key"] == "conv-key" for call in aux_calls)
+
+
+def test_orcarouter_conversation_aux_llm_uses_provider_env_credentials():
+    _, aux_calls = _build(
+        env={"ORCAROUTER_API_KEY": "orca-key"},
+        provider="orcarouter",
+        llm_key=None,
+    )
+    assert all(call["llm_key"] == "orca-key" for call in aux_calls)
+    assert all(call["base_url"] == "https://api.orcarouter.ai/v1" for call in aux_calls)
 
 
 # Real construction (no registry mock) for the paths whose behavior depends on the concrete LLM class.
