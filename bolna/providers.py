@@ -50,14 +50,11 @@ from .output_handlers import (
 from .llms import OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
 from .s2s import GeminiLiveS2S, OpenAIRealtimeS2S
 from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider, S2SProvider
-
-
-ELEVENLABS_DIALOGUE_MODEL_PREFIXES = ("eleven_v3", "eleven_v4")
+from .constants import ELEVENLABS_DIALOGUE_MODEL_PREFIXES
 
 
 def elevenlabs_synthesizer(**kwargs):
-    """Eleven v3 and v4 are served only from the text-to-dialogue socket; multi-stream-input 403s
-    on those model ids. Everything else stays on the original synthesizer."""
+    """Dialogue-socket models go to the dialogue synthesizer, everything else to the original."""
     # `or ""` rather than a get() default: a stored config can carry an explicit null model.
     is_dialogue_model = (kwargs.get("model") or "").startswith(ELEVENLABS_DIALOGUE_MODEL_PREFIXES)
     cls = ElevenlabsV3Synthesizer if is_dialogue_model else ElevenlabsSynthesizer
