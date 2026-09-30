@@ -8015,6 +8015,9 @@ class TaskManager(BaseManager):
         if self.conversation_ended or not self._transfer_pending:
             logger.info(f"transfer_failed ({cause}) with no transfer pending for run_id={self.run_id}; ignoring")
             return
+        if self._transfer_connected:
+            logger.info(f"transfer_failed ({cause}) after the bridge for run_id={self.run_id}; ignoring")
+            return
         if self._transfer_posting:
             # The transfer's own turn resumes the caller once its POST returns.
             self._transfer_early_failure = cause

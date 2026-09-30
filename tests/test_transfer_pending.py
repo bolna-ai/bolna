@@ -133,6 +133,7 @@ async def test_the_watchdog_does_not_hang_up_right_after_a_resume(fast_watchdog_
     tm.conversation_config = {}
     tm._transfer_tool_call_id = ""
     tm._transfer_posting = False
+    tm._transfer_connected = False
     tm._transfer_deadline = None
     tm._transfer_tasks = set()
 
@@ -280,9 +281,10 @@ def _tool_result(tm, tool_call_id="call-1"):
     )
 
 
-async def test_refused_transfer_is_answered_inside_the_tool_call_turn(transfer_webhook):
-    tm, _ = _transfer_call(transfer_call_params={"provider": "trunk"})
-    transfer_webhook(status=409, body='{"success": false, "message": "at channel limit"}')
+@pytest.mark.parametrize("provider,status", [("trunk", 409), ("plivo", 500)], ids=["trunk", "plivo"])
+async def test_refused_transfer_is_answered_inside_the_tool_call_turn(transfer_webhook, provider, status):
+    tm, _ = _transfer_call(transfer_call_params={"provider": provider})
+    transfer_webhook(status=status, body='{"success": false, "message": "at channel limit"}')
 
     await _call_transfer_tool(tm)
 
@@ -480,11 +482,15 @@ async def test_transfer_connected_only_cancels_the_deadline(transfer_webhook):
     await _call_transfer_tool(tm)
     deadline = tm._transfer_deadline
     await handler.process_message({"type": "transfer_connected"})
+    # A failure after the bridge must not restart the agent over the caller and the human.
+    await handler.process_message({"type": "transfer_failed", "cause": "NORMAL_CLEARING"})
+    await asyncio.gather(*tm._transfer_tasks)
 
     assert deadline.cancelled()
     assert tm._transfer_deadline is None
     assert tm.has_transfer is True
     assert tm._transfer_tasks == set()
+    tm._inject_and_run_llm.assert_not_awaited()
 
 
 async def test_transfer_provider_comes_from_transfer_call_params(transfer_webhook):
