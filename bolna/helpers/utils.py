@@ -25,13 +25,15 @@ from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
 from bolna.constants import (
+    CARTESIA_PRONUNCIATION_DICT_MODEL_PREFIXES,
     CONTENT_POLICY_ERROR_MARKERS,
     PREPROCESS_DIR,
     PRE_FUNCTION_CALL_MESSAGE,
+    SARVAM_PRONUNCIATION_DICT_MODELS,
     TRANSFERING_CALL_FILLER,
     END_CALL_FUNCTION_PREFIX,
 )
-from bolna.enums import LogComponent, LogDirection, UsageSource
+from bolna.enums import LogComponent, LogDirection, SynthesizerProvider, UsageSource
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
 import audioop
@@ -395,10 +397,58 @@ def get_md5_hash(text):
     return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
-def static_node_audio_key(text, provider=None, voice=None, voice_id=None, model=None):
+def static_node_audio_key(text, provider=None, voice=None, voice_id=None, model=None, pronunciation=None):
     """S3 filename stem for a static-node clip, bound to the voice it was rendered with."""
-    identity = "|".join(str(part or "") for part in (provider, voice, voice_id, model))
+    parts = [provider, voice, voice_id, model]
+    # Only joins the key when set, so clips rendered without a dictionary keep their keys.
+    if pronunciation:
+        parts.append(pronunciation)
+    identity = "|".join(str(part or "") for part in parts)
     return get_md5_hash(f"{identity}|{text}")
+
+
+def cartesia_supports_pronunciation_dict(model):
+    return (model or "").startswith(CARTESIA_PRONUNCIATION_DICT_MODEL_PREFIXES)
+
+
+def sarvam_supports_pronunciation_dict(model):
+    return model in SARVAM_PRONUNCIATION_DICT_MODELS
+
+
+def pronunciation_rules_digest(rules):
+    """Stable digest of a synthesizer's pronunciation rules; empty when there are none."""
+    pairs = []
+    for rule in rules or []:
+        rule = rule.model_dump() if hasattr(rule, "model_dump") else rule
+        pairs.append([rule.get("word"), rule.get("say_as")])
+    if not pairs:
+        return ""
+    return hashlib.sha256(json.dumps(pairs, ensure_ascii=False).encode()).hexdigest()[:16]
+
+
+def pronunciation_dictionary_key(provider, provider_config, pronunciation_rules=None):
+    """The provider pronunciation dictionaries a synthesizer config applies, as a cache-key part.
+
+    Empty when none apply, including a dictionary set on a model that ignores it."""
+    if hasattr(provider_config, "model_dump"):
+        provider_config = provider_config.model_dump()
+    config = provider_config or {}
+    key = ""
+    if provider == SynthesizerProvider.ELEVENLABS.value:
+        locators = [
+            locator.model_dump() if hasattr(locator, "model_dump") else locator
+            for locator in config.get("pronunciation_dictionary_locators") or []
+        ]
+        key = ",".join(
+            f"{locator.get('pronunciation_dictionary_id')}:{locator.get('version_id')}" for locator in locators
+        )
+    elif provider == SynthesizerProvider.CARTESIA.value and cartesia_supports_pronunciation_dict(config.get("model")):
+        key = config.get("pronunciation_dict_id") or ""
+    elif provider == SynthesizerProvider.SARVAM.value and sarvam_supports_pronunciation_dict(config.get("model")):
+        key = config.get("dict_id") or ""
+    # A dictionary edited in place keeps its ID, so the rules join the key to stop old clips matching.
+    digest = pronunciation_rules_digest(pronunciation_rules) if key else ""
+    return f"{key}#{digest}" if digest else key
 
 
 def is_valid_md5(hash_string):
