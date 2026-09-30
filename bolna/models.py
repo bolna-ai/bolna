@@ -1,6 +1,6 @@
 import json
 from typing import Any, Literal, Optional, List, Union, Dict, Callable
-from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, ValidationError, Json, model_validator
 from pydantic_core import PydanticCustomError
 from .providers import *
 from .enums import (
@@ -22,10 +22,14 @@ from .constants import (
     CARTESIA_VOLUME_MIN,
     DEEPGRAM_AURA_2_SPEED_MAX,
     DEEPGRAM_AURA_2_SPEED_MIN,
+    ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES,
     MODEL_REASONING_EFFORT_MAP,
     RESERVED_LLM_REQUEST_KEYS,
     OPENAI_TTS_SPEED_MAX,
     OPENAI_TTS_SPEED_MIN,
+    PRONUNCIATION_RULE_SAY_AS_MAX_LENGTH,
+    PRONUNCIATION_RULE_WORD_MAX_LENGTH,
+    PRONUNCIATION_RULES_MAX,
     RIME_TIME_SCALE_FACTOR_MAX,
     RIME_TIME_SCALE_FACTOR_MIN,
     SARVAM_LOUDNESS_MAX,
@@ -66,6 +70,12 @@ class PollyConfig(BaseModel):
     # rate: Optional[str] = '100%'
 
 
+class PronunciationDictionaryLocator(BaseModel):
+    # The streaming socket requires both IDs, and every rule edit on ElevenLabs mints a new version.
+    pronunciation_dictionary_id: str = Field(min_length=1)
+    version_id: str = Field(min_length=1)
+
+
 class ElevenLabsConfig(BaseModel):
     voice: str
     voice_id: str
@@ -74,6 +84,10 @@ class ElevenLabsConfig(BaseModel):
     similarity_boost: Optional[float] = Field(default=0.75, ge=0.0, le=1.0)
     speed: Optional[float] = Field(default=1.0, ge=0.7, le=1.2)
     style: Optional[float] = Field(default=0.0, ge=0.0, le=1.0)
+    # Applied in order. Phoneme rules only take effect on eleven_flash_v2, eleven_v3 and eleven_v4.
+    pronunciation_dictionary_locators: Optional[List[PronunciationDictionaryLocator]] = Field(
+        default=None, max_length=ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES
+    )
 
 
 class OpenAIConfig(BaseModel):
@@ -107,6 +121,8 @@ class StandardVoiceConfig(BaseModel):
 class CartesiaConfig(StandardVoiceConfig):
     speed: Optional[float] = Field(default=1.0, ge=0.6, le=1.5)
     volume: Optional[float] = Field(default=1.0, ge=CARTESIA_VOLUME_MIN, le=CARTESIA_VOLUME_MAX)
+    # Sent on sonic-3 and newer only.
+    pronunciation_dict_id: Optional[str] = None
 
 
 class RimeConfig(StandardVoiceConfig):
@@ -124,6 +140,8 @@ class SmallestConfig(StandardVoiceConfig):
 class SarvamConfig(StandardVoiceConfig):
     speed: Optional[float] = Field(default=1.0, ge=0.3, le=3.0)
     loudness: Optional[float] = Field(default=1.0, ge=SARVAM_LOUDNESS_MIN, le=SARVAM_LOUDNESS_MAX)
+    # Sent on bulbul:v3 only; Sarvam ignores it on other models.
+    dict_id: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_model_controls(self):
@@ -232,6 +250,13 @@ class Transcriber(BaseModel):
         return validate_attribute(value, TranscriberProvider.all_values())
 
 
+class PronunciationRule(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    word: str = Field(min_length=1, max_length=PRONUNCIATION_RULE_WORD_MAX_LENGTH)
+    say_as: str = Field(min_length=1, max_length=PRONUNCIATION_RULE_SAY_AS_MAX_LENGTH)
+
+
 class Synthesizer(BaseModel):
     provider: str
     # Derived from the registry so a provider registered there is always accepted here.
@@ -240,6 +265,18 @@ class Synthesizer(BaseModel):
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
     caching: Optional[bool] = True
+    # Word -> say-as pairs to build a provider dictionary from; synthesis applies dictionaries by ID only.
+    pronunciation_rules: Optional[List[PronunciationRule]] = Field(default=None, max_length=PRONUNCIATION_RULES_MAX)
+
+    @field_validator("pronunciation_rules")
+    def validate_unique_pronunciation_words(cls, rules):
+        seen = set()
+        for rule in rules or []:
+            word = rule.word.casefold()
+            if word in seen:
+                raise ValueError(f"Pronunciation rule for '{rule.word}' is listed more than once.")
+            seen.add(word)
+        return rules
 
     @model_validator(mode="before")
     def preprocess(cls, values):
