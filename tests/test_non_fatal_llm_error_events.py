@@ -67,6 +67,8 @@ async def test_errors_recorded_by_the_hangup_check_are_kept():
     tm.task_id = 1
     tm.use_llm_to_determine_hangup = True
     tm.end_call_primary = False
+    tm.has_transfer = False
+    tm.transfer_call_params = {}
     tm.conversation_ended = False
     tm.llm_latencies = SimpleNamespace(turn_latencies=[], other_latencies=[])
     tm.conversation_start_init_ts = time.time() * 1000
