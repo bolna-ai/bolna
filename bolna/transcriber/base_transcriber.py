@@ -25,6 +25,9 @@ class BaseTranscriber:
         self.is_transcript_sent_for_processing = False
         self.reset_audio_frame_state()
 
+    def set_agent_context(self, text):
+        """Receive the agent's spoken reply; providers that can use it as ASR context override this."""
+
     def reset_audio_frame_state(self) -> None:
         """Restart the audio position -> send-time map; ASR stream positions restart per connection."""
         self.audio_cursor_s = 0.0

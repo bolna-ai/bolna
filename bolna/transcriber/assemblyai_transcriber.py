@@ -13,7 +13,12 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from .base_transcriber import BaseTranscriber
 from bolna.enums import TelephonyProvider
-from bolna.constants import ASSEMBLYAI_MAX_KEYTERMS, ASSEMBLYAI_MAX_PROMPT_CHARACTERS, ASSEMBLYAI_SUPPORTED_LANGUAGES
+from bolna.constants import (
+    ASSEMBLYAI_MAX_AGENT_CONTEXT_CHARACTERS,
+    ASSEMBLYAI_MAX_KEYTERMS,
+    ASSEMBLYAI_MAX_PROMPT_CHARACTERS,
+    ASSEMBLYAI_SUPPORTED_LANGUAGES,
+)
 from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
@@ -31,6 +36,22 @@ LEGACY_SPEECH_MODEL_ALIASES = {
 # These take `format_turns` and a fixed language set; universal-3-x takes `language_codes` and `prompt`.
 LEGACY_STREAMING_MODELS = frozenset({"universal-streaming-english", "universal-streaming-multilingual"})
 
+# Streaming connection parameters taken from the transcriber's `assemblyai_config`.
+STREAMING_CONFIG_PARAMS = (
+    "mode",
+    "min_turn_silence",
+    "max_turn_silence",
+    "interruption_delay",
+    "vad_threshold",
+    "voice_focus",
+    "voice_focus_threshold",
+)
+# The legacy models don't take these.
+UNIVERSAL_3_ONLY_PARAMS = frozenset({"mode", "interruption_delay", "voice_focus", "voice_focus_threshold"})
+
+# Other models reject a session opened with `agent_context`.
+AGENT_CONTEXT_MODELS = frozenset({"universal-3-6-pro"})
+
 
 class AssemblyAITranscriber(BaseTranscriber):
     def __init__(
@@ -46,6 +67,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         format_turns=True,
         keywords=None,
         context=None,
+        assemblyai_config=None,
         **kwargs,
     ):
         super().__init__(input_queue)
@@ -62,6 +84,14 @@ class AssemblyAITranscriber(BaseTranscriber):
         self.format_turns = format_turns
         self.keyterms = keyword_terms(keywords)[:ASSEMBLYAI_MAX_KEYTERMS]
         self.context = (context or "").strip()[:ASSEMBLYAI_MAX_PROMPT_CHARACTERS]
+        streaming_config = assemblyai_config or {}
+        self.streaming_params = {
+            name: streaming_config[name] for name in STREAMING_CONFIG_PARAMS if streaming_config.get(name) is not None
+        }
+        self.supports_agent_context = self.speech_model in AGENT_CONTEXT_MODELS
+        self.agent_context = ""
+        self.connected_agent_context = ""
+        self.configuration_update_tasks = set()
 
         self.api_key = kwargs.get("transcriber_key", os.getenv("ASSEMBLY_API_KEY"))
         self.assemblyai_host = "streaming.assemblyai.com"
@@ -140,8 +170,40 @@ class AssemblyAITranscriber(BaseTranscriber):
         if self.context and not self.is_legacy_streaming_model:
             connection_params["prompt"] = self.context
 
+        for name, value in self.streaming_params.items():
+            if self.is_legacy_streaming_model and name in UNIVERSAL_3_ONLY_PARAMS:
+                logger.warning(f"AssemblyAI {self.speech_model} does not support {name}, ignoring it")
+                continue
+            connection_params[name] = value
+
+        self.connected_agent_context = self.agent_context
+        if self.agent_context:
+            connection_params["agent_context"] = self.agent_context
+
         websocket_url = f"wss://{self.assemblyai_host}/v3/ws?{urlencode(connection_params)}"
         return websocket_url
+
+    def set_agent_context(self, text):
+        """Pass the agent's spoken reply to AssemblyAI as context for the caller's next turn."""
+        if not self.supports_agent_context:
+            return
+        text = (text or "").strip()[-ASSEMBLYAI_MAX_AGENT_CONTEXT_CHARACTERS:]
+        if not text or text == self.agent_context:
+            return
+        self.agent_context = text
+        if self.websocket_connection is not None:
+            self._schedule_configuration_update({"agent_context": text})
+
+    def _schedule_configuration_update(self, configuration):
+        task = asyncio.create_task(self._send_configuration_update(self.websocket_connection, configuration))
+        self.configuration_update_tasks.add(task)
+        task.add_done_callback(self.configuration_update_tasks.discard)
+
+    async def _send_configuration_update(self, ws: ClientConnection, configuration):
+        try:
+            await ws.send(json.dumps({"type": "UpdateConfiguration", **configuration}))
+        except Exception as e:
+            logger.warning(f"Could not send UpdateConfiguration to AssemblyAI: {e}")
 
     async def send_heartbeat(self, ws: ClientConnection):
         """Send periodic keepalive messages"""
@@ -556,6 +618,9 @@ class AssemblyAITranscriber(BaseTranscriber):
             self.websocket_connection = assemblyai_ws
             self.connection_authenticated = True
             logger.info("Successfully connected to AssemblyAI websocket")
+            # A reply spoken while the handshake was in flight missed the URL.
+            if self.agent_context != self.connected_agent_context:
+                self._schedule_configuration_update({"agent_context": self.agent_context})
 
             return assemblyai_ws
 

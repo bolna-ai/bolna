@@ -1594,6 +1594,7 @@ class TaskManager(BaseManager):
             else:
                 self.tools["input"].update_is_audio_being_played(True, AudioPlaybackReason.WELCOME_MESSAGE_SENT)
                 self.conversation_history.append_welcome_message(text)
+                self._share_agent_reply_with_transcriber(text)
                 convert_to_request_log(
                     message=text,
                     meta_info=meta_info,
@@ -5068,6 +5069,7 @@ class TaskManager(BaseManager):
         )
         if staged["turn_id"] is not None:
             self._turn_msg_map[staged["turn_id"]] = self.conversation_history.messages[-1]
+        self._share_agent_reply_with_transcriber(staged["content"])
         logger.info(
             "BOLNA_TRACE_TM commit_assistant_history seq=%s turn=%s response_uid=%s text_len=%s",
             sequence_id,
@@ -5075,6 +5077,11 @@ class TaskManager(BaseManager):
             staged["response_uid"],
             len(staged["content"]),
         )
+
+    def _share_agent_reply_with_transcriber(self, text):
+        transcriber = self.tools.get("transcriber")
+        if transcriber is not None:
+            transcriber.set_agent_context(text)
 
     def _drop_staged_assistant_history(self, sequence_id, reason):
         staged = self._pending_assistant_history.pop(sequence_id, None)
@@ -8137,6 +8144,7 @@ class TaskManager(BaseManager):
                 self.stream_sid_ts = time.time() * 1000
                 if text and text.strip():
                     self.conversation_history.append_welcome_message(text)
+                    self._share_agent_reply_with_transcriber(text)
                 await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
                 return
 
@@ -8169,6 +8177,7 @@ class TaskManager(BaseManager):
                         }
                         if text and text.strip():
                             self.conversation_history.append_welcome_message(text)
+                            self._share_agent_reply_with_transcriber(text)
                         if self.turn_based_conversation:
                             meta_info["type"] = "text"
                             bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
