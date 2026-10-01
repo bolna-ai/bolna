@@ -754,6 +754,21 @@ class S2SConfig(BaseModel):
         return values
 
 
+class WebSearchConfig(BaseModel):
+    enabled: bool = False
+    provider: Literal["openai", "firecrawl", "exa", "parallel"] = "openai"
+    api_key: Optional[str] = None
+    max_results: int = Field(default=3, ge=1, le=10)
+    max_snippet_chars: int = Field(default=400, ge=50, le=4000)
+    timeout_seconds: float = Field(default=8.0, gt=0, le=30)
+    pre_call_message: Optional[LocalizedText] = None
+    scope: Optional[str] = None
+    nodes: List[str] = []
+    description: Optional[str] = None
+    # Used only by the openai provider's Responses side call.
+    model: str = "gpt-5.4"
+
+
 class ToolsConfig(BaseModel):
     llm_agent: Optional[Union[LlmAgent, SimpleLlmAgent]] = None
     synthesizer: Optional[Synthesizer] = None
@@ -761,6 +776,7 @@ class ToolsConfig(BaseModel):
     input: Optional[IOModel] = None
     output: Optional[IOModel] = None
     api_tools: Optional[ToolModel] = None
+    web_search: Optional[WebSearchConfig] = None
     s2s: Optional[S2SConfig] = None
     switch_tool_description: Optional[str] = None
     switch_handoff_messages: Optional[Dict[str, str]] = None
