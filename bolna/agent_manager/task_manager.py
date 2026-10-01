@@ -2679,6 +2679,8 @@ class TaskManager(BaseManager):
             self.tools["input"].is_welcome_message_played = True
 
         await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
+        # History now holds only what the caller heard of the interrupted reply.
+        self._share_agent_reply_with_transcriber(self.conversation_history.last_assistant_content())
         self.tools["input"].reset_response_heard_by_user()
 
         self.interruption_manager.invalidate_pending_responses()

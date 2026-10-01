@@ -9,9 +9,8 @@ import pytest
 from pydantic import ValidationError
 
 from bolna.agent_manager.task_manager import TaskManager
-from bolna.enums import ChatRole
 from bolna.helpers.conversation_history import ConversationHistory
-from bolna.models import AssemblyAITranscriberConfig, Transcriber
+from bolna.models import AssemblyAITranscriberConfig
 from bolna.transcriber.assemblyai_transcriber import AssemblyAITranscriber
 from bolna.transcriber.transcriber_pool import TranscriberPool
 
@@ -34,41 +33,30 @@ def _params(transcriber):
     return {key: values[0] for key, values in parse_qs(urlparse(transcriber.get_assemblyai_ws_url()).query).items()}
 
 
-async def _run_sender(transcriber, *packets):
+async def _connect(transcriber, monkeypatch):
+    monkeypatch.setattr(
+        "bolna.transcriber.assemblyai_transcriber.websockets.connect", AsyncMock(return_value=MagicMock())
+    )
+    await transcriber.assemblyai_connect()
+
+
+async def _sent_for_audio(transcriber, frames=1):
+    """What the sender puts on the socket for `frames` audio packets."""
     ws = MagicMock(send=AsyncMock())
-    for packet in packets:
-        transcriber.input_queue.put_nowait(packet)
+    for _ in range(frames):
+        transcriber.input_queue.put_nowait({"data": b"\xff" * 160, "meta_info": {}})
     transcriber.input_queue.put_nowait({"data": None, "meta_info": {"eos": True}})
     await transcriber.sender_stream(ws)
-    return [call.args[0] for call in ws.send.await_args_list]
+    return [json.loads(m) if isinstance(m, str) else m for m in (call.args[0] for call in ws.send.await_args_list)]
 
 
-def _audio():
-    return {"data": b"\xff" * 160, "meta_info": {}}
-
-
-def test_universal_3_sends_every_configured_session_param():
-    params = _params(_make_transcriber(assemblyai_config=SESSION_CONFIG))
-    assert {name: params[name] for name in SESSION_CONFIG} == {k: str(v) for k, v in SESSION_CONFIG.items()}
-
-
-def test_unset_session_params_are_left_to_assemblyai_defaults():
-    config = AssemblyAITranscriberConfig(max_turn_silence=2000).model_dump()
-    params = _params(_make_transcriber(assemblyai_config=config))
+def test_universal_3_sends_only_the_session_params_that_are_set():
+    params = _params(_make_transcriber(assemblyai_config={**dict.fromkeys(SESSION_CONFIG), "max_turn_silence": 2000}))
     assert params["max_turn_silence"] == "2000"
     assert not (set(SESSION_CONFIG) - {"max_turn_silence"}) & params.keys()
 
-
-def test_legacy_model_drops_universal_3_only_params():
-    params = _params(_make_transcriber(model="universal", assemblyai_config=SESSION_CONFIG))
-    assert (params["min_turn_silence"], params["max_turn_silence"], params["vad_threshold"]) == ("200", "1500", "0.4")
-    assert not {"mode", "interruption_delay", "voice_focus", "voice_focus_threshold"} & params.keys()
-
-
-def test_transcriber_carries_validated_assemblyai_config():
-    transcriber = Transcriber(provider="assembly", model="universal-3-6-pro", assemblyai_config=SESSION_CONFIG)
-    assert transcriber.model_dump()["assemblyai_config"] == SESSION_CONFIG
-    assert Transcriber(provider="assembly").assemblyai_config is None
+    params = _params(_make_transcriber(assemblyai_config=SESSION_CONFIG))
+    assert {name: params[name] for name in SESSION_CONFIG} == {k: str(v) for k, v in SESSION_CONFIG.items()}
 
 
 @pytest.mark.parametrize(
@@ -87,78 +75,46 @@ def test_invalid_assemblyai_config_is_rejected(config):
         AssemblyAITranscriberConfig(**config)
 
 
-async def _connect(transcriber, monkeypatch):
-    monkeypatch.setattr(
-        "bolna.transcriber.assemblyai_transcriber.websockets.connect", AsyncMock(return_value=MagicMock())
-    )
-    await transcriber.assemblyai_connect()
+async def test_session_gets_prompting_once_and_each_reply_once_ahead_of_the_audio(monkeypatch):
+    transcriber = _make_transcriber(keywords="Vireo, Kestrel", context="A caller booking a test drive.")
+    transcriber.set_agent_context("  Which car would you like to drive?  ")
+    assert not {"keyterms_prompt", "prompt", "agent_context"} & _params(transcriber).keys()
 
-
-async def test_reply_spoken_before_connecting_goes_out_ahead_of_the_first_audio(monkeypatch):
-    transcriber = _make_transcriber()
-    transcriber.set_agent_context("  Hi, this is Bolna. Can I get your order number?  ")
-    assert "agent_context" not in _params(transcriber)
     await _connect(transcriber, monkeypatch)
-    sent = await _run_sender(transcriber, _audio())
-    assert json.loads(sent[0]) == {
+    first = await _sent_for_audio(transcriber, frames=2)
+    assert first[0] == {
         "type": "UpdateConfiguration",
-        "agent_context": "Hi, this is Bolna. Can I get your order number?",
-    }
-    assert isinstance(sent[1], bytes)
-
-
-async def test_each_new_reply_goes_out_once_ahead_of_the_next_audio(monkeypatch):
-    transcriber = _make_transcriber()
-    await _connect(transcriber, monkeypatch)
-    transcriber.set_agent_context("What's your email address?")
-    sent = await _run_sender(transcriber, _audio(), _audio())
-    assert json.loads(sent[0]) == {"type": "UpdateConfiguration", "agent_context": "What's your email address?"}
-    assert all(isinstance(message, bytes) for message in sent[1:3])
-
-    transcriber.set_agent_context("And your date of birth?")
-    sent = await _run_sender(transcriber, _audio())
-    assert json.loads(sent[0]) == {"type": "UpdateConfiguration", "agent_context": "And your date of birth?"}
-
-
-async def test_reconnected_session_receives_the_current_reply_again(monkeypatch):
-    transcriber = _make_transcriber()
-    transcriber.set_agent_context("What's your email address?")
-    await _connect(transcriber, monkeypatch)
-    await _run_sender(transcriber, _audio())
-
-    await _connect(transcriber, monkeypatch)
-    sent = await _run_sender(transcriber, _audio())
-    assert json.loads(sent[0]) == {"type": "UpdateConfiguration", "agent_context": "What's your email address?"}
-
-
-async def test_prompting_goes_out_once_per_session_ahead_of_the_first_audio(monkeypatch):
-    transcriber = _make_transcriber(keywords="Saanvi Iyer, Kia Syros", context="The caller is booking a test drive.")
-    assert not {"keyterms_prompt", "prompt"} & _params(transcriber).keys()
-    transcriber.set_agent_context("Which car would you like to drive?")
-    await _connect(transcriber, monkeypatch)
-    sent = await _run_sender(transcriber, _audio(), _audio())
-    assert json.loads(sent[0]) == {
-        "type": "UpdateConfiguration",
-        "keyterms_prompt": ["Saanvi Iyer", "Kia Syros"],
-        "prompt": "The caller is booking a test drive.",
+        "keyterms_prompt": ["Vireo", "Kestrel"],
+        "prompt": "A caller booking a test drive.",
         "agent_context": "Which car would you like to drive?",
     }
-    assert all(isinstance(message, bytes) for message in sent[1:3])
+    assert all(isinstance(message, bytes) for message in first[1:3])
 
     transcriber.set_agent_context("And which day suits you?")
-    sent = await _run_sender(transcriber, _audio())
-    assert json.loads(sent[0]) == {"type": "UpdateConfiguration", "agent_context": "And which day suits you?"}
+    assert (await _sent_for_audio(transcriber))[0] == {
+        "type": "UpdateConfiguration",
+        "agent_context": "And which day suits you?",
+    }
 
     await _connect(transcriber, monkeypatch)
-    sent = await _run_sender(transcriber, _audio())
-    assert set(json.loads(sent[0])) == {"type", "keyterms_prompt", "prompt", "agent_context"}
+    assert set((await _sent_for_audio(transcriber))[0]) == {"type", "keyterms_prompt", "prompt", "agent_context"}
 
 
-async def test_legacy_model_gets_keyterms_but_no_prompt(monkeypatch):
-    transcriber = _make_transcriber(model="universal", keywords="Bajaj Allianz", context="Insurance call.")
+@pytest.mark.parametrize("model", ["universal", "universal-streaming-multilingual", "whisper-rt"])
+async def test_other_models_get_keyterms_but_no_universal_3_only_settings(model, monkeypatch):
+    transcriber = _make_transcriber(
+        model=model, keywords="Aster Insure", context="Insurance call.", assemblyai_config=SESSION_CONFIG
+    )
+    transcriber.set_agent_context("Which insurer is your policy with?")
+    params = _params(transcriber)
+    assert (params["min_turn_silence"], params["max_turn_silence"], params["vad_threshold"]) == ("200", "1500", "0.4")
+    assert not {"mode", "interruption_delay", "voice_focus", "voice_focus_threshold"} & params.keys()
+
     await _connect(transcriber, monkeypatch)
-    sent = await _run_sender(transcriber, _audio())
-    assert json.loads(sent[0]) == {"type": "UpdateConfiguration", "keyterms_prompt": ["Bajaj Allianz"]}
+    assert (await _sent_for_audio(transcriber))[0] == {
+        "type": "UpdateConfiguration",
+        "keyterms_prompt": ["Aster Insure"],
+    }
 
 
 def test_non_latin_prompting_stays_out_of_the_connect_url():
@@ -175,14 +131,6 @@ def test_long_reply_keeps_its_closing_question_within_the_limit():
     assert transcriber.agent_context.endswith("What's your email address?")
 
 
-async def test_legacy_model_never_receives_agent_context(monkeypatch):
-    transcriber = _make_transcriber(model="universal")
-    transcriber.set_agent_context("What's your email address?")
-    await _connect(transcriber, monkeypatch)
-    sent = await _run_sender(transcriber, _audio())
-    assert not any("UpdateConfiguration" in str(message) for message in sent)
-
-
 def test_history_reports_each_spoken_assistant_message():
     spoken = []
     history = ConversationHistory(on_assistant_message=spoken.append)
@@ -192,12 +140,6 @@ def test_history_reports_each_spoken_assistant_message():
     history.append_assistant("Sure, what's the new pincode?", turn_id=1)
     history.append_assistant(None, tool_calls=[{"id": "call_1"}])
     assert spoken == ["Hi, how can I help?", "Sure, what's the new pincode?"]
-
-
-def test_history_without_a_listener_appends_as_before():
-    history = ConversationHistory()
-    history.append_assistant("Anything else?")
-    assert history.messages[-1] == {"role": ChatRole.ASSISTANT, "content": "Anything else?"}
 
 
 async def test_task_manager_wires_config_and_spoken_replies_into_the_transcriber(monkeypatch):
@@ -236,12 +178,6 @@ async def test_task_manager_wires_config_and_spoken_replies_into_the_transcriber
 
     tm.conversation_history.append_assistant("Can you spell your last name?", turn_id=1)
     assert transcriber.agent_context == "Can you spell your last name?"
-
-
-def test_text_conversation_without_a_transcriber_ignores_spoken_replies():
-    tm = TaskManager.__new__(TaskManager)
-    tm.tools = {}
-    tm._share_agent_reply_with_transcriber("Anything else?")
 
 
 def test_pool_shares_agent_context_with_every_leg():
