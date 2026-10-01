@@ -2900,7 +2900,14 @@ class TaskManager(BaseManager):
             self.tools["output"].set_hangup_sent()
             await self.__process_end_of_conversation()
 
+    def _caller_disconnected(self) -> bool:
+        """No media stream is left to play to: the caller hung up or run() already released the tools."""
+        input_handler = self.tools.get("input")
+        return input_handler is None or bool(getattr(input_handler, "input_stream_ended", False))
+
     async def wait_for_current_message(self):
+        if self._caller_disconnected():
+            return
         try:
             await asyncio.wait_for(self._turn_audio_flushed.wait(), timeout=3.0)
         except asyncio.TimeoutError:
@@ -2908,6 +2915,9 @@ class TaskManager(BaseManager):
 
         entry_time = time.time()
         while not self.conversation_ended:
+            if self._caller_disconnected():
+                logger.info("wait_for_current_message: caller disconnected, not waiting for playout")
+                break
             mark_events = self.mark_event_meta_data.mark_event_meta_data
             mark_items_list = [{"mark_id": k, "mark_data": v} for k, v in mark_events.items()]
             logger.info(
@@ -3123,7 +3133,7 @@ class TaskManager(BaseManager):
 
         # Check completion of agent_hangup_message sent from output
         # Only wait for hangup chunk if a hangup message was actually queued
-        while self.hangup_triggered and self.hangup_message_queued:
+        while self.hangup_triggered and self.hangup_message_queued and not self._caller_disconnected():
             try:
                 if self.tools["output"].hangup_sent():
                     logger.info("final hangup chunk is now sent. Breaking now")
@@ -3179,8 +3189,11 @@ class TaskManager(BaseManager):
         # to finish playing out what it has buffered, then sends HANGUP. Hanging up from here
         # instead would cut the agent's goodbye short — Asterisk is handed audio faster than
         # real time, so a chunk of it is still queued when the conversation ends.
-        await self.tools["input"].stop_handler()
-        logger.info("Stopped input handler")
+        # A detached end_call teardown can finish after run() has already released the tools.
+        input_handler = self.tools.get("input")
+        if input_handler is not None:
+            await input_handler.stop_handler()
+            logger.info("Stopped input handler")
         if self.turn_based_conversation:
             # _listen_llm_input_queue is the chat's run loop; the sentinel lets it exit so run() can finish.
             self.queues["llm"].put_nowait(create_ws_data_packet(None, {"io": "default", "eos": True}))
@@ -4591,7 +4604,8 @@ class TaskManager(BaseManager):
             return
 
         message = self.call_hangup_message if not self.voicemail_handler.detected else ""
-        if not message or message.strip() == "":
+        # A caller who already hung up cannot hear a goodbye, so end without rendering one.
+        if not message or message.strip() == "" or self._caller_disconnected():
             self.hangup_message_queued = False  # No hangup message to wait for
             self.hangup_triggered_at = time.time()
             await self.__process_end_of_conversation()

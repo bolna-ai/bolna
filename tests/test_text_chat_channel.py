@@ -143,6 +143,7 @@ async def test_client_disconnect_wakes_the_chat_loop():
     handler.queue = None
     handler.running = True
     handler.turn_based_conversation = True
+    handler.mark_event_meta_data = None
     handler.websocket = MagicMock(receive_json=AsyncMock(side_effect=WebSocketDisconnect()))
     await handler._listen()
     assert handler.queues["llm"].get_nowait()["meta_info"]["eos"] is True
