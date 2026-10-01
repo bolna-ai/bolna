@@ -21,6 +21,8 @@ from typing import Optional
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
 from bolna.enums import TelephonyProvider
+from bolna.constants import SARVAM_MAX_KEYTERM_CHARACTERS, SARVAM_MAX_KEYTERMS
+from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
@@ -29,6 +31,8 @@ logger = configure_logger(__name__)
 
 # saaras models that transcribe directly on /speech-to-text; older ones need the translate endpoint.
 SAARAS_TRANSCRIBE_MODELS = {"saaras:v3", "saaras:v4"}
+# Sarvam accepts `keyterms` only on these models.
+SARVAM_KEYTERM_MODELS = {"saaras:v4"}
 
 
 class SarvamTranscriber(BaseTranscriber):
@@ -46,6 +50,7 @@ class SarvamTranscriber(BaseTranscriber):
         high_vad_sensitivity=True,
         vad_signals=True,
         disable_sdk=False,
+        keywords=None,
         context=None,
         **kwargs,
     ):
@@ -61,8 +66,8 @@ class SarvamTranscriber(BaseTranscriber):
         self.high_vad_sensitivity = high_vad_sensitivity
         self.vad_signals = vad_signals
         self.disable_sdk = disable_sdk
-        # Sarvam biases on free-form text; it takes no term list on the socket.
         self.context = (context or "").strip()
+        self.keyterms = self._resolve_keyterms(keywords)
 
         self.api_key = kwargs.get("transcriber_key", os.getenv("SARVAM_API_KEY"))
         self.api_host = os.getenv("SARVAM_HOST", "api.sarvam.ai")
@@ -122,6 +127,19 @@ class SarvamTranscriber(BaseTranscriber):
             self.input_sampling_rate = self.sampling_rate
             self.audio_frame_duration = 0.2
 
+    def _resolve_keyterms(self, keywords):
+        if self.model not in SARVAM_KEYTERM_MODELS:
+            return []
+        terms = keyword_terms(keywords)
+        fitting = (term for term in terms if len(term) <= SARVAM_MAX_KEYTERM_CHARACTERS)
+        keyterms = list(dict.fromkeys(fitting))[:SARVAM_MAX_KEYTERMS]
+        if len(keyterms) < len(terms):
+            logger.warning(
+                f"Sarvam takes up to {SARVAM_MAX_KEYTERMS} distinct keyterms of up to "
+                f"{SARVAM_MAX_KEYTERM_CHARACTERS} characters; sending {len(keyterms)} of {len(terms)}."
+            )
+        return keyterms
+
     def _set_endpoints(self):
         params = {"model": self.model}
         ws_url = ""
@@ -148,6 +166,8 @@ class SarvamTranscriber(BaseTranscriber):
             params["target_language"] = self.target_language
         if self.context:
             params["prompt"] = self.context
+        if self.keyterms:
+            params["keyterms"] = json.dumps(self.keyterms)
 
         self.ws_url = f"{ws_url}?{urlencode(params)}"
 
@@ -164,6 +184,8 @@ class SarvamTranscriber(BaseTranscriber):
             data.add_field("file", io.BytesIO(wav_data), filename="audio.wav", content_type="audio/wav")
             data.add_field("model", self.model)
             data.add_field("language_code", self.language)
+            if self.keyterms:
+                data.add_field("keyterms", json.dumps(self.keyterms))
 
             headers = {"api-subscription-key": self.api_key}
 
