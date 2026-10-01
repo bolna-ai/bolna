@@ -46,7 +46,7 @@ SESSION_PARAMS = (
     "voice_focus",
     "voice_focus_threshold",
 )
-# The legacy models reject `mode` and ignore the others.
+# Only the universal-3 models take these; the legacy models reject `mode` and ignore the rest.
 UNIVERSAL_3_ONLY_SESSION_PARAMS = frozenset({"mode", "interruption_delay", "voice_focus", "voice_focus_threshold"})
 
 
@@ -76,6 +76,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         self.model = model
         self.speech_model = LEGACY_SPEECH_MODEL_ALIASES.get(model, model)
         self.is_legacy_streaming_model = self.speech_model in LEGACY_STREAMING_MODELS
+        self.is_universal_3_model = self.speech_model.startswith("universal-3")
         self.sampling_rate = int(sampling_rate)
         self.encoding = encoding
         self.format_turns = format_turns
@@ -129,7 +130,7 @@ class AssemblyAITranscriber(BaseTranscriber):
             value = assemblyai_config.get(name)
             if value is None:
                 continue
-            if self.is_legacy_streaming_model and name in UNIVERSAL_3_ONLY_SESSION_PARAMS:
+            if not self.is_universal_3_model and name in UNIVERSAL_3_ONLY_SESSION_PARAMS:
                 logger.warning(f"AssemblyAI {self.speech_model} does not support {name}, not sending it")
                 continue
             params[name] = value
@@ -139,15 +140,15 @@ class AssemblyAITranscriber(BaseTranscriber):
         prompting = {}
         if self.keyterms:
             prompting["keyterms_prompt"] = self.keyterms
-        # The older models reject the session outright when `prompt` is set.
-        if self.context and not self.is_legacy_streaming_model:
+        # Universal-3 only; the legacy models reject the session outright when `prompt` is set.
+        if self.context and self.is_universal_3_model:
             prompting["prompt"] = self.context
         return prompting
 
     def set_agent_context(self, text):
         """Hold the agent's latest spoken reply as context for the caller's next turn."""
         # Universal-3 only; the legacy models reject it.
-        if self.is_legacy_streaming_model:
+        if not self.is_universal_3_model:
             return
         # The question that shapes the caller's answer is usually at the end of the reply.
         text = (text or "").strip()[-ASSEMBLYAI_MAX_AGENT_CONTEXT_CHARACTERS:]
