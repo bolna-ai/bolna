@@ -2,7 +2,8 @@
 
 The pool forwards the active synth's generate() through one task. Most receivers return when their
 websocket closes; if the pool doesn't re-enter generate() then, nothing reads the redialled socket
-and the agent is mute for the rest of the call.
+and the agent is mute for the rest of the call. A synth error has to surface the same way it does
+for a single synthesizer, so the call ends instead of staying up silent.
 """
 
 import asyncio
@@ -26,7 +27,7 @@ def _no_reentry_delay(monkeypatch):
 
 
 class _ScriptedSynth:
-    """Each generate() call plays the next script: a list of packets, then returns."""
+    """Each generate() call plays the next script: a list of packets, then returns (or raises)."""
 
     def __init__(self, *scripts):
         self.scripts = list(scripts)
@@ -38,7 +39,10 @@ class _ScriptedSynth:
         self.generate_calls += 1
         if not self.scripts:
             await asyncio.Event().wait()  # idle like a live receiver waiting on its socket
-        for data in self.scripts.pop(0):
+        script = self.scripts.pop(0)
+        if isinstance(script, Exception):
+            raise script
+        for data in script:
             yield {"data": data, "meta_info": {}}
 
 
@@ -64,6 +68,24 @@ async def test_a_generate_that_returns_is_re_entered():
     assert not pool._gen_task.done()
 
     pool._gen_task.cancel()
+
+
+async def test_a_synth_error_reaches_the_listener():
+    """__listen_synthesizer ends the call on an exception; a swallowed one leaves it up and mute."""
+    synth = _ScriptedSynth([b"turn-1"], RuntimeError("Max connection failures reached"))
+    pool = SynthesizerPool({"en": synth}, "en", {})
+    pool._gen_task = asyncio.create_task(pool._run_generate("en"))
+
+    out = []
+
+    async def listen():
+        async for packet in pool.generate():
+            out.append(packet["data"])
+
+    with pytest.raises(RuntimeError, match="Max connection failures reached"):
+        await asyncio.wait_for(listen(), 1.0)
+
+    assert out == [b"turn-1"]
 
 
 async def test_an_ended_synth_is_not_re_entered():
