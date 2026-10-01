@@ -82,9 +82,11 @@ class AssemblyAITranscriber(BaseTranscriber):
         self.keyterms = keyword_terms(keywords)[:ASSEMBLYAI_MAX_KEYTERMS]
         self.context = (context or "").strip()[:ASSEMBLYAI_MAX_PROMPT_CHARACTERS]
         self.session_params = self._session_params(assemblyai_config or {})
+        self.session_prompting = self._session_prompting()
         # The latest reply the agent spoke, and the value the open session last received.
         self.agent_context = ""
         self.session_agent_context = ""
+        self.session_prompted = False
 
         self.api_key = kwargs.get("transcriber_key", os.getenv("ASSEMBLY_API_KEY"))
         self.assemblyai_host = "streaming.assemblyai.com"
@@ -133,6 +135,15 @@ class AssemblyAITranscriber(BaseTranscriber):
             params[name] = value
         return params
 
+    def _session_prompting(self):
+        prompting = {}
+        if self.keyterms:
+            prompting["keyterms_prompt"] = self.keyterms
+        # The older models reject the session outright when `prompt` is set.
+        if self.context and not self.is_legacy_streaming_model:
+            prompting["prompt"] = self.context
+        return prompting
+
     def set_agent_context(self, text):
         """Hold the agent's latest spoken reply as context for the caller's next turn."""
         # Universal-3 only; the legacy models reject it.
@@ -143,11 +154,16 @@ class AssemblyAITranscriber(BaseTranscriber):
         if text:
             self.agent_context = text
 
-    async def _send_pending_agent_context(self, ws: ClientConnection):
-        if self.agent_context == self.session_agent_context:
-            return
+    async def _send_pending_configuration(self, ws: ClientConnection):
+        """Send the session its prompting once and the agent's latest reply whenever it changes."""
+        configuration = {} if self.session_prompted else dict(self.session_prompting)
         agent_context = self.agent_context
-        await ws.send(json.dumps({"type": "UpdateConfiguration", "agent_context": agent_context}))
+        if agent_context != self.session_agent_context:
+            configuration["agent_context"] = agent_context
+        if configuration:
+            await ws.send(json.dumps({"type": "UpdateConfiguration", **configuration}))
+            logger.info(f"Sent AssemblyAI UpdateConfiguration with {sorted(configuration)}")
+        self.session_prompted = True
         self.session_agent_context = agent_context
 
     def get_assemblyai_ws_url(self):
@@ -184,13 +200,6 @@ class AssemblyAITranscriber(BaseTranscriber):
             connection_params["language_codes"] = json.dumps([base_language])
         else:
             logger.warning(f"AssemblyAI {self.speech_model} has no language code for {self.language}, auto-detecting")
-
-        if self.keyterms:
-            connection_params["keyterms_prompt"] = json.dumps(self.keyterms)
-
-        # The older models reject the session outright when `prompt` is set.
-        if self.context and not self.is_legacy_streaming_model:
-            connection_params["prompt"] = self.context
 
         connection_params.update(self.session_params)
 
@@ -429,7 +438,7 @@ class AssemblyAITranscriber(BaseTranscriber):
                             audio_data = ulaw2lin(audio_data, 2)
 
                         # Ahead of the audio, so the reply is in context before the caller answers it.
-                        await self._send_pending_agent_context(ws)
+                        await self._send_pending_configuration(ws)
                         await ws.send(audio_data)
                     except ConnectionClosedError as e:
                         logger.error(f"Connection closed while sending data: {e}")
@@ -603,8 +612,9 @@ class AssemblyAITranscriber(BaseTranscriber):
             logger.info(f"Attempting to connect to AssemblyAI websocket: {websocket_url}")
 
             headers = {"Authorization": self.api_key}
-            # Sent ahead of the first audio rather than in the URL: non-Latin text percent-encodes
-            # past the gateway's URL limit well before the 1750-character cap.
+            # Text config goes ahead of the first audio rather than in the URL: non-Latin text
+            # percent-encodes past the gateway's URL limit well before AssemblyAI's own caps.
+            self.session_prompted = False
             self.session_agent_context = ""
 
             assemblyai_ws = await asyncio.wait_for(

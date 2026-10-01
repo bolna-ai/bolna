@@ -26,8 +26,8 @@ SESSION_CONFIG = {
 }
 
 
-def _make_transcriber(model="universal-3-6-pro", **kwargs):
-    return AssemblyAITranscriber("twilio", model=model, language="en", input_queue=asyncio.Queue(), **kwargs)
+def _make_transcriber(model="universal-3-6-pro", language="en", **kwargs):
+    return AssemblyAITranscriber("twilio", model=model, language=language, input_queue=asyncio.Queue(), **kwargs)
 
 
 def _params(transcriber):
@@ -129,6 +129,43 @@ async def test_reconnected_session_receives_the_current_reply_again(monkeypatch)
     await _connect(transcriber, monkeypatch)
     sent = await _run_sender(transcriber, _audio())
     assert json.loads(sent[0]) == {"type": "UpdateConfiguration", "agent_context": "What's your email address?"}
+
+
+async def test_prompting_goes_out_once_per_session_ahead_of_the_first_audio(monkeypatch):
+    transcriber = _make_transcriber(keywords="Saanvi Iyer, Kia Syros", context="The caller is booking a test drive.")
+    assert not {"keyterms_prompt", "prompt"} & _params(transcriber).keys()
+    transcriber.set_agent_context("Which car would you like to drive?")
+    await _connect(transcriber, monkeypatch)
+    sent = await _run_sender(transcriber, _audio(), _audio())
+    assert json.loads(sent[0]) == {
+        "type": "UpdateConfiguration",
+        "keyterms_prompt": ["Saanvi Iyer", "Kia Syros"],
+        "prompt": "The caller is booking a test drive.",
+        "agent_context": "Which car would you like to drive?",
+    }
+    assert all(isinstance(message, bytes) for message in sent[1:3])
+
+    transcriber.set_agent_context("And which day suits you?")
+    sent = await _run_sender(transcriber, _audio())
+    assert json.loads(sent[0]) == {"type": "UpdateConfiguration", "agent_context": "And which day suits you?"}
+
+    await _connect(transcriber, monkeypatch)
+    sent = await _run_sender(transcriber, _audio())
+    assert set(json.loads(sent[0])) == {"type", "keyterms_prompt", "prompt", "agent_context"}
+
+
+async def test_legacy_model_gets_keyterms_but_no_prompt(monkeypatch):
+    transcriber = _make_transcriber(model="universal", keywords="Bajaj Allianz", context="Insurance call.")
+    await _connect(transcriber, monkeypatch)
+    sent = await _run_sender(transcriber, _audio())
+    assert json.loads(sent[0]) == {"type": "UpdateConfiguration", "keyterms_prompt": ["Bajaj Allianz"]}
+
+
+def test_non_latin_prompting_stays_out_of_the_connect_url():
+    hindi = "क्या आप अपना पिनकोड बता सकते हैं? " * 60
+    transcriber = _make_transcriber(language="hi", keywords="पिनकोड, आधार", context=hindi)
+    transcriber.set_agent_context(hindi)
+    assert len(transcriber.get_assemblyai_ws_url()) < 500
 
 
 def test_long_reply_keeps_its_closing_question_within_the_limit():
