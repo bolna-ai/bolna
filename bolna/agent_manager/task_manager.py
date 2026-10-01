@@ -3644,9 +3644,10 @@ class TaskManager(BaseManager):
 
         await self.wait_for_current_message()
 
-        if self.hangup_triggered or self.conversation_ended:
+        if self.hangup_triggered or self.conversation_ended or self._caller_disconnected():
             logger.info(
-                f"__execute_function_call: Aborting before API call — hangup_triggered={self.hangup_triggered}, conversation_ended={self.conversation_ended}"
+                f"__execute_function_call: Aborting before API call: hangup_triggered={self.hangup_triggered}, "
+                f"conversation_ended={self.conversation_ended}, caller_disconnected={self._caller_disconnected()}"
             )
             return
 
