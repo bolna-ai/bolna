@@ -46,6 +46,8 @@ from bolna.constants import (
     SWITCH_LANGUAGE_TOOL_DEFINITION,
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
+    WEB_SEARCH_FUNCTION_NAME,
+    WEB_SEARCH_TOOL_DEFINITION,
     RESPONSES_API_MODEL_PREFIXES,
     LLM_GENERATION_TIMEOUT_S,
     S2S_GOODBYE_TIMEOUT_S,
@@ -78,6 +80,7 @@ from bolna.enums import (
     HangupReason,
     NodeType,
     ChatRole,
+    S2SProvider,
     ToolScope,
 )
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
@@ -124,7 +127,8 @@ from bolna.helpers.utils import (
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
-from bolna.models import S2SConfig
+from bolna.models import S2SConfig, WebSearchConfig
+from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
 from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
 
@@ -189,6 +193,29 @@ def _inject_end_call_tool(api_tools, *, scope, nodes, description=None):
         "pre_call_message": None,
         "scope": scope.value if scope else None,
         "nodes": list(nodes or []),
+    }
+    return api_tools
+
+
+def _inject_web_search_tool(api_tools, cfg: WebSearchConfig):
+    """Add the platform web_search tool to api_tools; no-op if already present."""
+    if api_tools is None:
+        api_tools = {"tools": [], "tools_params": {}}
+    if WEB_SEARCH_FUNCTION_NAME in api_tools.get("tools_params", {}):
+        return api_tools
+    tool_def = copy.deepcopy(WEB_SEARCH_TOOL_DEFINITION)
+    if cfg.description:
+        tool_def["function"]["description"] = cfg.description
+    tools_list = api_tools.get("tools") or []
+    if isinstance(tools_list, str):
+        tools_list = json.loads(tools_list)
+    tools_list.append(tool_def)
+    api_tools["tools"] = tools_list
+    # The entry must exist or ToolCallAccumulator drops the call; url stays empty like end_call.
+    api_tools.setdefault("tools_params", {})[WEB_SEARCH_FUNCTION_NAME] = {
+        "pre_call_message": cfg.pre_call_message,
+        "scope": cfg.scope,
+        "nodes": list(cfg.nodes or []),
     }
     return api_tools
 
@@ -382,6 +409,21 @@ class TaskManager(BaseManager):
 
         if task["tools_config"].get("api_tools", None) is not None:
             self.kwargs["api_tools"] = task["tools_config"]["api_tools"]
+
+        self.web_search_config = None
+        web_search_raw = task["tools_config"].get("web_search")
+        if web_search_raw:
+            try:
+                if hasattr(web_search_raw, "model_dump"):
+                    web_search_raw = web_search_raw.model_dump()
+                web_search_config = WebSearchConfig(**web_search_raw)
+            except Exception as e:
+                logger.error(f"Ignoring invalid web_search config: {e}")
+                web_search_config = None
+            if web_search_config and web_search_config.enabled:
+                self.web_search_config = web_search_config
+                self.kwargs["api_tools"] = _inject_web_search_tool(self.kwargs.get("api_tools"), web_search_config)
+                logger.info(f"web_search tool active provider={web_search_config.provider}")
 
         # Speech-to-speech agents carry no llm_agent/transcriber/synthesizer at all.
         self.s2s_config = task["tools_config"].get("s2s")
@@ -1663,6 +1705,44 @@ class TaskManager(BaseManager):
         # setup call site, before this injection.)
         self.kwargs["api_tools"]["tools_params"]["switch_language"] = {}
         logger.info(f"Injected switch_language tool (labels={sorted(labels)})")
+
+    def _web_search_openai_fallback_key(self):
+        """The agent's own OpenAI key, only when it talks to api.openai.com; never a Gemini/Groq/proxy key."""
+        if self.kwargs.get("base_url"):
+            return None
+        s2s_provider = getattr(self, "s2s_provider_name", None)
+        if s2s_provider:
+            return self.kwargs.get("s2s_key") if s2s_provider == S2SProvider.OPENAI_REALTIME.value else None
+        if (getattr(self, "llm_config", None) or {}).get("provider") == "openai":
+            return self.kwargs.get("llm_key")
+        return None
+
+    async def _run_web_search(self, query, meta_info=None, tool_call_id=""):
+        provider = self.web_search_config.provider
+        api_call_detail = self._start_api_call_detail(
+            called_fun=WEB_SEARCH_FUNCTION_NAME,
+            url=None,
+            method="POST",
+            param=None,
+            headers={},
+            meta_info=meta_info or {},
+            runtime_args={"tool_call_id": tool_call_id, "query": query},
+            api_params={"query": query, "provider": provider},
+        )
+        try:
+            result = await run_web_search(
+                query,
+                self.web_search_config,
+                fallback_openai_key=self._web_search_openai_fallback_key(),
+                run_id=self.run_id,
+            )
+        except asyncio.CancelledError:
+            logger.info(f"web_search cancelled provider={provider} query={query!r}")
+            self._finalize_api_call_detail(api_call_detail, error="cancelled before the search finished")
+            raise
+        error = f"search unavailable (provider={provider})" if result == SEARCH_UNAVAILABLE else None
+        self._finalize_api_call_detail(api_call_detail, response=result, error=error)
+        return result
 
     def _get_voice_name_for_label(self, label):
         """Get agent name for a language label from configured agent_names."""
@@ -3615,6 +3695,53 @@ class TaskManager(BaseManager):
             followup_meta_info = self._spawn_followup_meta_info(meta_info)
             await self.__do_llm_generation(
                 messages, followup_meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=True
+            )
+            self.execute_function_call_task = None
+            return
+
+        if called_fun == WEB_SEARCH_FUNCTION_NAME and self.web_search_config is not None:
+            convert_to_request_log(
+                json.dumps({"query": resp.get("query", "")}),
+                meta_info,
+                None,
+                LogComponent.FUNCTION_CALL,
+                direction=LogDirection.REQUEST,
+                run_id=self.run_id,
+                tool_name=called_fun,
+            )
+            search_task = asyncio.create_task(
+                self._run_web_search(resp.get("query", ""), meta_info, resp.get("tool_call_id", ""))
+            )
+            try:
+                await self.wait_for_current_message()
+                function_response = await search_task
+            finally:
+                if not search_task.done():
+                    search_task.cancel()
+            if self.hangup_triggered or self.conversation_ended:
+                logger.info("web_search: call ended while searching, dropping the result")
+                return
+
+            self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
+            self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
+            self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
+            convert_to_request_log(
+                function_response,
+                meta_info,
+                None,
+                LogComponent.FUNCTION_CALL,
+                direction=LogDirection.RESPONSE,
+                run_id=self.run_id,
+                tool_name=called_fun,
+            )
+            messages = self.conversation_history.get_copy()
+            followup_meta_info = self._spawn_followup_meta_info(meta_info)
+            await self.__do_llm_generation(
+                messages,
+                followup_meta_info,
+                next_step,
+                should_bypass_synth=meta_info.get("bypass_synth", False),
+                should_trigger_function_call=True,
             )
             self.execute_function_call_task = None
             return
@@ -8764,6 +8891,16 @@ class TaskManager(BaseManager):
                     tool_name, params.get("url"), params.get("param"), args, meta_info
                 )
                 result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
+        elif tool_name == WEB_SEARCH_FUNCTION_NAME and self.web_search_config is not None:
+            search_task = asyncio.create_task(
+                self._run_web_search(args.get("query", ""), meta_info, event.call_id)
+            )
+            try:
+                await self._s2s_before_tool_request(tool_name, args, params, meta_info)
+                result = await search_task
+            finally:
+                if not search_task.done():
+                    search_task.cancel()
         else:
             await self._s2s_before_tool_request(tool_name, args, params, meta_info)
             result = await self._s2s_call_api_tool(tool_name, args, params, meta_info)
