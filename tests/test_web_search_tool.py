@@ -210,7 +210,68 @@ async def test_s2s_web_search_returns_result_to_model():
     event = SimpleNamespace(name=WEB_SEARCH_FUNCTION_NAME, arguments=json.dumps({"query": "weather"}), call_id="c1")
     await TaskManager._s2s_execute_tool(tm, event)
 
-    tm._run_web_search.assert_awaited_once_with("weather")
+    tm._run_web_search.assert_awaited_once()
+    assert tm._run_web_search.await_args.args[0] == "weather"
+    assert tm._run_web_search.await_args.args[2] == "c1"
     tm._s2s_before_tool_request.assert_awaited_once()
     tm._s2s_call_api_tool.assert_not_awaited()
     s2s.send_function_result.assert_awaited_once_with("c1", WEB_SEARCH_FUNCTION_NAME, "Search results")
+
+
+def _recording_tm(provider="exa"):
+    tm = MagicMock()
+    tm.run_id = "run-1"
+    tm.web_search_config = _cfg(provider=provider)
+    tm.function_tool_api_call_details = []
+    tm._web_search_openai_fallback_key = MagicMock(return_value=None)
+    tm._sanitize_api_call_headers = TaskManager._sanitize_api_call_headers
+    tm._finalize_api_call_detail = TaskManager._finalize_api_call_detail
+    tm._start_api_call_detail = lambda **kw: TaskManager._start_api_call_detail(tm, **kw)
+    return tm
+
+
+META = {"request_id": "r1", "sequence_id": 2, "turn_id": 2}
+
+
+async def test_successful_search_is_recorded_in_call_details():
+    tm = _recording_tm()
+    with patch("bolna.agent_manager.task_manager.run_web_search", AsyncMock(return_value="Search results")):
+        result = await TaskManager._run_web_search(tm, "ai news", META, "call-1")
+
+    assert result == "Search results"
+    [detail] = tm.function_tool_api_call_details
+    assert detail["tool_name"] == WEB_SEARCH_FUNCTION_NAME
+    assert detail["tool_call_id"] == "call-1"
+    assert detail["request_params"] == {"query": "ai news", "provider": "exa"}
+    assert detail["status"] == "completed"
+    assert detail["response_body"] == "Search results"
+    assert detail["latency_ms"] is not None
+    assert detail["meta"]["turn_id"] == 2
+
+
+async def test_unavailable_search_is_recorded_as_error():
+    tm = _recording_tm(provider="openai")
+    with patch("bolna.agent_manager.task_manager.run_web_search", AsyncMock(return_value=SEARCH_UNAVAILABLE)):
+        await TaskManager._run_web_search(tm, "ai news", META, "call-1")
+
+    [detail] = tm.function_tool_api_call_details
+    assert detail["status"] == "error"
+    assert "provider=openai" in detail["error"]
+
+
+async def test_cancelled_search_is_recorded_and_reraised():
+    tm = _recording_tm()
+
+    async def slow(*_args, **_kwargs):
+        await asyncio.sleep(10)
+
+    with patch("bolna.agent_manager.task_manager.run_web_search", slow):
+        task = asyncio.create_task(TaskManager._run_web_search(tm, "ai news", META, "call-1"))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    [detail] = tm.function_tool_api_call_details
+    assert detail["status"] == "error"
+    assert "cancelled" in detail["error"]

@@ -128,7 +128,7 @@ from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
 from bolna.models import S2SConfig, WebSearchConfig
-from bolna.helpers.web_search import run_web_search
+from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
 from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
 
@@ -1717,13 +1717,32 @@ class TaskManager(BaseManager):
             return self.kwargs.get("llm_key")
         return None
 
-    async def _run_web_search(self, query):
-        return await run_web_search(
-            query,
-            self.web_search_config,
-            fallback_openai_key=self._web_search_openai_fallback_key(),
-            run_id=self.run_id,
+    async def _run_web_search(self, query, meta_info=None, tool_call_id=""):
+        provider = self.web_search_config.provider
+        api_call_detail = self._start_api_call_detail(
+            called_fun=WEB_SEARCH_FUNCTION_NAME,
+            url=None,
+            method="POST",
+            param=None,
+            headers={},
+            meta_info=meta_info or {},
+            runtime_args={"tool_call_id": tool_call_id, "query": query},
+            api_params={"query": query, "provider": provider},
         )
+        try:
+            result = await run_web_search(
+                query,
+                self.web_search_config,
+                fallback_openai_key=self._web_search_openai_fallback_key(),
+                run_id=self.run_id,
+            )
+        except asyncio.CancelledError:
+            logger.info(f"web_search cancelled provider={provider} query={query!r}")
+            self._finalize_api_call_detail(api_call_detail, error="cancelled before the search finished")
+            raise
+        error = f"search unavailable (provider={provider})" if result == SEARCH_UNAVAILABLE else None
+        self._finalize_api_call_detail(api_call_detail, response=result, error=error)
+        return result
 
     def _get_voice_name_for_label(self, label):
         """Get agent name for a language label from configured agent_names."""
@@ -3690,7 +3709,9 @@ class TaskManager(BaseManager):
                 run_id=self.run_id,
                 tool_name=called_fun,
             )
-            search_task = asyncio.create_task(self._run_web_search(resp.get("query", "")))
+            search_task = asyncio.create_task(
+                self._run_web_search(resp.get("query", ""), meta_info, resp.get("tool_call_id", ""))
+            )
             try:
                 await self.wait_for_current_message()
                 function_response = await search_task
@@ -8871,7 +8892,9 @@ class TaskManager(BaseManager):
                 )
                 result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
         elif tool_name == WEB_SEARCH_FUNCTION_NAME and self.web_search_config is not None:
-            search_task = asyncio.create_task(self._run_web_search(args.get("query", "")))
+            search_task = asyncio.create_task(
+                self._run_web_search(args.get("query", ""), meta_info, event.call_id)
+            )
             try:
                 await self._s2s_before_tool_request(tool_name, args, params, meta_info)
                 result = await search_task
