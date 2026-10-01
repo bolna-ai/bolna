@@ -129,6 +129,9 @@ S2S_STREAM_SID_TIMEOUT_S = 12.0
 # How long an armed goodbye gets before the call is closed without it.
 S2S_GOODBYE_TIMEOUT_S = 10.0
 
+# Pause before SynthesizerPool re-enters a synth generate() that returned, so one that returns at once can't spin.
+SYNTHESIZER_POOL_REENTRY_DELAY_S = 0.05
+
 # Soniox real-time STT
 SONIOX_WEBSOCKET_HOST = "stt-rt.soniox.com"
 SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops
