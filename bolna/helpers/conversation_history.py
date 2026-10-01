@@ -1,4 +1,5 @@
 import copy
+from typing import Callable
 from bolna.enums import ChatRole
 from bolna.helpers.logger_config import configure_logger
 
@@ -8,9 +9,15 @@ _UNHEARD_ROLES = frozenset({ChatRole.ASSISTANT, ChatRole.TOOL})
 
 
 class ConversationHistory:
-    def __init__(self, initial_history: list[dict] | None = None):
+    def __init__(
+        self,
+        initial_history: list[dict] | None = None,
+        on_assistant_message: Callable[[str], None] | None = None,
+    ):
+        """on_assistant_message receives the text of each assistant message appended after construction."""
         self._messages: list[dict] = initial_history or []
         self._interim: list[dict] = copy.deepcopy(self._messages)
+        self._on_assistant_message = on_assistant_message
 
     def setup_system_prompt(self, system_prompt: dict):
         if system_prompt.get("content", ""):
@@ -24,6 +31,7 @@ class ConversationHistory:
     def append_welcome_message(self, content: str):
         if content:
             self._messages.append({"role": ChatRole.ASSISTANT, "content": content})
+            self._notify_assistant_message(content)
 
         self._interim = copy.deepcopy(self._messages)
 
@@ -66,6 +74,11 @@ class ConversationHistory:
         if tool_calls is not None:
             msg["tool_calls"] = tool_calls
         self._messages.append(msg)
+        self._notify_assistant_message(content)
+
+    def _notify_assistant_message(self, content: str | None):
+        if content and self._on_assistant_message is not None:
+            self._on_assistant_message(content)
 
     def upsert_assistant_for_turn(self, turn_id: int | None, content: str, interim: bool = False):
         msgs = self._interim if interim else self._messages

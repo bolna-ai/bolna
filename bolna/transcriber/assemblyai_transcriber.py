@@ -13,7 +13,12 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from .base_transcriber import BaseTranscriber
 from bolna.enums import TelephonyProvider
-from bolna.constants import ASSEMBLYAI_MAX_KEYTERMS, ASSEMBLYAI_MAX_PROMPT_CHARACTERS, ASSEMBLYAI_SUPPORTED_LANGUAGES
+from bolna.constants import (
+    ASSEMBLYAI_MAX_AGENT_CONTEXT_CHARACTERS,
+    ASSEMBLYAI_MAX_KEYTERMS,
+    ASSEMBLYAI_MAX_PROMPT_CHARACTERS,
+    ASSEMBLYAI_SUPPORTED_LANGUAGES,
+)
 from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
@@ -31,6 +36,19 @@ LEGACY_SPEECH_MODEL_ALIASES = {
 # These take `format_turns` and a fixed language set; universal-3-x takes `language_codes` and `prompt`.
 LEGACY_STREAMING_MODELS = frozenset({"universal-streaming-english", "universal-streaming-multilingual"})
 
+# `assemblyai_config` fields, sent as session query params under the same names.
+SESSION_PARAMS = (
+    "mode",
+    "min_turn_silence",
+    "max_turn_silence",
+    "interruption_delay",
+    "vad_threshold",
+    "voice_focus",
+    "voice_focus_threshold",
+)
+# The legacy models reject `mode` and ignore the others.
+UNIVERSAL_3_ONLY_SESSION_PARAMS = frozenset({"mode", "interruption_delay", "voice_focus", "voice_focus_threshold"})
+
 
 class AssemblyAITranscriber(BaseTranscriber):
     def __init__(
@@ -46,6 +64,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         format_turns=True,
         keywords=None,
         context=None,
+        assemblyai_config=None,
         **kwargs,
     ):
         super().__init__(input_queue)
@@ -62,6 +81,10 @@ class AssemblyAITranscriber(BaseTranscriber):
         self.format_turns = format_turns
         self.keyterms = keyword_terms(keywords)[:ASSEMBLYAI_MAX_KEYTERMS]
         self.context = (context or "").strip()[:ASSEMBLYAI_MAX_PROMPT_CHARACTERS]
+        self.session_params = self._session_params(assemblyai_config or {})
+        # The latest reply the agent spoke, and the value the open session last received.
+        self.agent_context = ""
+        self.session_agent_context = ""
 
         self.api_key = kwargs.get("transcriber_key", os.getenv("ASSEMBLY_API_KEY"))
         self.assemblyai_host = "streaming.assemblyai.com"
@@ -97,6 +120,35 @@ class AssemblyAITranscriber(BaseTranscriber):
         self.current_turn_interim_details = []
         self.connection_error = None
         self._turn_start_epoch_ms = None
+
+    def _session_params(self, assemblyai_config):
+        params = {}
+        for name in SESSION_PARAMS:
+            value = assemblyai_config.get(name)
+            if value is None:
+                continue
+            if self.is_legacy_streaming_model and name in UNIVERSAL_3_ONLY_SESSION_PARAMS:
+                logger.warning(f"AssemblyAI {self.speech_model} does not support {name}, not sending it")
+                continue
+            params[name] = value
+        return params
+
+    def set_agent_context(self, text):
+        """Hold the agent's latest spoken reply as context for the caller's next turn."""
+        # Universal-3 only; the legacy models reject it.
+        if self.is_legacy_streaming_model:
+            return
+        # The question that shapes the caller's answer is usually at the end of the reply.
+        text = (text or "").strip()[-ASSEMBLYAI_MAX_AGENT_CONTEXT_CHARACTERS:]
+        if text:
+            self.agent_context = text
+
+    async def _send_pending_agent_context(self, ws: ClientConnection):
+        if self.agent_context == self.session_agent_context:
+            return
+        agent_context = self.agent_context
+        await ws.send(json.dumps({"type": "UpdateConfiguration", "agent_context": agent_context}))
+        self.session_agent_context = agent_context
 
     def get_assemblyai_ws_url(self):
         """Get the AssemblyAI WebSocket URL with appropriate parameters"""
@@ -139,6 +191,8 @@ class AssemblyAITranscriber(BaseTranscriber):
         # The older models reject the session outright when `prompt` is set.
         if self.context and not self.is_legacy_streaming_model:
             connection_params["prompt"] = self.context
+
+        connection_params.update(self.session_params)
 
         websocket_url = f"wss://{self.assemblyai_host}/v3/ws?{urlencode(connection_params)}"
         return websocket_url
@@ -374,6 +428,8 @@ class AssemblyAITranscriber(BaseTranscriber):
                         if self.encoding == "mulaw":
                             audio_data = ulaw2lin(audio_data, 2)
 
+                        # Ahead of the audio, so the reply is in context before the caller answers it.
+                        await self._send_pending_agent_context(ws)
                         await ws.send(audio_data)
                     except ConnectionClosedError as e:
                         logger.error(f"Connection closed while sending data: {e}")
@@ -547,6 +603,9 @@ class AssemblyAITranscriber(BaseTranscriber):
             logger.info(f"Attempting to connect to AssemblyAI websocket: {websocket_url}")
 
             headers = {"Authorization": self.api_key}
+            # Sent ahead of the first audio rather than in the URL: non-Latin text percent-encodes
+            # past the gateway's URL limit well before the 1750-character cap.
+            self.session_agent_context = ""
 
             assemblyai_ws = await asyncio.wait_for(
                 websockets.connect(websocket_url, additional_headers=headers, ssl=get_ssl_context(websocket_url)),
