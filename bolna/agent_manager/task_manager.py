@@ -529,7 +529,9 @@ class TaskManager(BaseManager):
 
         self.first_message_task_new = asyncio.create_task(self.message_task_new())
 
-        self.conversation_history = ConversationHistory(conversation_history)
+        self.conversation_history = ConversationHistory(
+            conversation_history, on_assistant_message=self._share_agent_reply_with_transcriber
+        )
         self.label_flow = []
 
         # Setup IO SERVICE, TRANSCRIBER, LLM, SYNTHESIZER
@@ -5075,6 +5077,11 @@ class TaskManager(BaseManager):
             staged["response_uid"],
             len(staged["content"]),
         )
+
+    def _share_agent_reply_with_transcriber(self, text):
+        transcriber = self.tools.get("transcriber")
+        if transcriber is not None:
+            transcriber.set_agent_context(text)
 
     def _drop_staged_assistant_history(self, sequence_id, reason):
         staged = self._pending_assistant_history.pop(sequence_id, None)
