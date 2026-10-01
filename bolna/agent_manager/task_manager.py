@@ -310,6 +310,15 @@ def trailing_utterance_text(segments, gap_seconds=4.0):
     return " ".join(reversed(tail)).strip()
 
 
+def streams_pipeline(synthesizer_config, turn_based_conversation, enforce_streaming):
+    """Live calls always stream; the synthesizer's `stream` flag only applies to turn-based chats."""
+    if synthesizer_config is None:
+        return False
+    if not turn_based_conversation:
+        return True
+    return bool(synthesizer_config.get("stream")) and enforce_streaming
+
+
 class TaskManager(BaseManager):
     # Class-level default on purpose: __process_output_loop reads this for EVERY call (including
     # single-language ones), so an instance-only assignment that ever landed in a conditional
@@ -592,10 +601,9 @@ class TaskManager(BaseManager):
         # Tasks
         self.extracted_data = None
         self.summarized_data = None
-        self.stream = (
-            self.task_config["tools_config"]["synthesizer"] is not None
-            and self.task_config["tools_config"]["synthesizer"]["stream"]
-        ) and (self.enforce_streaming or not self.turn_based_conversation)
+        self.stream = streams_pipeline(
+            self.task_config["tools_config"]["synthesizer"], self.turn_based_conversation, self.enforce_streaming
+        )
 
         self.is_local = False
         self.llm_config = None
