@@ -8,6 +8,7 @@ the tools and raised KeyError on the input handler.
 import asyncio
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.helpers.mark_event_meta_data import MarkEventMetaData
@@ -92,3 +93,31 @@ async def test_no_goodbye_is_rendered_for_a_caller_who_already_hung_up():
 
     assert ended == [True]
     assert task_manager.hangup_message_queued is False
+
+
+async def test_a_tool_call_is_not_sent_after_the_caller_hung_up():
+    task_manager, input_handler = _task_manager_with_pending_goodbye()
+    input_handler._end_input_stream("plivo")
+    task_manager.run_id = "run-1"
+    task_manager.hangup_triggered = False
+    task_manager.kwargs = {"api_tools": {"tools_params": {}}}
+    task_manager.fire_pre_call_webhook = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("pre-call webhook fired for a disconnected caller")
+    )
+
+    with patch("bolna.agent_manager.task_manager.trigger_api", new=AsyncMock()) as trigger_api:
+        await task_manager._TaskManager__execute_function_call(
+            "https://crm.example/book",
+            "POST",
+            "{}",
+            None,
+            None,
+            {},
+            {"turn_id": 1, "sequence_id": 1},
+            "llm",
+            "book_appointment",
+            tool_call_id="tc-1",
+            textual_response=None,
+        )
+
+    trigger_api.assert_not_awaited()
