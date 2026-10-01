@@ -35,6 +35,7 @@ from .constants import (
     SARVAM_LOUDNESS_MIN,
     SMALLEST_TTS_SPEED_MAX,
     SMALLEST_TTS_SPEED_MIN,
+    TTS_AUDIO_SETTINGS,
     TTS_CONTROL_MODEL_PREFIXES,
     TTS_CONTROL_MODELS,
     TTS_MODEL_CONTROL_LIMITS,
@@ -110,25 +111,31 @@ def tts_control_range(provider: str, key: str, model: Optional[str]) -> Optional
     return None if ge is None and le is None else (ge, le)
 
 
+def _render_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return f"{float(value):g}"
+    return str(value)
+
+
 def tts_render_settings(provider: str, provider_config: Optional[dict], exclude=()) -> str:
-    """The provider_config sliders that change how audio sounds, as a stable string for audio cache keys.
+    """The TTS_AUDIO_SETTINGS values in provider_config, as a stable string for audio cache keys.
     Values at bolna's default are left out, so keys built before a setting was set still match."""
     config_model = SYNTHESIZER_CONFIG_MODELS.get(provider)
     if config_model is None or not isinstance(provider_config, dict):
         return ""
     settings = []
-    for key in sorted(provider_config):
-        value = provider_config[key]
-        if key in exclude or value is None or tts_control_range(provider, key, None) is None:
+    for key in sorted(TTS_AUDIO_SETTINGS.get(provider, frozenset()) - set(exclude)):
+        value = provider_config.get(key)
+        if value is None or value == "":
             continue
-        default = config_model.model_fields[key].default
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
+        config_field = config_model.model_fields.get(key)
+        default = config_field.default if config_field else None
+        rendered = _render_value(value)
+        if default is not None and rendered == _render_value(default):
             continue
-        if default is not None and number == float(default):
-            continue
-        settings.append(f"{key}={number:g}")
+        settings.append(f"{key}={rendered}")
     return ",".join(settings)
 
 

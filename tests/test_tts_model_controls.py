@@ -13,6 +13,7 @@ from bolna.models import (
     tts_provider_config_error,
     tts_render_settings,
 )
+from bolna.constants import TTS_AUDIO_SETTINGS
 from bolna.helpers.utils import get_md5_hash, static_node_audio_key
 
 
@@ -155,6 +156,14 @@ def test_config_error_rejects_exactly_what_the_config_model_rejects(provider, ke
         ("sarvam", {"model": "bulbul:v2", "loudness": 1.5}, (), "loudness=1.5"),
         ("rime", {"model": "coda", "time_scale_factor": 0.8}, (), "time_scale_factor=0.8"),
         ("soniox", {"speed": 1.0}, (), "speed=1"),
+        ("soniox", {"reduce_silence": True}, (), "reduce_silence=true"),
+        ("kalpa", {"temperature": 0.7, "acoustic_temperature": 0.4}, (), "acoustic_temperature=0.4,temperature=0.7"),
+        ("kalpa", {"audio_quality": "high", "chunk_length_schedule": [50, 120]}, (), "audio_quality=high"),
+        ("pixa", {"top_p": 0.95, "repetition_penalty": 1.3}, (), ""),
+        ("pixa", {"top_p": 0.8, "repetition_penalty": 1.3}, (), "top_p=0.8"),
+        ("gemini", {"style": "cheerful"}, (), "style=cheerful"),
+        ("gemini", {"style": ""}, (), ""),
+        ("deepgram", {"model": "aura-2", "mip_opt_out": True}, (), ""),
         ("cartesia", {"voice": "Sonic", "sampling_rate": 8000, "speed": None}, (), ""),
         ("polly", {"engine": "neural"}, (), ""),
         ("not-a-provider", {"speed": 2}, (), ""),
@@ -163,6 +172,11 @@ def test_config_error_rejects_exactly_what_the_config_model_rejects(provider, ke
 )
 def test_tts_render_settings(provider, provider_config, exclude, expected):
     assert tts_render_settings(provider, provider_config, exclude=exclude) == expected
+
+
+@pytest.mark.parametrize("provider", sorted(TTS_AUDIO_SETTINGS))
+def test_audio_settings_name_real_config_fields(provider):
+    assert TTS_AUDIO_SETTINGS[provider] <= set(SYNTHESIZER_CONFIG_MODELS[provider].model_fields)
 
 
 def test_static_node_audio_key_is_unchanged_without_render_settings():

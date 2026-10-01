@@ -408,6 +408,21 @@ TTS_CONTROL_MODEL_PREFIXES = {
 TTS_MODEL_CONTROL_LIMITS = {
     SynthesizerProvider.SARVAM: {"bulbul:v3": {"speed": (0.5, 2.0)}},
 }
+# provider_config keys that change how the audio sounds, so cached audio (welcome, static-node clips) keys on them.
+TTS_AUDIO_SETTINGS = {
+    SynthesizerProvider.AZURETTS: frozenset({"speed"}),
+    SynthesizerProvider.CARTESIA: frozenset({"speed", "volume"}),
+    SynthesizerProvider.DEEPGRAM: frozenset({"speed"}),
+    SynthesizerProvider.ELEVENLABS: frozenset({"speed", "similarity_boost", "temperature", "style"}),
+    SynthesizerProvider.GEMINI: frozenset({"style"}),
+    SynthesizerProvider.KALPA: frozenset({"temperature", "acoustic_temperature", "audio_quality", "max_new_tokens"}),
+    SynthesizerProvider.OPENAI: frozenset({"speed"}),
+    SynthesizerProvider.PIXA: frozenset({"top_p", "repetition_penalty"}),
+    SynthesizerProvider.RIME: frozenset({"time_scale_factor"}),
+    SynthesizerProvider.SARVAM: frozenset({"speed", "loudness"}),
+    SynthesizerProvider.SMALLEST: frozenset({"speed"}),
+    SynthesizerProvider.SONIOX: frozenset({"speed", "reduce_silence"}),
+}
 
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
