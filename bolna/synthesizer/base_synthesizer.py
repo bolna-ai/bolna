@@ -145,8 +145,10 @@ class BaseSynthesizer:
                 logger.info(f"Not synthesizing: sequence_id {meta_info.get('sequence_id')} not current")
                 return
 
-            audio = await self._fetch_http_audio(text, meta_info)
-            audio = self._process_http_audio(audio)
+            # A bare end_of_llm_stream marker carries no text and only closes the turn.
+            audio = None
+            if text and text.strip():
+                audio = self._process_http_audio(await self._fetch_http_audio(text, meta_info))
             # A failed render still terminates the turn: a None packet crashes the output handler.
             if not audio:
                 audio = b"\x00"
