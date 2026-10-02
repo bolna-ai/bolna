@@ -395,9 +395,11 @@ def get_md5_hash(text):
     return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
-def static_node_audio_key(text, provider=None, voice=None, voice_id=None, model=None):
-    """S3 filename stem for a static-node clip, bound to the voice it was rendered with."""
+def static_node_audio_key(text, provider=None, voice=None, voice_id=None, model=None, render_settings=""):
+    """S3 filename stem for a static-node clip, bound to the voice and slider settings it was rendered with."""
     identity = "|".join(str(part or "") for part in (provider, voice, voice_id, model))
+    if render_settings:
+        identity = f"{identity}|{render_settings}"
     return get_md5_hash(f"{identity}|{text}")
 
 
