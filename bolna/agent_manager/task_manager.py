@@ -3956,9 +3956,12 @@ class TaskManager(BaseManager):
         )
         actual_overflowed = False
         actual_reasoning_content = None
-        # Stamped per chunk: after the loop these hold when the LLM actually finished and how
-        # fast it started. __store_into_history runs much later (once every chunk has been
-        # pushed to TTS), so the response trace row must be stamped from here, not from there.
+        # Stamped per chunk: after the loop these hold when the LLM first produced text, when it
+        # finished and how fast it started. __store_into_history runs much later (once every chunk
+        # has been pushed to TTS), so the response trace row must be stamped from here, not there.
+        # The row takes the first-text time: TTS starts on the first sentence, so a stream-end
+        # stamp sorts the response below the synthesizer rows of its own reply.
+        llm_first_text_ts = None
         llm_stream_end_ts = None
         llm_first_token_latency = None
         synthesize = True
@@ -4153,6 +4156,8 @@ class TaskManager(BaseManager):
                 end_of_llm_stream = llm_message.end_of_stream
                 latency = llm_message.latency
                 llm_stream_end_ts = time.time()
+                if llm_first_text_ts is None and isinstance(data, str) and data.strip():
+                    llm_first_text_ts = llm_stream_end_ts
                 if latency and latency.first_token_latency_ms is not None and llm_first_token_latency is None:
                     llm_first_token_latency = round(latency.first_token_latency_ms / 1000, 6)
                 trigger_function_call = llm_message.is_function_call
@@ -4221,7 +4226,7 @@ class TaskManager(BaseManager):
                             cached_tokens=actual_cached_tokens,
                             reasoning_content=actual_reasoning_content,
                             overflowed=actual_overflowed,
-                            ts=llm_stream_end_ts,
+                            ts=llm_first_text_ts or llm_stream_end_ts,
                             llm_latency=llm_first_token_latency,
                         )
                         if self.turn_based_conversation:
@@ -4336,7 +4341,7 @@ class TaskManager(BaseManager):
                 reasoning_content=actual_reasoning_content,
                 log_message=empty_turn_detail,
                 overflowed=actual_overflowed,
-                ts=llm_stream_end_ts,
+                ts=llm_first_text_ts or llm_stream_end_ts,
                 llm_latency=llm_first_token_latency,
             )
         elif not self.stream:
@@ -4358,7 +4363,7 @@ class TaskManager(BaseManager):
                 reasoning_tokens=actual_reasoning_tokens,
                 cached_tokens=actual_cached_tokens,
                 reasoning_content=actual_reasoning_content,
-                ts=llm_stream_end_ts,
+                ts=llm_first_text_ts or llm_stream_end_ts,
                 latency=llm_first_token_latency,
             )
 
