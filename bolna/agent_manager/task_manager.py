@@ -3956,11 +3956,10 @@ class TaskManager(BaseManager):
         )
         actual_overflowed = False
         actual_reasoning_content = None
-        # Stamped per chunk: after the loop these hold when the LLM first produced text, when it
-        # finished and how fast it started. __store_into_history runs much later (once every chunk
-        # has been pushed to TTS), so the response trace row must be stamped from here, not there.
-        # The row takes the first-text time: TTS starts on the first sentence, so a stream-end
-        # stamp sorts the response below the synthesizer rows of its own reply.
+        # Stamped per chunk: after the loop these hold when the LLM actually finished and how
+        # fast it started. __store_into_history runs much later (once every chunk has been
+        # pushed to TTS), so the response trace row must be stamped from here, not from there.
+        # Row uses the first-text time: TTS starts on the first sentence, so stream end sorts it below its synth rows.
         llm_first_text_ts = None
         llm_stream_end_ts = None
         llm_first_token_latency = None
