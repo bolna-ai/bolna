@@ -122,6 +122,7 @@ def _make_tm(
     tm.tools = {"input": MagicMock(), "transcriber": MagicMock()}
     tm.tools["input"].welcome_message_played = MagicMock(return_value=True)
     tm.conversation_history.is_duplicate_user = MagicMock(return_value=False)
+    tm.conversation_history.repeats_last_user_turn = MagicMock(return_value=False)
     tm.interruption_manager.should_trigger_interruption = MagicMock(return_value=True)
     tm._TaskManager__cleanup_downstream_tasks = AsyncMock()
     tm._end_call_on_component_error = AsyncMock()
