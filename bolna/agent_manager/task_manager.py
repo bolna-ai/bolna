@@ -5595,11 +5595,11 @@ class TaskManager(BaseManager):
                         )
                         eager_eot_threshold = getattr(active_transcriber, "eager_eot_threshold", None)
 
-                        if not eager_eot_threshold:
-                            logger.info(
-                                f"Skipping speculative LLM: EagerEOT disabled (eager_eot_threshold not set or zero)"
-                            )
-                        elif eot_confidence is not None and eot_confidence < eager_eot_threshold:
+                        if not getattr(active_transcriber, "eager_end_of_turn", False):
+                            logger.info("Skipping speculative LLM: eager end of turn is off for this transcriber")
+                        elif (
+                            eot_confidence is not None and eager_eot_threshold and eot_confidence < eager_eot_threshold
+                        ):
                             logger.info(
                                 f"Skipping speculative LLM: EagerEOT confidence {eot_confidence} below threshold {eager_eot_threshold}"
                             )
