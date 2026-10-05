@@ -127,7 +127,7 @@ from bolna.helpers.utils import (
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
-from bolna.models import S2SConfig, WebSearchConfig
+from bolna.models import S2SConfig, WebSearchConfig, tts_render_settings
 from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
 from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
@@ -405,6 +405,7 @@ class TaskManager(BaseManager):
         self.language = DEFAULT_LANGUAGE_CODE
         self.synthesizer_voice_id = None
         self.synthesizer_model = None
+        self.synthesizer_render_settings = ""
         self.transfer_call_params = self.kwargs.get("transfer_call_params", None)
 
         if task["tools_config"].get("api_tools", None) is not None:
@@ -2003,6 +2004,7 @@ class TaskManager(BaseManager):
             self.synthesizer_voice = provider_config["voice"]
             self.synthesizer_voice_id = provider_config.get("voice_id")
             self.synthesizer_model = provider_config.get("model")
+            self.synthesizer_render_settings = tts_render_settings(self.synthesizer_provider, provider_config)
             if self.turn_based_conversation:
                 synth_config["audio_format"] = "mp3"  # Hard code mp3 if we're connected through dashboard
                 synth_config["stream"] = (
@@ -7582,6 +7584,7 @@ class TaskManager(BaseManager):
                     voice=self.synthesizer_voice,
                     voice_id=self.synthesizer_voice_id,
                     model=self.synthesizer_model,
+                    render_settings=self.synthesizer_render_settings,
                 )
             if self.turn_based_conversation or self.task_config["tools_config"]["output"]["provider"] == "default":
                 # Static-node clips are pre-generated as mp3 keyed by md5(text); fetch that

@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timezone
-from bolna.enums import ReasoningEffort as RE, TelephonyProvider
+from bolna.enums import ReasoningEffort as RE, SynthesizerProvider, TelephonyProvider
 
 PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
@@ -31,6 +31,9 @@ ELEVENLABS_REALTIME_MAX_KEYTERMS = 50
 ASSEMBLYAI_MAX_KEYTERMS = 100
 ASSEMBLYAI_MAX_PROMPT_CHARACTERS = 1750
 SMALLEST_MAX_KEYWORDS = 100
+
+SARVAM_MAX_KEYTERMS = 50
+SARVAM_MAX_KEYTERM_CHARACTERS = 64
 
 # Beyond this a phrase list costs Azure accuracy and latency rather than buying either.
 AZURE_MAX_PHRASES = 2000
@@ -406,6 +409,45 @@ SMALLEST_TTS_SPEED_MAX = 2.0
 
 SARVAM_LOUDNESS_MIN = 0.3
 SARVAM_LOUDNESS_MAX = 3.0
+
+AZURE_TTS_SPEED_MIN = 0.5
+AZURE_TTS_SPEED_MAX = 2.0
+
+# Per-model TTS controls, read by the config validators in bolna.models and by the dashboard. A config
+# field's ge/le is the provider-wide range; a control listed here applies only to the models named, or has
+# a narrower range on one model. Model ids are lowercase.
+SARVAM_LOUDNESS_MODELS = frozenset({"bulbul:v2"})
+RIME_TIME_SCALE_MODELS = frozenset({"coda", "mistv3"})
+ELEVENLABS_STYLE_MODELS = frozenset({"eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2"})
+
+TTS_CONTROL_MODELS = {
+    SynthesizerProvider.CARTESIA: {"volume": CARTESIA_VOLUME_MODELS},
+    SynthesizerProvider.ELEVENLABS: {"style": ELEVENLABS_STYLE_MODELS},
+    SynthesizerProvider.RIME: {"time_scale_factor": RIME_TIME_SCALE_MODELS},
+    SynthesizerProvider.SARVAM: {"loudness": SARVAM_LOUDNESS_MODELS},
+}
+# Deepgram model ids can carry the voice ("aura-2-thalia-en"), so its controls match on the family prefix.
+TTS_CONTROL_MODEL_PREFIXES = {
+    SynthesizerProvider.DEEPGRAM: {"speed": ("aura-2",)},
+}
+TTS_MODEL_CONTROL_LIMITS = {
+    SynthesizerProvider.SARVAM: {"bulbul:v3": {"speed": (0.5, 2.0)}},
+}
+# provider_config keys that change how the audio sounds, so cached audio (welcome, static-node clips) keys on them.
+TTS_AUDIO_SETTINGS = {
+    SynthesizerProvider.AZURETTS: frozenset({"speed"}),
+    SynthesizerProvider.CARTESIA: frozenset({"speed", "volume"}),
+    SynthesizerProvider.DEEPGRAM: frozenset({"speed"}),
+    SynthesizerProvider.ELEVENLABS: frozenset({"speed", "similarity_boost", "temperature", "style"}),
+    SynthesizerProvider.GEMINI: frozenset({"style"}),
+    SynthesizerProvider.KALPA: frozenset({"temperature", "acoustic_temperature", "audio_quality", "max_new_tokens"}),
+    SynthesizerProvider.OPENAI: frozenset({"speed"}),
+    SynthesizerProvider.PIXA: frozenset({"top_p", "repetition_penalty"}),
+    SynthesizerProvider.RIME: frozenset({"time_scale_factor"}),
+    SynthesizerProvider.SARVAM: frozenset({"speed", "loudness"}),
+    SynthesizerProvider.SMALLEST: frozenset({"speed"}),
+    SynthesizerProvider.SONIOX: frozenset({"speed", "reduce_silence"}),
+}
 
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
