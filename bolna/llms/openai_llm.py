@@ -217,7 +217,6 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
         provider = kwargs.get("provider")
-        # Self-hosted endpoints, a customer's own or Bolna-hosted, speak plain chat completions.
         self_hosted = provider in (LLMProvider.CUSTOM.value, LLMProvider.BOLNA.value)
         is_custom = provider == LLMProvider.CUSTOM.value
         if self_hosted:

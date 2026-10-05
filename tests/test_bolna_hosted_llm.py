@@ -69,7 +69,6 @@ def test_graph_agent_keeps_routing_and_hops_off_the_hosted_endpoint(monkeypatch)
 
     assert conversation.call_args.kwargs["base_url"] == BASE_URL
     assert conversation.call_args.kwargs["llm_key"] == HOSTED_KEY
-    # routing, completion check, voicemail
     others = [call.kwargs for call in openai_llm.call_args_list]
     assert len(others) == 3
     for kwargs in others:
