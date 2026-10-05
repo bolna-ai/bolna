@@ -67,6 +67,9 @@ class _MarkMetaStub:
     def get_heard_text_for_turn(self, _turn_id):
         return ""
 
+    def has_sent_audio_for_response(self, _uid):
+        return True
+
 
 def _make_task_manager(history):
     tm = TaskManager.__new__(TaskManager)

@@ -171,6 +171,9 @@ class MarkEventMetaData:
             return ""
         return (self.heard_text_by_response.get(response_uid) or "").strip()
 
+    def has_sent_audio_for_response(self, response_uid):
+        return any(data.get("response_uid") == response_uid for data in self._mark_history.values())
+
     def drop_data(self, mark_id):
         """Remove a mark that was never played (cleared echo): no ack stamp, so last-ack
         playback crediting and chunk-mark analytics can't count it as heard."""
