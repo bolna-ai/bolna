@@ -10,6 +10,8 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.helpers.mark_event_meta_data import MarkEventMetaData
 from bolna.input_handlers.default import DefaultInputHandler
@@ -69,9 +71,11 @@ async def test_teardown_finishing_after_run_released_the_tools_does_not_raise():
     assert task_manager.conversation_ended
 
 
-async def test_no_goodbye_is_rendered_for_a_caller_who_already_hung_up():
+@pytest.mark.parametrize("hangs_up_during_last_reply", [False, True])
+async def test_no_goodbye_is_rendered_for_a_caller_who_hung_up(hangs_up_during_last_reply):
     task_manager, input_handler = _task_manager_with_pending_goodbye()
-    input_handler._end_input_stream("plivo")
+    if not hangs_up_during_last_reply:
+        input_handler._end_input_stream("plivo")
     task_manager.hangup_decision_at = None
     task_manager._hangup_processing = False
     task_manager.call_hangup_message_config = "Thank you, goodbye"
@@ -89,7 +93,12 @@ async def test_no_goodbye_is_rendered_for_a_caller_who_already_hung_up():
     task_manager._TaskManager__process_end_of_conversation = _end_of_conversation
     task_manager._synthesize = _synthesize
 
-    await task_manager.process_call_hangup()
+    hangup = asyncio.create_task(task_manager.process_call_hangup())
+    await asyncio.sleep(0.05)
+    if hangs_up_during_last_reply:
+        assert not hangup.done(), "the last reply is still playing, so the goodbye should wait"
+        input_handler._end_input_stream("plivo")
+    await asyncio.wait_for(hangup, timeout=1)
 
     assert ended == [True]
     assert task_manager.hangup_message_queued is False
@@ -121,3 +130,63 @@ async def test_a_tool_call_is_not_sent_after_the_caller_hung_up():
         )
 
     trigger_api.assert_not_awaited()
+
+
+def _task_manager_asked_to_switch_language(language_switcher):
+    task_manager, input_handler = _task_manager_with_pending_goodbye()
+    task_manager.run_id = "run-1"
+    task_manager.language = "en"
+    task_manager.hangup_triggered = False
+    task_manager.language_switcher = language_switcher
+    task_manager.switch_language = AsyncMock()
+    task_manager._TaskManager__do_llm_generation = AsyncMock()
+    return task_manager, input_handler
+
+
+async def _call_switch_language(task_manager):
+    await task_manager._TaskManager__execute_function_call(
+        None,
+        None,
+        None,
+        None,
+        None,
+        {},
+        {"turn_id": 1, "sequence_id": 1},
+        "llm",
+        "switch_language",
+        language="hi",
+        tool_call_id="tc-1",
+        model_response=[],
+    )
+
+
+@pytest.mark.parametrize("language_switcher", [object(), None], ids=["lid-flow", "legacy-flow"])
+async def test_the_language_is_not_switched_for_a_caller_who_already_hung_up(language_switcher):
+    task_manager, input_handler = _task_manager_asked_to_switch_language(language_switcher)
+    input_handler._end_input_stream("plivo")
+
+    await _call_switch_language(task_manager)
+
+    task_manager.switch_language.assert_not_awaited()
+    task_manager._TaskManager__do_llm_generation.assert_not_awaited()
+
+
+async def test_the_language_is_not_switched_when_the_caller_hangs_up_during_the_handoff():
+    task_manager, input_handler = _task_manager_asked_to_switch_language(None)
+    task_manager.switch_handoff_messages = {"en": "One moment, switching to {language}"}
+    task_manager._get_voice_name_for_label = lambda label: "Asha"
+    task_manager.context_data = {}
+    task_manager.tools["output"] = SimpleNamespace(get_provider=lambda: "plivo")
+    handoffs = []
+
+    async def _synthesize(packet):
+        handoffs.append(packet["data"])
+        input_handler._end_input_stream("plivo")
+
+    task_manager._synthesize = _synthesize
+
+    await asyncio.wait_for(_call_switch_language(task_manager), timeout=1)
+
+    assert handoffs == ["One moment, switching to Hindi"]
+    task_manager.switch_language.assert_not_awaited()
+    task_manager._TaskManager__do_llm_generation.assert_not_awaited()
