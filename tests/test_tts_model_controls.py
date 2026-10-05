@@ -10,6 +10,7 @@ from bolna.models import (
     tts_control_applies,
     tts_control_limits,
     tts_control_range,
+    tts_audio_identity,
     tts_provider_config_error,
     tts_render_settings,
 )
@@ -181,12 +182,19 @@ def test_audio_settings_name_real_config_fields(provider):
 
 def test_static_node_audio_key_is_unchanged_without_render_settings():
     # Clips pre-rendered before render settings joined the key must still be found.
-    assert static_node_audio_key("Hi", "cartesia", "Sonic", "vid", "sonic-3") == get_md5_hash(
-        "cartesia|Sonic|vid|sonic-3|Hi"
+    identity = tts_audio_identity("cartesia", {"voice": "Sonic", "voice_id": "vid", "model": "sonic-3"})
+    assert static_node_audio_key("Hi", identity) == get_md5_hash("cartesia|Sonic|vid|sonic-3|Hi")
+
+
+def test_static_node_audio_key_appends_non_default_render_settings():
+    provider_config = {
+        "voice": "Anika",
+        "voice_id": "vid",
+        "model": "eleven_turbo_v2_5",
+        "speed": 0.8,
+        "temperature": 0.8,
+        "similarity_boost": 0.75,
+    }
+    assert static_node_audio_key("Hi", tts_audio_identity("elevenlabs", provider_config)) == get_md5_hash(
+        "elevenlabs|Anika|vid|eleven_turbo_v2_5|speed=0.8,temperature=0.8|Hi"
     )
-
-
-def test_static_node_audio_key_changes_with_render_settings():
-    plain = static_node_audio_key("Hi", "cartesia", "Sonic", "vid", "sonic-3")
-    louder = static_node_audio_key("Hi", "cartesia", "Sonic", "vid", "sonic-3", render_settings="volume=1.5")
-    assert louder != plain
