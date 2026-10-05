@@ -139,7 +139,7 @@ from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.tts_audio_monitor import TtsAudioMonitor
 from ..helpers.observable_variable import ObservableVariable
-from bolna.models import S2SConfig, WebSearchConfig, tts_render_settings
+from bolna.models import S2SConfig, WebSearchConfig, tts_audio_identity
 from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
 from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
@@ -424,10 +424,8 @@ class TaskManager(BaseManager):
 
         self.timezone = pytz.timezone(DEFAULT_TIMEZONE)
         self.language = DEFAULT_LANGUAGE_CODE
-        self.synthesizer_voice_id = None
-        self.synthesizer_model = None
-        self.synthesizer_render_settings = ""
-        self.synthesizer_pronunciation_key = None
+        # Synth label -> audio identity its static-node clips are cached under; None keys a single synth.
+        self.static_audio_identities = {}
         self.transfer_call_params = self.kwargs.get("transfer_call_params", None)
 
         if task["tools_config"].get("api_tools", None) is not None:
@@ -2067,6 +2065,7 @@ class TaskManager(BaseManager):
                     caching = cfg.pop("caching", True)
                     provider_name = cfg.pop("provider")
                     provider_config = cfg.pop("provider_config")
+                    audio_identity = cfg.pop("audio_identity", None)
 
                     # Web + FreeSWITCH play raw PCM at a fixed 24kHz; force every language synth to
                     # match (telephony/chat untouched). Else non-24k languages drift (e.g. Hindi too slow).
@@ -2083,6 +2082,16 @@ class TaskManager(BaseManager):
 
                     cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
                     leg_kwargs = self.__pool_leg_kwargs(synthesizer_kwargs, "synthesizer_key", provider_name)
+                    self.static_audio_identities[label] = audio_identity or tts_audio_identity(
+                        provider_name,
+                        provider_config,
+                        pronunciation_dictionary_key(
+                            provider_name,
+                            provider_config,
+                            cfg.get("pronunciation_rules"),
+                            on_platform_key=not leg_kwargs.get("synthesizer_key"),
+                        ),
+                    )
                     synthesizers[label] = cls(**cfg, **provider_config, **leg_kwargs, caching=caching)
 
                 # Use active synth's provider/voice for logging metadata, and buffer_size
@@ -2124,14 +2133,15 @@ class TaskManager(BaseManager):
             synthesizer_class = SUPPORTED_SYNTHESIZER_MODELS.get(self.synthesizer_provider)
             provider_config = synth_config.pop("provider_config")
             self.synthesizer_voice = provider_config["voice"]
-            self.synthesizer_voice_id = provider_config.get("voice_id")
-            self.synthesizer_model = provider_config.get("model")
-            self.synthesizer_render_settings = tts_render_settings(self.synthesizer_provider, provider_config)
-            self.synthesizer_pronunciation_key = pronunciation_dictionary_key(
+            self.static_audio_identities[None] = synth_config.pop("audio_identity", None) or tts_audio_identity(
                 self.synthesizer_provider,
                 provider_config,
-                synth_config.get("pronunciation_rules"),
-                on_platform_key=not self.kwargs.get("synthesizer_key"),
+                pronunciation_dictionary_key(
+                    self.synthesizer_provider,
+                    provider_config,
+                    synth_config.get("pronunciation_rules"),
+                    on_platform_key=not self.kwargs.get("synthesizer_key"),
+                ),
             )
             if self.turn_based_conversation:
                 synth_config["audio_format"] = "mp3"  # Hard code mp3 if we're connected through dashboard
@@ -8059,6 +8069,14 @@ class TaskManager(BaseManager):
             return
         meta_info["text_synthesized"] = meta_info.get("text", "")
 
+    def __static_audio_identity(self, label):
+        """Audio identity of the synth that speaks `label` text, else of the active synth."""
+        if label in self.static_audio_identities:
+            return self.static_audio_identities[label]
+        pool = self.tools.get("synthesizer")
+        active_label = pool.active_label if isinstance(pool, SynthesizerPool) else None
+        return self.static_audio_identities.get(active_label, "")
+
     async def __send_preprocessed_audio(self, meta_info, text):
         meta_info = copy.deepcopy(meta_info)
         yield_in_chunks = self.yield_chunks
@@ -8067,20 +8085,14 @@ class TaskManager(BaseManager):
             # This will help with interruption in IVR
             audio_chunk = None
             static_node_audio = meta_info.get("message_category") in ("static_node", "event_proactive")
-            if meta_info.get("message_category") == "static_node" and meta_info.get("text"):
-                # Fetch the clip keyed to the active voice/language, not text alone, so a voice
-                # change regenerates it instead of replaying the stale pre-generated clip.
+            if static_node_audio and meta_info.get("text"):
+                # Keyed to the voice of the language the text was chosen for, so a changed voice
+                # misses and speaks live instead of replaying a stale clip.
                 text = static_node_audio_key(
-                    meta_info["text"],
-                    provider=self.synthesizer_provider,
-                    voice=self.synthesizer_voice,
-                    voice_id=self.synthesizer_voice_id,
-                    model=self.synthesizer_model,
-                    render_settings=self.synthesizer_render_settings,
-                    pronunciation=self.synthesizer_pronunciation_key,
+                    meta_info["text"], self.__static_audio_identity(meta_info.get("detected_language"))
                 )
             if self.turn_based_conversation or self.task_config["tools_config"]["output"]["provider"] == "default":
-                # Static-node clips are pre-generated as mp3 keyed by md5(text); fetch that
+                # Static-node clips are pre-generated as mp3; fetch that
                 # format explicitly rather than the output format, which may differ (e.g. wav).
                 audio_format = "mp3" if static_node_audio else self.task_config["tools_config"]["output"]["format"]
                 try:
