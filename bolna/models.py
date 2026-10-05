@@ -139,6 +139,15 @@ def tts_render_settings(provider: str, provider_config: Optional[dict], exclude=
     return ",".join(settings)
 
 
+def tts_audio_identity(provider: str, provider_config: Optional[dict]) -> str:
+    """The provider, voice, model and render settings a cached clip is bound to, as a stable string."""
+    provider_config = provider_config if isinstance(provider_config, dict) else {}
+    parts = (provider, provider_config.get("voice"), provider_config.get("voice_id"), provider_config.get("model"))
+    identity = "|".join(str(part or "") for part in parts)
+    render_settings = tts_render_settings(provider, provider_config)
+    return f"{identity}|{render_settings}" if render_settings else identity
+
+
 def tts_provider_config_error(provider: str, provider_config: Optional[dict]) -> Optional[str]:
     """Why a provider_config value is outside bolna's range for its model, or None when every value fits.
 
