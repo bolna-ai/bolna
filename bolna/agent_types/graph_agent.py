@@ -464,6 +464,8 @@ class GraphAgent(BaseAgent):
         if self.config.get("overflow_llm"):
             base_kwargs["overflow_llm"] = self.config["overflow_llm"]
         self._routing_base_kwargs = base_kwargs
+        self._routing_base_url = base_kwargs.get("base_url")
+        self._routing_base_url_validated = False
         self._routing_llm_cache: Dict[Tuple[Optional[str], Optional[str]], Any] = {}
         self._routing_llm_cache_max_size = 100
 
@@ -500,6 +502,18 @@ class GraphAgent(BaseAgent):
         """Back to the agent's routing model, so a turn that makes no LLM call reports it."""
         self._last_routing_model = self.routing_model
         self._last_routing_effort = self._routing_reasoning_effort_used
+
+    async def _guard_routing_base_url(self) -> None:
+        """Validate the routing base_url once, before the first routing call.
+
+        generate() guards the conversation base_url, but routing carries its own
+        customer-supplied URL (``routing_base_url``, or the conversation's copied over
+        when both share a provider). Every routing client is built from the same
+        ``_routing_base_kwargs``, so one check covers the per-node overrides too.
+        """
+        if self._routing_base_url and not self._routing_base_url_validated:
+            await guard_llm_base_url(self._routing_base_url)
+            self._routing_base_url_validated = True
 
     def _routing_llm_for(self, node: Optional[dict]):
         """The node's own routing model and/or effort on the agent's provider and credentials,
@@ -1109,6 +1123,10 @@ class GraphAgent(BaseAgent):
             user_message = history[-1].get("content", "") if history else ""
             if user_message:
                 messages.append({"role": "user", "content": user_message})
+
+        # Ahead of the routing call for the same reason generate() guards the conversation
+        # base_url ahead of its own: a blocked endpoint must not be reached at all.
+        await self._guard_routing_base_url()
 
         try:
             routing_llm, self._last_routing_model, self._last_routing_effort = self._routing_llm_for(node)
