@@ -8895,9 +8895,7 @@ class TaskManager(BaseManager):
                 )
                 result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
         elif tool_name == WEB_SEARCH_FUNCTION_NAME and self.web_search_config is not None:
-            search_task = asyncio.create_task(
-                self._run_web_search(args.get("query", ""), meta_info, event.call_id)
-            )
+            search_task = asyncio.create_task(self._run_web_search(args.get("query", ""), meta_info, event.call_id))
             try:
                 await self._s2s_before_tool_request(tool_name, args, params, meta_info)
                 result = await search_task
