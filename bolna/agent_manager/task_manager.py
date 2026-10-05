@@ -125,7 +125,7 @@ from bolna.helpers.utils import (
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
-from bolna.models import S2SConfig
+from bolna.models import S2SConfig, tts_render_settings
 from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
 
@@ -379,6 +379,7 @@ class TaskManager(BaseManager):
         self.language = DEFAULT_LANGUAGE_CODE
         self.synthesizer_voice_id = None
         self.synthesizer_model = None
+        self.synthesizer_render_settings = ""
         self.synthesizer_pronunciation_key = None
         self.transfer_call_params = self.kwargs.get("transfer_call_params", None)
 
@@ -1925,6 +1926,7 @@ class TaskManager(BaseManager):
             self.synthesizer_voice = provider_config["voice"]
             self.synthesizer_voice_id = provider_config.get("voice_id")
             self.synthesizer_model = provider_config.get("model")
+            self.synthesizer_render_settings = tts_render_settings(self.synthesizer_provider, provider_config)
             self.synthesizer_pronunciation_key = pronunciation_dictionary_key(
                 self.synthesizer_provider, provider_config, synth_config.get("pronunciation_rules")
             )
@@ -7468,6 +7470,7 @@ class TaskManager(BaseManager):
                     voice=self.synthesizer_voice,
                     voice_id=self.synthesizer_voice_id,
                     model=self.synthesizer_model,
+                    render_settings=self.synthesizer_render_settings,
                     pronunciation=self.synthesizer_pronunciation_key,
                 )
             if self.turn_based_conversation or self.task_config["tools_config"]["output"]["provider"] == "default":
