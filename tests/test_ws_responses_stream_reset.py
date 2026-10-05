@@ -262,6 +262,7 @@ def _make_ws_llm(transport):
     llm.llm_host = None
     llm.use_responses_api = True
     llm.previous_response_id = None
+    llm._in_flight_response_id = None
     llm._pending_call_ids = set()
     llm.compact_threshold = None
     llm._interruption_hint = None

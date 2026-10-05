@@ -1,5 +1,8 @@
 """The OpenAI/Azure Responses API path: dispatch, streaming, non-streaming, and fallback to chat completions."""
 
+import asyncio
+import contextlib
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from openai import APIError, BadRequestError
@@ -33,6 +36,7 @@ def _make_llm(**overrides):
     llm.llm_host = None
     llm.use_responses_api = defaults.get("use_responses_api", False)
     llm.previous_response_id = defaults.get("previous_response_id", None)
+    llm._in_flight_response_id = None
     llm._pending_call_ids = defaults.get("_pending_call_ids", set())
     llm.compact_threshold = defaults.get("compact_threshold", None)
     llm._interruption_hint = defaults.get("_interruption_hint", None)
@@ -829,6 +833,7 @@ def _make_azure_llm(**overrides):
     llm.llm_host = "myazure.openai.azure.com"
     llm.use_responses_api = defaults.get("use_responses_api", False)
     llm.previous_response_id = defaults.get("previous_response_id", None)
+    llm._in_flight_response_id = None
     llm._pending_call_ids = defaults.get("_pending_call_ids", set())
     llm.compact_threshold = defaults.get("compact_threshold", None)
     llm._interruption_hint = defaults.get("_interruption_hint", None)
@@ -938,6 +943,108 @@ class TestAzureResponsesAPIStreaming:
         assert call_count == 2
         assert llm.previous_response_id == "resp_az_fresh"
         assert any("Recovered" in c.data for c in chunks if isinstance(c.data, str))
+
+    async def test_stale_retry_latency_includes_the_failed_attempt(self):
+        llm = _make_azure_llm(use_responses_api=True, previous_response_id="resp_az_stale")
+        clock = [1_000.0]
+
+        async def fake_create(**kwargs):
+            if kwargs.get("previous_response_id"):
+                clock[0] += 3_000
+                raise _bad_request("Previous response with id 'resp_az_stale' not found")
+            return _async_iter(
+                [
+                    _FakeStreamEvent("response.created", response=_FakeResponse("resp_az_fresh")),
+                    _FakeStreamEvent("response.output_text.delta", delta="Recovered", item_id="msg_1"),
+                    _FakeStreamEvent("response.completed", response=_FakeResponse("resp_az_fresh")),
+                ]
+            )
+
+        llm._responses_api_client.responses.create = AsyncMock(side_effect=fake_create)
+
+        with patch("bolna.llms.openai_base.now_ms", side_effect=lambda: clock[0]):
+            chunks = [
+                c
+                async for c in llm.generate_stream(
+                    [{"role": "user", "content": "Hello"}], synthesize=False, meta_info=_make_meta_info()
+                )
+            ]
+
+        latency = chunks[-1].latency
+        assert latency.first_token_latency_ms == 3_000
+        assert latency.total_stream_duration_ms == 3_000
+
+
+def _client_create(llm):
+    return llm._responses_api_client.responses if isinstance(llm, AzureLLM) else llm.async_client.responses
+
+
+def _completed_stream(response_id):
+    return _async_iter(
+        [
+            _FakeStreamEvent("response.created", response=_FakeResponse(response_id)),
+            _FakeStreamEvent("response.output_text.delta", delta="ok", item_id="msg_1"),
+            _FakeStreamEvent("response.completed", response=_FakeResponse(response_id)),
+        ]
+    )
+
+
+async def _run_turn(llm, messages):
+    async for _ in llm.generate_stream(messages, meta_info=_make_meta_info()):
+        pass
+
+
+@pytest.mark.parametrize("make_llm", [_make_azure_llm, _make_llm], ids=["azure", "openai_http"])
+class TestBargeInMidStream:
+    async def test_next_turn_after_a_cut_off_response_sends_full_history_with_the_hint_after_heard_text(self, make_llm):
+        llm = make_llm(use_responses_api=True, previous_response_id="resp_prev")
+        created = asyncio.Event()
+
+        async def cut_stream():
+            yield _FakeStreamEvent("response.created", response=_FakeResponse("resp_cut"))
+            created.set()
+            await asyncio.Event().wait()
+
+        _client_create(llm).create = AsyncMock(return_value=cut_stream())
+        turn = asyncio.create_task(_run_turn(llm, [{"role": "user", "content": "balance?"}]))
+        await created.wait()
+        turn.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await turn
+        llm.set_interruption_hint("Your balance is")
+
+        _client_create(llm).create = AsyncMock(return_value=_completed_stream("resp_next"))
+        await _run_turn(
+            llm,
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "balance?"},
+                {"role": "assistant", "content": "Your balance is"},
+                {"role": "user", "content": "wait"},
+            ],
+        )
+
+        sent = _client_create(llm).create.call_args.kwargs
+        assert "previous_response_id" not in sent
+        assert [item["role"] for item in sent["input"]] == ["system", "user", "assistant", "developer", "user"]
+        assert "Your balance is" in sent["input"][3]["content"]
+
+    async def test_next_turn_after_a_completed_response_stays_chained(self, make_llm):
+        llm = make_llm(use_responses_api=True)
+        _client_create(llm).create = AsyncMock(return_value=_completed_stream("resp_done"))
+        await _run_turn(llm, [{"role": "user", "content": "Hi"}])
+
+        _client_create(llm).create = AsyncMock(return_value=_completed_stream("resp_next"))
+        await _run_turn(
+            llm,
+            [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "more"},
+            ],
+        )
+
+        assert _client_create(llm).create.call_args.kwargs["previous_response_id"] == "resp_done"
 
 
 class TestAzureResponsesAPINonStreaming:

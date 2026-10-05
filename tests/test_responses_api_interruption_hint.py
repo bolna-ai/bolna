@@ -28,6 +28,7 @@ def _make_llm(**overrides):
     llm.llm_host = None
     llm.use_responses_api = True
     llm.previous_response_id = defaults["previous_response_id"]
+    llm._in_flight_response_id = None
     llm._pending_call_ids = defaults["_pending_call_ids"]
     llm.compact_threshold = None
     llm._interruption_hint = defaults["_interruption_hint"]
@@ -76,8 +77,8 @@ class TestInterruptionHintInjection:
 
         _, items = llm._build_responses_input(SYSTEM_USER_ASSISTANT_USER)
 
-        assert items[0]["role"] == "developer"
-        assert "hello th" in items[0]["content"]
+        assert [item["role"] for item in items] == ["system", "user", "assistant", "developer", "user"]
+        assert "hello th" in items[3]["content"]
         assert llm._interruption_hint is None
 
     def test_hint_injected_on_pending_tool_fallback(self):
@@ -100,7 +101,7 @@ class TestInterruptionHintInjection:
 
         assert llm.previous_response_id is None
         assert llm._interruption_hint is None
-        assert items[0]["role"] == "developer"  # hint rides every path, this fallback included
+        assert items[-1]["role"] == "developer"  # hint rides every path, this fallback included
 
     def test_hint_injected_when_tool_outputs_present(self):
         messages = [
