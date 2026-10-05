@@ -1,6 +1,6 @@
 import json
 from bolna.constants import END_CALL_FUNCTION_PREFIX
-from bolna.helpers.function_calling_helpers import redacted_url, resolve_tool_name
+from bolna.helpers.function_calling_helpers import record_unresolved_tool_call, redacted_url, resolve_tool_name
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message
 from bolna.helpers.logger_config import configure_logger
 from .types import FunctionCallPayload
@@ -74,6 +74,7 @@ class ToolCallAccumulator:
 
         first_func_name = self.final_tool_calls[0]["function"]["name"]
         if first_func_name not in self.api_params:
+            record_unresolved_tool_call(first_func_name, meta_info, self.model)
             return None
 
         func_conf = self.api_params[first_func_name]
