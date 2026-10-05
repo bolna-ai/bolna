@@ -139,10 +139,10 @@ class FakeServer:
 
     def __init__(self, script=(), refuse=False, hang_up=False):
         self.script, self.refuse, self.hang_up = script, refuse, hang_up
-        self.session, self.received, self.auth = None, [], None
+        self.session, self.received, self.auth, self.path = None, [], None, None
 
     async def handler(self, ws):
-        self.auth = ws.request.headers.get("Authorization")
+        self.auth, self.path = ws.request.headers.get("Authorization"), ws.request.path
         await ws.send(json.dumps({"type": "transcription_session.created"}))
         if self.refuse:
             error = {"code": "server_at_capacity", "message": "at the session cap"}
@@ -164,13 +164,13 @@ class FakeServer:
                     return
 
 
-async def _call(server, until=lambda packets: True, **kwargs):
+async def _call(server, until=lambda packets: True, monkeypatch=None, **kwargs):
     """Stream one audio packet, wait for `until`, end the stream, and return every queue packet up to the close."""
     out, inq = asyncio.Queue(), asyncio.Queue()
     packets = []
     async with websockets.serve(server.handler, "127.0.0.1", 0) as srv:
-        url = f"ws://127.0.0.1:{srv.sockets[0].getsockname()[1]}/v1/realtime"
-        t = RealtimeTranscriber("plivo", input_queue=inq, output_queue=out, transcriber_url=url, **kwargs)
+        monkeypatch.setenv("REALTIME_TRANSCRIBER_URL", f"ws://127.0.0.1:{srv.sockets[0].getsockname()[1]}/{{model}}")
+        t = RealtimeTranscriber("plivo", input_queue=inq, output_queue=out, **kwargs)
         await t.run()
         await inq.put(AUDIO)
         while not until(packets) and not any(p["data"] == "transcriber_connection_closed" for p in packets):
@@ -181,14 +181,20 @@ async def _call(server, until=lambda packets: True, **kwargs):
     return t, packets
 
 
-async def test_a_call_streams_audio_and_closes_cleanly_at_end_of_stream():
+async def test_a_call_streams_audio_and_closes_cleanly_at_end_of_stream(monkeypatch):
     script = [
         {"type": "input_audio_buffer.speech_started", "item_id": "i1"},
         {"type": "conversation.item.input_audio_transcription.completed", "item_id": "i1", "transcript": "haan"},
     ]
     server = FakeServer(script)
-    t, packets = await _call(server, until=lambda ps: any(isinstance(p["data"], dict) for p in ps), transcriber_key="k")
+    t, packets = await _call(
+        server,
+        until=lambda ps: any(isinstance(p["data"], dict) for p in ps),
+        monkeypatch=monkeypatch,
+        transcriber_key="k",
+    )
     assert server.auth == "Bearer k"
+    assert server.path == "/nemotron-asr-hi"
     assert server.received == ["input_audio_buffer.append", "input_audio_buffer.commit"]
     closed = packets[-1]["meta_info"]
     assert "connection_error" not in closed
@@ -196,21 +202,28 @@ async def test_a_call_streams_audio_and_closes_cleanly_at_end_of_stream():
     assert t.connection_time is not None
 
 
-async def test_a_refused_session_is_a_connection_error():
-    _, packets = await _call(FakeServer(refuse=True))
+async def test_a_refused_session_is_a_connection_error(monkeypatch):
+    _, packets = await _call(FakeServer(refuse=True), monkeypatch=monkeypatch)
     assert packets[-1]["data"] == "transcriber_connection_closed"
     assert "server_at_capacity" in packets[-1]["meta_info"]["connection_error"]
 
 
-async def test_a_server_hanging_up_mid_call_is_a_connection_error():
+async def test_a_server_hanging_up_mid_call_is_a_connection_error(monkeypatch):
     script = [{"type": "input_audio_buffer.speech_started", "item_id": "i1"}]
-    _, packets = await _call(FakeServer(script, hang_up=True), until=lambda ps: False)
+    _, packets = await _call(FakeServer(script, hang_up=True), until=lambda ps: False, monkeypatch=monkeypatch)
     assert packets[-1]["meta_info"]["connection_error"]
 
 
-async def test_no_endpoint_is_a_connection_error():
+async def test_no_endpoint_is_a_connection_error(monkeypatch):
+    monkeypatch.delenv("REALTIME_TRANSCRIBER_URL", raising=False)
     out = asyncio.Queue()
-    t = RealtimeTranscriber("plivo", input_queue=asyncio.Queue(), output_queue=out, transcriber_url="")
+    t = RealtimeTranscriber("plivo", input_queue=asyncio.Queue(), output_queue=out)
     await t.run()
     packet = await asyncio.wait_for(out.get(), 2)
-    assert "transcriber_url" in packet["meta_info"]["connection_error"]
+    assert "REALTIME_TRANSCRIBER_URL" in packet["meta_info"]["connection_error"]
+
+
+def test_an_agent_config_cannot_choose_the_endpoint(monkeypatch):
+    monkeypatch.setenv("REALTIME_TRANSCRIBER_URL", "wss://asr.example/{model}")
+    t = _transcriber(transcriber_url="wss://attacker.example", model="nemotron-asr-hi")
+    assert t.url == "wss://asr.example/nemotron-asr-hi"

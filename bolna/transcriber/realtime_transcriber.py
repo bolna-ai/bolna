@@ -6,8 +6,9 @@ server's events map onto the transcriber queue. Two optional protocol extensions
 `input_audio_buffer.turn_resumed` voids it when the caller goes on, the same pattern as Deepgram Flux's
 EagerEndOfTurn and TurnResumed. A server without them simply never sends them.
 
-The endpoint and key arrive as `transcriber_url` and `transcriber_key`, set server-side, or from
-`REALTIME_TRANSCRIBER_URL` and `REALTIME_TRANSCRIBER_KEY`.
+The endpoint comes only from the deployment's environment, never from an agent's config: `REALTIME_TRANSCRIBER_URL`,
+where `{model}` stands for the transcriber's model (a cluster serving each model at its own host). The key is
+`transcriber_key` when one is passed, else `REALTIME_TRANSCRIBER_KEY`.
 """
 
 import asyncio
@@ -67,7 +68,7 @@ class RealtimeTranscriber(BaseTranscriber):
         self.endpointing = endpointing
         # Read by task_manager: whether this transcriber may drive speculative turns.
         self.eager_end_of_turn = bool(eager_end_of_turn)
-        self.url = kwargs.get("transcriber_url") or os.getenv("REALTIME_TRANSCRIBER_URL", "")
+        self.url = os.getenv("REALTIME_TRANSCRIBER_URL", "").replace("{model}", model)
         self.api_key = kwargs.get("transcriber_key") or os.getenv("REALTIME_TRANSCRIBER_KEY", "")
         self.transcriber_output_queue = output_queue
         if telephony_provider in TelephonyProvider.telephony_values():
@@ -104,7 +105,7 @@ class RealtimeTranscriber(BaseTranscriber):
     async def connect(self):
         """Open the session; a refusal (full, loading, bad key) surfaces here, before any audio is sent."""
         if not self.url:
-            raise ConnectionError("no transcriber_url or REALTIME_TRANSCRIBER_URL")
+            raise ConnectionError("REALTIME_TRANSCRIBER_URL is not set")
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         try:
             ws = await asyncio.wait_for(
