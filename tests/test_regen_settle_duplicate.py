@@ -237,12 +237,25 @@ TOOL_BARGE_IN = "Okay, go ahead."
 POST_TOOL_REPLY = "I checked, your order was shipped today and should reach you by Friday evening."
 
 
+class _History:
+    def __init__(self):
+        self.messages = []
+
+    def append_assistant(self, content, **kwargs):
+        self.messages.append({"role": "assistant", "content": content, **kwargs})
+
+
 def _spawning_manager(pending_user_input, followup_turn_id):
     tm = _Stub()
     tm._pending_user_input = pending_user_input
     tm._pending_assistant_history = {}
     tm._sent_audio_sequences = set()
     tm._blocked_sequences = set()
+    tm._committed_assistant_sequences = set()
+    tm._last_spoken_assistant = None
+    tm._last_spoken_user_input = None
+    tm._turn_msg_map = {}
+    tm.conversation_history = _History()
     tm._TaskManager__get_updated_meta_info = lambda meta: {
         **meta,
         "sequence_id": followup_turn_id,
@@ -266,9 +279,13 @@ def test_a_followup_does_not_claim_a_newer_user_turn():
 
 
 def test_a_barge_in_after_a_tool_call_is_answered():
-    tm = _manager_with_user(
-        staged={8: _staged_with_user(POST_TOOL_REPLY, turn_id=8, user_input=TOOL_BARGE_IN)},
-        last_spoken=(7, POST_TOOL_REPLY),
-        last_user=TOOL_CALLER_ASK,
-    )
-    assert _is_duplicate(tm, 8) is False
+    tm = _spawning_manager(pending_user_input=(6, TOOL_CALLER_ASK), followup_turn_id=7)
+    followup = TaskManager._spawn_followup_meta_info(tm, {"sequence_id": 6, "turn_id": 6, "response_uid": "r6"})
+    TaskManager._stage_assistant_history(tm, followup, POST_TOOL_REPLY)
+    TaskManager._commit_staged_assistant_history(tm, 7)
+
+    tm._pending_user_input = (8, TOOL_BARGE_IN)
+    barge_in_meta = {"sequence_id": 8, "turn_id": 8, "response_uid": "r8"}
+    TaskManager._stage_assistant_history(tm, barge_in_meta, POST_TOOL_REPLY)
+
+    assert _is_duplicate(tm, 8, barge_in_meta) is False

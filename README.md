@@ -260,6 +260,7 @@ These are the current supported ASRs Providers:
 | Provider     | Environment variable to be added in `.env` file |
 |--------------|-------------------------------------------------|
 | Deepgram     | `DEEPGRAM_AUTH_TOKEN`                           |
+| Bolna (self-hosted, OpenAI Realtime transcription protocol) | `REALTIME_TRANSCRIBER_URL` (`{model}` is replaced by the model), `REALTIME_TRANSCRIBER_KEY` |
 
 </details>
 &nbsp;<br>

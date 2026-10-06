@@ -28,6 +28,7 @@ from .transcriber import (
     OpenAITranscriber,
     SonioxTranscriber,
     GeminiTranscriber,
+    RealtimeTranscriber,
 )
 from .input_handlers import (
     DefaultInputHandler,
@@ -91,6 +92,7 @@ SUPPORTED_TRANSCRIBER_PROVIDERS = {
     TranscriberProvider.OPENAI.value: OpenAITranscriber,
     TranscriberProvider.SONIOX.value: SonioxTranscriber,
     TranscriberProvider.GEMINI.value: GeminiTranscriber,
+    TranscriberProvider.BOLNA.value: RealtimeTranscriber,
 }
 
 # Backwards compatibility
