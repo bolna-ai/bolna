@@ -115,6 +115,7 @@ class LLMProvider(str, Enum):
     OPENROUTER = "openrouter"
     AZURE = "azure"
     GOOGLE = "google"
+    BOLNA = "bolna"
 
     @classmethod
     def all_values(cls):
