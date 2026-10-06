@@ -87,6 +87,8 @@ class TranscriberProvider(str, Enum):
     OPENAI = "openai"
     SONIOX = "soniox"
     GEMINI = "gemini"
+    # Our self-hosted ASR, over the OpenAI Realtime transcription protocol.
+    BOLNA = "bolna"
 
     @classmethod
     def all_values(cls):
