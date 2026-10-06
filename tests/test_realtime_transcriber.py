@@ -227,3 +227,21 @@ def test_an_agent_config_cannot_choose_the_endpoint(monkeypatch):
     monkeypatch.setenv("REALTIME_TRANSCRIBER_URL", "wss://asr.example/{model}")
     t = _transcriber(transcriber_url="wss://attacker.example", model="nemotron-asr-hi")
     assert t.url == "wss://asr.example/nemotron-asr-hi"
+
+
+def test_the_caller_stopped_when_the_speech_ended_not_when_its_frame_was_sent():
+    t = _transcriber()
+    t.record_audio_frame(0.2, 1_000_000.0)  # audio 0.0-0.2 s, sent at t=1000 s
+    t.record_audio_frame(0.2, 1_000_200.0)  # audio 0.2-0.4 s, sent at t=1000.2 s
+    t.handle_event({"type": "input_audio_buffer.speech_started", "item_id": "i1"})
+    t.handle_event(
+        {"type": "input_audio_buffer.speech_stopped", "item_id": "i1", "audio_end_ms": 350, "speech_end_ms": 250}
+    )
+    assert abs(t.meta_info["user_stop_ts_wall"] - (1000.2 - 0.15)) < 1e-6
+
+
+def test_a_server_without_speech_end_ms_falls_back_to_audio_end_ms():
+    t = _transcriber()
+    t.record_audio_frame(0.2, 1_000_000.0)
+    t.handle_event({"type": "input_audio_buffer.speech_stopped", "item_id": "i1", "audio_end_ms": 100})
+    assert abs(t.meta_info["user_stop_ts_wall"] - (1000.0 - 0.1)) < 1e-6

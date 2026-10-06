@@ -164,10 +164,11 @@ class RealtimeTranscriber(BaseTranscriber):
             await ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": base64.b64encode(data).decode()}))
 
     def _audio_position_wall_s(self, position_s: float):
-        """Wall time at which the audio at `position_s` of this stream was sent, or None."""
+        """Wall time at which the audio at `position_s` of this stream was spoken, or None: a frame leaves once its
+        last sample has arrived, so the position is that send time less the audio after it in the frame."""
         for start, end, sent_ms in self.audio_frame_timestamps:
             if start <= position_s <= end:
-                return sent_ms / 1000
+                return sent_ms / 1000 - (end - position_s)
         return None
 
     # ── Events ────────────────────────────────────────────────────────────────
@@ -266,8 +267,9 @@ class RealtimeTranscriber(BaseTranscriber):
         if kind == "input_audio_buffer.speech_stopped":
             item = self._item(item_id)
             item["stopped_at"] = time.time()
-            # The server's end is its VAD's padded end of speech, on the stream's own audio clock.
-            stopped_wall = self._audio_position_wall_s(event.get("audio_end_ms", 0) / 1000)
+            # Where the speech itself stopped (an extension), else the end of the padded segment, on the stream's clock.
+            stopped_ms = event.get("speech_end_ms", event.get("audio_end_ms", 0))
+            stopped_wall = self._audio_position_wall_s(stopped_ms / 1000)
             if stopped_wall is not None:
                 self.meta_info["user_stop_ts_wall"] = stopped_wall
                 self.meta_info["user_stop_offset_ms"] = round((time.time() - stopped_wall) * 1000)
