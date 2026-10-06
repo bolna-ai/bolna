@@ -28,6 +28,8 @@ class RealtimeTranscriber(BaseTranscriber):
     CONNECT_TIMEOUT_S = 10.0
     STUCK_TURN_S = 4.0
     EOS_DRAIN_S = 5.0
+    # Read by task_manager: this transcriber starts speculative replies.
+    eager_end_of_turn = True
 
     def __init__(
         self,
@@ -39,7 +41,6 @@ class RealtimeTranscriber(BaseTranscriber):
         encoding="linear16",
         sampling_rate="16000",
         output_queue=None,
-        eager_end_of_turn=True,
         **kwargs,
     ):
         super().__init__(input_queue)
@@ -50,8 +51,6 @@ class RealtimeTranscriber(BaseTranscriber):
         self.stream = stream
         self.encoding = encoding
         self.sampling_rate = int(sampling_rate)
-        # Read by task_manager: whether this transcriber may start speculative replies.
-        self.eager_end_of_turn = bool(eager_end_of_turn)
         self.url = os.getenv("REALTIME_TRANSCRIBER_URL", "").replace("{model}", model)
         self.api_key = kwargs.get("transcriber_key") or os.getenv("REALTIME_TRANSCRIBER_KEY", "")
         self.transcriber_output_queue = output_queue
@@ -70,6 +69,8 @@ class RealtimeTranscriber(BaseTranscriber):
         self.turn_counter = 0
         self.current_turn_id = None
         self.items: dict[str, dict] = {}
+        # Turns already closed: a late server event for one (after the watchdog) must not reopen it.
+        self.settled: set[str] = set()
 
     def session_update(self) -> dict:
         audio_format = {"type": "audio/pcmu" if self.encoding == "mulaw" else "audio/pcm", "rate": self.sampling_rate}
@@ -171,6 +172,8 @@ class RealtimeTranscriber(BaseTranscriber):
     def _settle(self, item_id, item: dict, transcript: str, **flags):
         """Packets that close a turn."""
         self.items.pop(item_id, None)
+        if item_id is not None:
+            self.settled.add(item_id)
         packets = []
         if item["eager"] is not None and transcript != item["eager"]:
             packets.append(create_ws_data_packet({"type": "turn_resumed"}, self.meta_info))
@@ -201,6 +204,8 @@ class RealtimeTranscriber(BaseTranscriber):
         """The transcriber-queue packets one server event produces."""
         kind = event.get("type", "")
         item_id = event.get("item_id")
+        if item_id in self.settled:
+            return []
         if kind == "input_audio_buffer.speech_started":
             item = self._item(item_id)
             self.current_turn_id = item["turn_id"]
@@ -304,6 +309,7 @@ class RealtimeTranscriber(BaseTranscriber):
         self.reset_audio_frame_state()
         # A pool reconnect re-runs this; the dead session's turns never settle.
         self.items.clear()
+        self.settled.clear()
         try:
             start = time.perf_counter()
             ws = await self.connect()

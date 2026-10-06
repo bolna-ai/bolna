@@ -37,8 +37,8 @@ def test_an_agents_endpointing_never_changes_the_servers_end_of_turn_silence():
     assert "silence_duration_ms" not in _input(_transcriber(endpointing=100))["turn_detection"]
 
 
-def test_eager_end_of_turn_can_be_turned_off():
-    assert _input(_transcriber(eager_end_of_turn=False))["turn_detection"]["eager_end_of_turn"] is False
+def test_every_session_asks_for_eager_turns():
+    assert _input(_transcriber())["turn_detection"]["eager_end_of_turn"] is True
 
 
 def test_a_turn_maps_onto_the_queue_with_cumulative_interims():
@@ -139,6 +139,22 @@ async def test_a_turn_the_server_never_settles_is_released():
     watchdog.cancel()
     assert resumed["data"] == {"type": "turn_resumed"}
     assert final["data"] == {"type": "transcript", "content": "haan", "was_eager": False, "force_finalized": True}
+
+
+async def test_a_late_event_for_a_released_turn_does_not_reopen_it():
+    t = _transcriber()
+    t.STUCK_TURN_S = 0.0
+    t.handle_event({"type": "input_audio_buffer.eager_end_of_turn", "item_id": "i1", "transcript": "haan"})
+    watchdog = asyncio.create_task(t._watch_turns())
+    for _ in range(2):  # turn_resumed, then the released transcript
+        await asyncio.wait_for(t.transcriber_output_queue.get(), 2)
+    watchdog.cancel()
+    late = [
+        {"type": "conversation.item.input_audio_transcription.delta", "item_id": "i1", "transcript": "haan ji"},
+        {"type": "conversation.item.input_audio_transcription.completed", "item_id": "i1", "transcript": "haan ji"},
+    ]
+    assert _feed(t, *late) == ([], [])
+    assert t.turn_counter == 1
 
 
 class FakeServer:
