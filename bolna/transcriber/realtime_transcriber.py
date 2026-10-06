@@ -28,7 +28,6 @@ class RealtimeTranscriber(BaseTranscriber):
     CONNECT_TIMEOUT_S = 10.0
     STUCK_TURN_S = 4.0
     EOS_DRAIN_S = 5.0
-    SILENCE_RANGE_MS = (200, 2000)
 
     def __init__(
         self,
@@ -40,7 +39,6 @@ class RealtimeTranscriber(BaseTranscriber):
         encoding="linear16",
         sampling_rate="16000",
         output_queue=None,
-        endpointing=None,
         eager_end_of_turn=True,
         **kwargs,
     ):
@@ -52,7 +50,6 @@ class RealtimeTranscriber(BaseTranscriber):
         self.stream = stream
         self.encoding = encoding
         self.sampling_rate = int(sampling_rate)
-        self.endpointing = endpointing
         # Read by task_manager: whether this transcriber may start speculative replies.
         self.eager_end_of_turn = bool(eager_end_of_turn)
         self.url = os.getenv("REALTIME_TRANSCRIBER_URL", "").replace("{model}", model)
@@ -76,10 +73,8 @@ class RealtimeTranscriber(BaseTranscriber):
 
     def session_update(self) -> dict:
         audio_format = {"type": "audio/pcmu" if self.encoding == "mulaw" else "audio/pcm", "rate": self.sampling_rate}
+        # No silence_duration_ms: the server's evaluated end-of-turn silence applies, never an agent's endpointing.
         turn_detection = {"type": "server_vad", "eager_end_of_turn": self.eager_end_of_turn}
-        if self.endpointing is not None:
-            low, high = self.SILENCE_RANGE_MS
-            turn_detection["silence_duration_ms"] = min(max(int(self.endpointing), low), high)
         audio_input = {
             "format": audio_format,
             "transcription": {"model": self.model, "language": self.language},

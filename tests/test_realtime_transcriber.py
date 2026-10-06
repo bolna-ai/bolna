@@ -33,10 +33,11 @@ def test_session_uses_the_telephony_audio_as_it_arrives():
     assert _input(web)["format"] == {"type": "audio/pcm", "rate": 16000}
 
 
-def test_endpointing_is_the_silence_wait_within_the_server_range():
-    assert _input(_transcriber(endpointing=500))["turn_detection"]["silence_duration_ms"] == 500
-    assert _input(_transcriber(endpointing=50))["turn_detection"]["silence_duration_ms"] == 200
-    assert "silence_duration_ms" not in _input(_transcriber())["turn_detection"]
+def test_an_agents_endpointing_never_changes_the_servers_end_of_turn_silence():
+    assert "silence_duration_ms" not in _input(_transcriber(endpointing=100))["turn_detection"]
+
+
+def test_eager_end_of_turn_can_be_turned_off():
     assert _input(_transcriber(eager_end_of_turn=False))["turn_detection"]["eager_end_of_turn"] is False
 
 
