@@ -2779,6 +2779,11 @@ class TaskManager(BaseManager):
             "text_synthesized",
         ):
             followup_meta_info.pop(key, None)
+        # A follow-up answers its parent's caller utterance; without it the duplicate gate can't
+        # tell a barge-in after a tool call from a re-finalized turn and silences the reply.
+        pending_user = self._pending_user_input
+        if pending_user and pending_user[0] == meta_info.get("turn_id"):
+            self._pending_user_input = (followup_meta_info["turn_id"], pending_user[1])
         logger.info(
             "BOLNA_TRACE_META followup seq=%s turn=%s response_uid=%s group_uid=%s parent_response_uid=%s request_id=%s parent_seq=%s parent_turn=%s",
             followup_meta_info.get("sequence_id"),
