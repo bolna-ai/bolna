@@ -399,7 +399,9 @@ class SarvamTranscriber(BaseTranscriber):
                                 self.meta_info["transcriber_latency"] = turn_latency_seconds
 
                             transcript_data = {"type": "transcript", "content": transcript.strip()}
-                            self.meta_info["transcriber_duration"] = metrics.get("audio_duration", 0)
+                            self.meta_info["transcriber_duration"] = (
+                                self.meta_info.get("transcriber_duration", 0) or 0
+                            ) + (metrics.get("audio_duration", 0) or 0)
 
                             # Accumulate the turn's text so END_SPEECH can record it in
                             # turn_latencies (observability/eval). Each Sarvam "data" message
