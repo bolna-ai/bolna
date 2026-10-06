@@ -1,15 +1,4 @@
-"""Streaming ASR over the OpenAI Realtime transcription protocol, for any server that speaks it.
-
-The server owns segmentation (server VAD): the caller's audio streams in its native telephony format, and the
-server's events map onto the transcriber queue. Two optional protocol extensions drive speculative turns:
-`input_audio_buffer.eager_end_of_turn` carries the final transcript as soon as it is determined, and
-`input_audio_buffer.turn_resumed` voids it when the caller goes on, the same pattern as Deepgram Flux's
-EagerEndOfTurn and TurnResumed. A server without them simply never sends them.
-
-The endpoint comes only from the deployment's environment, never from an agent's config: `REALTIME_TRANSCRIBER_URL`,
-where `{model}` stands for the transcriber's model (a cluster serving each model at its own host). The key is
-`transcriber_key` when one is passed, else `REALTIME_TRANSCRIBER_KEY`.
-"""
+"""Streaming ASR over the OpenAI Realtime transcription protocol, for any server that speaks it."""
 
 import asyncio
 import base64
@@ -37,9 +26,7 @@ SESSION_READY = ("transcription_session.updated", "session.updated")
 
 class RealtimeTranscriber(BaseTranscriber):
     CONNECT_TIMEOUT_S = 10.0
-    # Speech stopped, or an eager transcript was sent, and nothing settled the turn: release it.
     STUCK_TURN_S = 4.0
-    # After end of stream, how long to wait for transcripts still in flight before closing.
     EOS_DRAIN_S = 5.0
     SILENCE_RANGE_MS = (200, 2000)
 
@@ -66,7 +53,7 @@ class RealtimeTranscriber(BaseTranscriber):
         self.encoding = encoding
         self.sampling_rate = int(sampling_rate)
         self.endpointing = endpointing
-        # Read by task_manager: whether this transcriber may drive speculative turns.
+        # Read by task_manager: whether this transcriber may start speculative replies.
         self.eager_end_of_turn = bool(eager_end_of_turn)
         self.url = os.getenv("REALTIME_TRANSCRIBER_URL", "").replace("{model}", model)
         self.api_key = kwargs.get("transcriber_key") or os.getenv("REALTIME_TRANSCRIBER_KEY", "")
@@ -87,8 +74,6 @@ class RealtimeTranscriber(BaseTranscriber):
         self.current_turn_id = None
         self.items: dict[str, dict] = {}
 
-    # ── Session ───────────────────────────────────────────────────────────────
-
     def session_update(self) -> dict:
         audio_format = {"type": "audio/pcmu" if self.encoding == "mulaw" else "audio/pcm", "rate": self.sampling_rate}
         turn_detection = {"type": "server_vad", "eager_end_of_turn": self.eager_end_of_turn}
@@ -103,7 +88,7 @@ class RealtimeTranscriber(BaseTranscriber):
         return {"type": "session.update", "session": {"type": "transcription", "audio": {"input": audio_input}}}
 
     async def connect(self):
-        """Open the session; a refusal (full, loading, bad key) surfaces here, before any audio is sent."""
+        """Open the session; a refusal surfaces here, before any audio is sent."""
         if not self.url:
             raise ConnectionError("REALTIME_TRANSCRIBER_URL is not set")
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
@@ -124,7 +109,7 @@ class RealtimeTranscriber(BaseTranscriber):
             try:
                 await ws.send(json.dumps(self.session_update()))
             except ConnectionClosed:
-                pass  # a server refusing the session closes at once; its reason is in the events already received
+                pass  # a refusing server closes at once; its error event is still read below
             while True:
                 event = json.loads(await asyncio.wait_for(ws.recv(), self.CONNECT_TIMEOUT_S))
                 if event.get("type") in SESSION_READY:
@@ -137,8 +122,6 @@ class RealtimeTranscriber(BaseTranscriber):
             if isinstance(e, ConnectionError):
                 raise
             raise ConnectionError(f"session did not start: {e!r}") from e
-
-    # ── Audio ─────────────────────────────────────────────────────────────────
 
     def _frame_seconds(self, num_bytes: int) -> float:
         return num_bytes / ((1 if self.encoding == "mulaw" else 2) * self.sampling_rate)
@@ -164,14 +147,11 @@ class RealtimeTranscriber(BaseTranscriber):
             await ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": base64.b64encode(data).decode()}))
 
     def _audio_position_wall_s(self, position_s: float):
-        """Wall time at which the audio at `position_s` of this stream was spoken, or None: a frame leaves once its
-        last sample has arrived, so the position is that send time less the audio after it in the frame."""
+        """Wall time the audio at `position_s` was spoken: its frame's send time less the audio after it."""
         for start, end, sent_ms in self.audio_frame_timestamps:
             if start <= position_s <= end:
                 return sent_ms / 1000 - (end - position_s)
         return None
-
-    # ── Events ────────────────────────────────────────────────────────────────
 
     def _item(self, item_id) -> dict:
         if item_id not in self.items:
@@ -194,7 +174,7 @@ class RealtimeTranscriber(BaseTranscriber):
             item["interims"][-1]["is_final"] = True
 
     def _settle(self, item_id, item: dict, transcript: str, **flags):
-        """Packets that close a turn: its transcript, or `speech_ended` (and `turn_resumed` for a void eager)."""
+        """Packets that close a turn."""
         self.items.pop(item_id, None)
         packets = []
         if item["eager"] is not None and transcript != item["eager"]:
@@ -242,7 +222,7 @@ class RealtimeTranscriber(BaseTranscriber):
             return [create_ws_data_packet("speech_started", self.meta_info)]
         if kind == DELTA:
             item = self._item(item_id)
-            # Deltas join unstripped: one may end in the space that separates it from the next.
+            # Stripped only for output: a delta may end with the space before the next one.
             item["raw"] = event.get("transcript") or item["raw"] + event.get("delta", "")
             item["text"] = item["raw"].strip()
             if not item["text"]:
@@ -270,7 +250,7 @@ class RealtimeTranscriber(BaseTranscriber):
         if kind == "input_audio_buffer.speech_stopped":
             item = self._item(item_id)
             item["stopped_at"] = time.time()
-            # Where the speech itself stopped (an extension), else the end of the padded segment, on the stream's clock.
+            # speech_end_ms (an extension) is where speech stopped; audio_end_ms includes the end padding.
             stopped_ms = event.get("speech_end_ms", event.get("audio_end_ms", 0))
             stopped_wall = self._audio_position_wall_s(stopped_ms / 1000)
             if stopped_wall is not None:
@@ -300,22 +280,19 @@ class RealtimeTranscriber(BaseTranscriber):
                 yield packet
 
     async def _watch_turns(self):
-        """Release a turn the server never settled, so a speculative reply or a held agent never waits on it."""
+        """Release a turn the server never settled, so a speculative reply never waits on it."""
         while True:
             await asyncio.sleep(0.25)
             now = time.time()
             for item_id, item in list(self.items.items()):
                 if item["stopped_at"] is not None and now - item["stopped_at"] > self.STUCK_TURN_S:
                     logger.warning(f"Realtime turn {item['turn_id']} not settled after {self.STUCK_TURN_S}s")
-                    # As Flux's watchdog does: cancel any speculative reply, then finalize the best text.
                     packets = []
                     if item["eager"] is not None:
                         packets.append(create_ws_data_packet({"type": "turn_resumed"}, self.meta_info))
                     text, item["eager"] = item["eager"] or item["text"], None
                     for packet in packets + self._settle(item_id, item, text, force_finalized=True):
                         await self.push_to_transcriber_queue(packet)
-
-    # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def push_to_transcriber_queue(self, data_packet):
         if self.transcriber_output_queue is not None:
@@ -330,7 +307,7 @@ class RealtimeTranscriber(BaseTranscriber):
     async def transcribe(self):
         ws = None
         self.reset_audio_frame_state()
-        # A reconnect (a pool re-runs transcribe) starts a new server session: the old one's turns never settle.
+        # A pool reconnect re-runs this; the dead session's turns never settle.
         self.items.clear()
         try:
             start = time.perf_counter()
@@ -345,7 +322,6 @@ class RealtimeTranscriber(BaseTranscriber):
                     break
                 await self.push_to_transcriber_queue(packet)
             if not self.eos_sent and self.connection_on:
-                # A server that hangs up mid-call leaves the caller unheard: report it, never end quietly.
                 self.connection_error = f"server closed the session: {ws.close_code} {ws.close_reason}"
         except ConnectionClosed as e:
             if not self.eos_sent:

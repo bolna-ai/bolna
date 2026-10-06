@@ -141,8 +141,7 @@ async def test_a_turn_the_server_never_settles_is_released():
 
 
 class FakeServer:
-    """Answers the session (or refuses it), records what the client sends, and plays `script` after the first
-    audio append. `hang_up` closes the socket after the script, as a crashed server would."""
+    """Answers or refuses the session, records what the client sends, plays `script` after the first append."""
 
     def __init__(self, script=(), refuse=False, hang_up=False):
         self.script, self.refuse, self.hang_up = script, refuse, hang_up
@@ -172,8 +171,7 @@ class FakeServer:
 
 
 async def _call(server, until=lambda packets: True, monkeypatch=None, prepare=None, **kwargs):
-    """Stream one audio packet, wait for `until`, end the stream, and return every queue packet up to the close.
-    `prepare` sets up the transcriber before it connects."""
+    """Stream one packet, wait for `until`, end the stream, and return the queue packets up to the close."""
     out, inq = asyncio.Queue(), asyncio.Queue()
     packets = []
     async with websockets.serve(server.handler, "127.0.0.1", 0) as srv:
