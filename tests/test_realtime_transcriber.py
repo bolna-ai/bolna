@@ -74,6 +74,13 @@ def test_a_turn_maps_onto_the_queue_with_cumulative_interims():
     assert t.turn_latencies[-1]["final_transcript"] == "haan ji"
 
 
+def test_a_server_sending_only_deltas_keeps_the_spaces_between_them():
+    t = _transcriber()
+    delta = {"type": "conversation.item.input_audio_transcription.delta", "item_id": "i1"}
+    _, packets = _feed(t, {**delta, "delta": "haan "}, {**delta, "delta": "ji"})
+    assert packets[-1]["data"]["content"] == "haan ji"
+
+
 def test_speech_stopped_alone_never_ends_the_turn():
     t = _transcriber()
     kinds, _ = _feed(
@@ -164,13 +171,16 @@ class FakeServer:
                     return
 
 
-async def _call(server, until=lambda packets: True, monkeypatch=None, **kwargs):
-    """Stream one audio packet, wait for `until`, end the stream, and return every queue packet up to the close."""
+async def _call(server, until=lambda packets: True, monkeypatch=None, prepare=None, **kwargs):
+    """Stream one audio packet, wait for `until`, end the stream, and return every queue packet up to the close.
+    `prepare` sets up the transcriber before it connects."""
     out, inq = asyncio.Queue(), asyncio.Queue()
     packets = []
     async with websockets.serve(server.handler, "127.0.0.1", 0) as srv:
         monkeypatch.setenv("REALTIME_TRANSCRIBER_URL", f"ws://127.0.0.1:{srv.sockets[0].getsockname()[1]}/{{model}}")
         t = RealtimeTranscriber("plivo", input_queue=inq, output_queue=out, **kwargs)
+        if prepare:
+            prepare(t)
         await t.run()
         await inq.put(AUDIO)
         while not until(packets) and not any(p["data"] == "transcriber_connection_closed" for p in packets):
@@ -212,6 +222,15 @@ async def test_a_server_hanging_up_mid_call_is_a_connection_error(monkeypatch):
     script = [{"type": "input_audio_buffer.speech_started", "item_id": "i1"}]
     _, packets = await _call(FakeServer(script, hang_up=True), until=lambda ps: False, monkeypatch=monkeypatch)
     assert packets[-1]["meta_info"]["connection_error"]
+
+
+async def test_a_reconnected_session_never_finalizes_a_turn_of_the_one_that_died(monkeypatch):
+    def died_mid_turn(t):
+        t.STUCK_TURN_S = 0.0
+        t.handle_event({"type": "input_audio_buffer.eager_end_of_turn", "item_id": "old", "transcript": "haan"})
+
+    _, packets = await _call(FakeServer(), monkeypatch=monkeypatch, prepare=died_mid_turn)
+    assert not [p for p in packets if isinstance(p["data"], dict)]
 
 
 async def test_no_endpoint_is_a_connection_error(monkeypatch):

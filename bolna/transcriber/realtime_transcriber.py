@@ -178,6 +178,7 @@ class RealtimeTranscriber(BaseTranscriber):
             self.turn_counter += 1
             self.items[item_id] = {
                 "turn_id": self.turn_counter,
+                "raw": "",
                 "text": "",
                 "eager": None,
                 "interims": [],
@@ -241,7 +242,9 @@ class RealtimeTranscriber(BaseTranscriber):
             return [create_ws_data_packet("speech_started", self.meta_info)]
         if kind == DELTA:
             item = self._item(item_id)
-            item["text"] = (event.get("transcript") or item["text"] + event.get("delta", "")).strip()
+            # Deltas join unstripped: one may end in the space that separates it from the next.
+            item["raw"] = event.get("transcript") or item["raw"] + event.get("delta", "")
+            item["text"] = item["raw"].strip()
             if not item["text"]:
                 return []
             item["interims"].append({"transcript": item["text"], "is_final": False, "received_at": time.time()})
@@ -327,6 +330,8 @@ class RealtimeTranscriber(BaseTranscriber):
     async def transcribe(self):
         ws = None
         self.reset_audio_frame_state()
+        # A reconnect (a pool re-runs transcribe) starts a new server session: the old one's turns never settle.
+        self.items.clear()
         try:
             start = time.perf_counter()
             ws = await self.connect()
