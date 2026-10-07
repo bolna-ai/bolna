@@ -559,6 +559,24 @@ class CallEvent(BaseModel):
     timestamp: Optional[float] = None
 
 
+class GraphEdgeParameter(BaseModel):
+    """A value an edge collects. description and allowed_values are what the routing model sees on the key."""
+
+    type: str = "string"
+    description: Optional[str] = None
+    allowed_values: Optional[List[str]] = None
+
+    @model_validator(mode="after")
+    def validate_allowed_values(self):
+        if self.allowed_values is None:
+            return self
+        if self.type != "string":
+            raise ValueError("allowed_values is only supported on string parameters")
+        if not self.allowed_values:
+            raise ValueError("allowed_values must list at least one value")
+        return self
+
+
 class GraphEdge(BaseModel):
     """Edge definition for graph-based conversation flow.
 
@@ -576,7 +594,8 @@ class GraphEdge(BaseModel):
     function_name: Optional[str] = None  # e.g., "go_to_city_question"
     function_description: Optional[str] = None  # Detailed description for LLM
     # Optional parameters to collect during transition
-    parameters: Optional[Dict[str, str]] = None  # e.g., {"city": "string"}
+    # Name -> type, e.g. {"city": "string"}, or name -> GraphEdgeParameter for a per-key definition.
+    parameters: Optional[Dict[str, Union[str, GraphEdgeParameter]]] = None
     # lower = evaluated first within a tier (expression/intent/unconditional); does not rank across tiers.
     # Defaults: expression/unconditional=0, llm=100
     priority: Optional[int] = None
