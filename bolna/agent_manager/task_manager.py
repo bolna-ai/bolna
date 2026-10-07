@@ -919,6 +919,8 @@ class TaskManager(BaseManager):
             self.__setup_text_chat(self.llm_config)
         else:
             self.__setup_transcriber()
+            if self.tools.get("transcriber") is not None:
+                self.tools["transcriber"].set_agent_context_source(self.conversation_history.last_assistant_content)
             self.__setup_synthesizer(self.llm_config)
             if not self.turn_based_conversation and task_id == 0:
                 self.synthesizer_monitor_task = asyncio.create_task(self.tools["synthesizer"].monitor_connection())

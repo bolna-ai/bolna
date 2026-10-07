@@ -1,6 +1,7 @@
 import json
 import time
 import uuid
+from typing import Callable
 from dotenv import load_dotenv
 from bolna.helpers.logger_config import configure_logger
 
@@ -23,7 +24,12 @@ class BaseTranscriber:
         self.turn_latencies = []
         self.connection_error = None
         self.is_transcript_sent_for_processing = False
+        self.agent_context_source = None
         self.reset_audio_frame_state()
+
+    def set_agent_context_source(self, source: Callable[[], str | None]) -> None:
+        """Point at the agent's latest spoken reply, for providers that bias the caller's next turn with it."""
+        self.agent_context_source = source
 
     def reset_audio_frame_state(self) -> None:
         """Restart the audio position -> send-time map; ASR stream positions restart per connection."""
