@@ -1,5 +1,6 @@
 """Static-node clips are looked up under the voice that speaks them, on a single synth or a multilingual pool."""
 
+import audioop
 import copy
 from unittest.mock import AsyncMock, MagicMock
 
@@ -7,6 +8,7 @@ import pytest
 
 import bolna.agent_manager.task_manager as tmmod
 from bolna.agent_manager.task_manager import TaskManager
+from bolna.constants import WEBCALL_TTS_SAMPLE_RATE
 from bolna.helpers.utils import static_node_audio_key
 from bolna.models import tts_audio_identity
 
@@ -49,6 +51,8 @@ def _task_manager(monkeypatch, synthesizer, constructed=None):
     }
     tm._TaskManager__pool_leg_kwargs = TaskManager._TaskManager__pool_leg_kwargs.__get__(tm, TaskManager)
     tm._TaskManager__static_audio_identity = TaskManager._TaskManager__static_audio_identity.__get__(tm, TaskManager)
+    tm._TaskManager__handoff_mulaw_wire = TaskManager._TaskManager__handoff_mulaw_wire.__get__(tm, TaskManager)
+    tm._static_clip_to_wire = TaskManager._static_clip_to_wire
     TaskManager._TaskManager__setup_synthesizer.__get__(tm, TaskManager)()
     return tm
 
@@ -114,3 +118,39 @@ async def test_a_stamped_audio_identity_wins_and_never_reaches_the_synthesizer(m
     assert await _looked_up_key(monkeypatch, pool, detected_language="en") == static_node_audio_key("Hello", "en-stamp")
     assert await _looked_up_key(monkeypatch, pool, detected_language="hi") == _key("Hello", HI)
     assert constructed and all("audio_identity" not in kwargs for kwargs in constructed)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "output_provider, wire_format, sample_rate",
+    [("plivo", "mulaw", 8000), ("freeswitch", "pcm", WEBCALL_TTS_SAMPLE_RATE)],
+)
+async def test_a_cached_clip_reaches_the_call_in_its_wire_format(
+    monkeypatch, output_provider, wire_format, sample_rate
+):
+    pcm = b"\x10\x20" * 160
+    decoded_at = []
+
+    def fake_mp3_bytes_to_pcm(audio, target_sample_rate):
+        decoded_at.append(target_sample_rate)
+        return pcm
+
+    async def fake_get_raw_audio_bytes(*args, **kwargs):
+        return b"mp3"
+
+    monkeypatch.setattr(tmmod, "mp3_bytes_to_pcm", fake_mp3_bytes_to_pcm)
+    monkeypatch.setattr(tmmod, "get_raw_audio_bytes", fake_get_raw_audio_bytes)
+    tm = _pool(monkeypatch)
+    tm.task_config["tools_config"]["output"]["provider"] = output_provider
+    tm.tools["output"] = MagicMock(get_provider=MagicMock(return_value=output_provider))
+    tm._synthesize = AsyncMock()
+    tm.buffered_output_queue = MagicMock()
+
+    meta_info = {"message_category": "static_node", "text": "Hello", "detected_language": "en"}
+    await TaskManager._TaskManager__send_preprocessed_audio.__get__(tm, TaskManager)(meta_info, "unused")
+
+    packet = tm.buffered_output_queue.put_nowait.call_args.args[0]
+    assert decoded_at == [sample_rate]
+    assert packet["meta_info"]["format"] == wire_format
+    assert packet["data"] == (audioop.lin2ulaw(pcm, 2) if wire_format == "mulaw" else pcm)
+    tm._synthesize.assert_not_awaited()
