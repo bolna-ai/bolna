@@ -894,6 +894,53 @@ class ToolsChainModel(BaseModel):
     pipelines: List[List[str]]
 
 
+class SpeculationGateQuestion(BaseModel):
+    """One TypeSafe System One question; instructions and criteria may be text, an object, or a list."""
+
+    type: Literal["noul", "choice", "score"]
+    instructions: Optional[Any] = None
+    criteria: Optional[Any] = None
+
+    @model_validator(mode="after")
+    def validate_criteria(self):
+        if self.type == "choice" and not isinstance(self.criteria, dict):
+            raise ValueError("a choice question needs criteria: {label: description}")
+        if self.type == "score" and not (isinstance(self.criteria, list) and self.criteria):
+            raise ValueError("a score question needs criteria: a non-empty list, one entry per score from zero")
+        return self
+
+
+class SpeculationGateRule(BaseModel):
+    """Answer that keeps the speculation. noul/score: min/max on the value; choice: allow/deny labels, min confidence."""
+
+    min: Optional[float] = None
+    max: Optional[float] = None
+    allow: Optional[List[str]] = None
+    deny: Optional[List[str]] = None
+
+
+class SpeculationGateConfig(BaseModel):
+    """Jev (TypeSafe) veto on the speculative reply an eager end of turn starts. Unset questions/rules
+    ask the built-in "has the caller finished?" noul; the key comes from TYPESAFE_API_KEY."""
+
+    provider: Literal["typesafe"] = "typesafe"
+    model: Optional[str] = None
+    timeout_ms: Optional[int] = Field(default=None, gt=0)
+    history_turns: Optional[int] = Field(default=None, ge=0)
+    context: Optional[Any] = None
+    questions: Optional[Dict[str, SpeculationGateQuestion]] = None
+    rules: Optional[Dict[str, SpeculationGateRule]] = None
+
+    @model_validator(mode="after")
+    def validate_rules(self):
+        if self.questions and not self.rules:
+            raise ValueError("custom questions need rules saying which answers keep the speculation")
+        unknown = set(self.rules or {}) - set(self.questions or {"complete": None})
+        if unknown:
+            raise ValueError(f"rules name questions that are not asked: {sorted(unknown)}")
+        return self
+
+
 class ConversationConfig(BaseModel):
     optimize_latency: Optional[bool] = True  # This will work on in conversation
     hangup_after_silence: Optional[int] = 20
@@ -920,6 +967,8 @@ class ConversationConfig(BaseModel):
     voicemail_detection_duration: Optional[float] = 30.0  # Time window in seconds
     voicemail_check_interval: Optional[float] = 7.0  # Min time between interim checks
     voicemail_min_transcript_length: Optional[int] = 7  # Min words for interim check
+    # Jev veto on eager-end-of-turn speculative replies; unset leaves speculation as is.
+    speculation_gate: Optional[SpeculationGateConfig] = None
 
     @field_validator("hangup_after_silence", mode="before")
     def set_hangup_after_silence(cls, v):
