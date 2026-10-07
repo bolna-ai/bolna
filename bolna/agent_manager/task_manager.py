@@ -41,6 +41,7 @@ from bolna.constants import (
     LANGUAGE_SWITCH_SETTLE_MS,
     LLM_DEFAULT_CONFIGS,
     LLM_REGEN_SETTLE_S,
+    REDELIVERED_TRANSCRIPT_WINDOW_MS,
     REGEN_SETTLE_EXCLUDED_TRANSCRIBERS,
     NON_EVIDENCE_MARK_TYPES,
     SWITCH_LANGUAGE_TOOL_DEFINITION,
@@ -919,6 +920,8 @@ class TaskManager(BaseManager):
             self.__setup_text_chat(self.llm_config)
         else:
             self.__setup_transcriber()
+            if self.tools.get("transcriber") is not None:
+                self.tools["transcriber"].set_agent_context_source(self.conversation_history.last_assistant_content)
             self.__setup_synthesizer(self.llm_config)
             if not self.turn_based_conversation and task_id == 0:
                 self.synthesizer_monitor_task = asyncio.create_task(self.tools["synthesizer"].monitor_connection())
@@ -2795,6 +2798,11 @@ class TaskManager(BaseManager):
             "text_synthesized",
         ):
             followup_meta_info.pop(key, None)
+        # A follow-up answers its parent's caller utterance; without it the duplicate gate can't
+        # tell a barge-in after a tool call from a re-finalized turn and silences the reply.
+        pending_user = self._pending_user_input
+        if pending_user and pending_user[0] == meta_info.get("turn_id"):
+            self._pending_user_input = (followup_meta_info["turn_id"], pending_user[1])
         logger.info(
             "BOLNA_TRACE_META followup seq=%s turn=%s response_uid=%s group_uid=%s parent_response_uid=%s request_id=%s parent_seq=%s parent_turn=%s",
             followup_meta_info.get("sequence_id"),
@@ -5508,10 +5516,17 @@ class TaskManager(BaseManager):
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
                         transcript_content = message["data"].get("content", "")
 
-                        # Re-delivery of a transcript already processed or owed a regen isn't new speech.
+                        # Re-delivery of an already-processed transcript isn't new speech, even while its reply plays.
                         if (
-                            self.response_in_pipeline or self.regen_settle_armed()
-                        ) and self.conversation_history.is_duplicate_user(transcript_content):
+                            (self.response_in_pipeline or self.regen_settle_armed())
+                            and self.conversation_history.is_duplicate_user(transcript_content)
+                        ) or (
+                            self.tools["input"].is_audio_being_played_to_user()
+                            and self.conversation_history.repeats_last_user_turn(transcript_content)
+                            and 0
+                            <= self.interruption_manager.get_time_since_utterance_end()
+                            < REDELIVERED_TRANSCRIPT_WINDOW_MS
+                        ):
                             logger.info(
                                 "Skipping interruption: Deepgram late delivery of already-processing transcript: %s",
                                 transcript_content,

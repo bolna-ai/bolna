@@ -300,6 +300,24 @@ SYNTHESIZER_CONFIG_MODELS = {
 }
 
 
+class AssemblyAITranscriberConfig(BaseModel):
+    """AssemblyAI streaming session parameters; an unset field keeps AssemblyAI's default."""
+
+    mode: Optional[Literal["min_latency", "balanced", "max_accuracy"]] = None
+    min_turn_silence: Optional[int] = Field(default=None, ge=0)
+    max_turn_silence: Optional[int] = Field(default=None, ge=0)
+    interruption_delay: Optional[int] = Field(default=None, ge=0, le=1000)
+    vad_threshold: Optional[float] = Field(default=None, ge=0, le=1)
+    voice_focus: Optional[Literal["near-field", "far-field"]] = None
+    voice_focus_threshold: Optional[float] = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_voice_focus_threshold(self):
+        if self.voice_focus_threshold is not None and self.voice_focus is None:
+            raise ValueError("voice_focus_threshold requires voice_focus")
+        return self
+
+
 class Transcriber(BaseModel):
     model: Optional[str] = "nova-2"
     language: Optional[str] = None
@@ -329,6 +347,7 @@ class Transcriber(BaseModel):
     noise_reduction: Optional[bool] = False
     vad_threshold: Optional[float] = 0.5
     vad_prefix_padding_ms: Optional[int] = 300
+    assemblyai_config: Optional[AssemblyAITranscriberConfig] = None
 
     @field_validator("provider")
     def validate_model(cls, value):
