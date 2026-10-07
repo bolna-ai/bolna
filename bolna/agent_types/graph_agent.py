@@ -37,8 +37,11 @@ from bolna.constants import (
 from typing import List, Tuple, AsyncGenerator, Optional, Dict, Any
 
 # Conversation providers whose own key authenticates the hangup/voicemail OpenAiLLM hops; any
-# other provider (Gemini, Azure, the LiteLLM backends) needs the platform OpenAI key instead.
-OPENAI_KEYED_PROVIDERS = frozenset(p for p, cls in SUPPORTED_LLM_PROVIDERS.items() if cls is OpenAiLLM)
+# other provider (Gemini, Azure, the LiteLLM backends) needs the platform OpenAI key instead. A
+# Bolna-hosted endpoint serves only its own model, so its hops use the platform key too.
+OPENAI_KEYED_PROVIDERS = frozenset(
+    p for p, cls in SUPPORTED_LLM_PROVIDERS.items() if cls is OpenAiLLM and p != LLMProvider.BOLNA.value
+)
 
 load_dotenv()
 logger = configure_logger(__name__)

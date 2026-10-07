@@ -130,6 +130,8 @@ class DeepgramTranscriber(BaseTranscriber):
         _eot_threshold = kwargs.get("eot_threshold")
         self.eot_threshold = _eot_threshold if _eot_threshold is not None else DEEPGRAM_FLUX_EOT_THRESHOLD
         self.eager_eot_threshold = kwargs.get("eager_eot_threshold")
+        # Read by task_manager: Flux sends EagerEndOfTurn only when a threshold is configured.
+        self.eager_end_of_turn = bool(self.eager_eot_threshold)
         _eot_timeout_ms = kwargs.get("eot_timeout_ms")
         self.eot_timeout_ms = _eot_timeout_ms if _eot_timeout_ms is not None else DEEPGRAM_FLUX_EOT_TIMEOUT_MS
         # Kept above the normal end-of-turn wait so an ordinary pause isn't treated as a stall.
