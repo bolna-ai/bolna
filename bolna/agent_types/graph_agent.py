@@ -587,6 +587,19 @@ class GraphAgent(BaseAgent):
     def _edge_function_name(edge: dict) -> str:
         return edge.get("function_name") or f"transition_to_{edge['to_node_id']}"
 
+    @staticmethod
+    def _edge_parameter_schema(param_name: str, spec) -> dict:
+        """A parameter is either a bare type ("string") or a dict with type, description and allowed_values."""
+        if not isinstance(spec, dict):
+            spec = {"type": spec}
+        schema = {
+            "type": spec.get("type") or "string",
+            "description": spec.get("description") or f"The {param_name} provided by the user",
+        }
+        if spec.get("allowed_values"):
+            schema["enum"] = list(spec["allowed_values"])
+        return schema
+
     def _build_transition_tools_for_edges(self, edges: list, allow_stay: bool = True) -> list:
         """allow_stay=False omits stay_on_current_node so the model must pick a real edge."""
         tools = []
@@ -601,11 +614,8 @@ class GraphAgent(BaseAgent):
 
             parameters = {"type": "object", "properties": {}, "required": []}
             if edge.get("parameters"):
-                for param_name, param_type in edge["parameters"].items():
-                    parameters["properties"][param_name] = {
-                        "type": param_type,
-                        "description": f"The {param_name} provided by the user",
-                    }
+                for param_name, spec in edge["parameters"].items():
+                    parameters["properties"][param_name] = self._edge_parameter_schema(param_name, spec)
                     parameters["required"].append(param_name)
 
             parameters["properties"]["reasoning"] = {
