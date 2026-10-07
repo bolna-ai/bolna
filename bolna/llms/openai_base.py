@@ -49,11 +49,19 @@ def _strip_server_injected_params(tools):
 
 
 def _new_items_start(messages):
-    """Index of the first message after the last assistant turn, where a chained request begins."""
+    """Index of the first message after the last assistant message, where a chained request begins."""
     for i in range(len(messages) - 1, -1, -1):
         if messages[i].get("role") == ChatRole.ASSISTANT:
             return i + 1
     return 0
+
+
+def _last_assistant_turn_end(messages):
+    """Index past the last assistant message and the tool outputs answering it."""
+    i = _new_items_start(messages)
+    while i < len(messages) and messages[i].get("role") == ChatRole.TOOL:
+        i += 1
+    return i
 
 
 class OpenAICompatibleLLM(BaseLLM):
@@ -296,14 +304,7 @@ class OpenAICompatibleLLM(BaseLLM):
         return self.async_client
 
     def _build_responses_input(self, messages):
-        """Build (instructions, input_items) for Responses API.
-
-        With previous_response_id set, only sends items after the last
-        assistant. Falls back to full history when the chain head never
-        completed or pending tool outputs are missing. Any pending interruption
-        hint is consumed exactly once and placed where the new items begin, so
-        full history keeps its cached prefix.
-        """
+        """Build (instructions, input_items): chained when the head completed and tool outputs are in, else full history."""
         hint = self._interruption_hint
         self._interruption_hint = None
 
@@ -323,9 +324,12 @@ class OpenAICompatibleLLM(BaseLLM):
             instructions, new_items = self._extract_new_input(messages)
             history_items = []
         else:
-            split = _new_items_start(messages)
+            split = _last_assistant_turn_end(messages)
             instructions, history_items = MessageFormatAdapter.chat_to_responses_input(messages[:split])
             _, new_items = MessageFormatAdapter.chat_to_responses_input(messages[split:])
+            # Full history holds only what was heard, so a reply nobody heard leaves nothing to qualify.
+            if hint is not None and not hint.strip():
+                hint = None
         hint_items = [] if hint is None else [self._build_interruption_hint_item(hint)]
         return instructions, [*history_items, *hint_items, *new_items]
 
@@ -397,8 +401,19 @@ class OpenAICompatibleLLM(BaseLLM):
 
     def invalidate_response_chain(self):
         self.previous_response_id = None
+        self._in_flight_response_id = None
         self._pending_call_ids = set()
         self._interruption_hint = None
+
+    def _on_response_created(self, response_id):
+        self.previous_response_id = response_id
+        self._in_flight_response_id = response_id
+
+    def _on_response_completed(self, response_id, call_ids):
+        if response_id:
+            self.previous_response_id = response_id
+        self._in_flight_response_id = None
+        self._pending_call_ids = set(call_ids)
 
     def _build_function_call_chunk(
         self,
@@ -600,8 +615,7 @@ class OpenAICompatibleLLM(BaseLLM):
             now = now_ms()
 
             if event.type == ResponseStreamEvent.CREATED:
-                self.previous_response_id = event.response.id
-                self._in_flight_response_id = event.response.id
+                self._on_response_created(event.response.id)
                 self._log_llm_request_id(stream, event.response.id)
                 service_tier = getattr(event.response, "service_tier", None)
                 if latency_data is None:
@@ -689,10 +703,7 @@ class OpenAICompatibleLLM(BaseLLM):
                 reasoning_summary_parts.append(event.delta)
 
             elif event.type == ResponseStreamEvent.COMPLETED:
-                if hasattr(event.response, "id"):
-                    self.previous_response_id = event.response.id
-                self._in_flight_response_id = None
-                self._pending_call_ids = set(func_call_ids.values())
+                self._on_response_completed(getattr(event.response, "id", None), func_call_ids.values())
                 service_tier = service_tier or getattr(event.response, "service_tier", None)
                 if hasattr(event.response, "usage") and event.response.usage:
                     response_usage = event.response.usage

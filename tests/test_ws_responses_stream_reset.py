@@ -324,6 +324,28 @@ async def test_real_consumer_does_not_inherit_a_cancelled_turns_answer():
     assert t.connects == 2
 
 
+async def test_the_turn_after_a_reply_cut_off_without_the_barge_in_hook_does_not_chain_to_it():
+    """Eager-turn cancels skip cancel_in_flight_response; the cut head must still not be chained to."""
+    t = _transport([created("r_cut"), delta("आपका बैलेंस")], [created("r2"), delta("ok"), completed("r2")], hang=True)
+    llm = _make_ws_llm(t)
+
+    async def turn_one():
+        async for _ in llm._generate_stream_ws_responses(MESSAGES, meta_info={"sequence_id": 1}):
+            pass
+
+    task = asyncio.create_task(turn_one())
+    while llm.previous_response_id != "r_cut":
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await _drain(llm._generate_stream_ws_responses(MESSAGES, meta_info={"sequence_id": 2}))
+
+    assert "previous_response_id" not in t.sockets[-1].sent[-1]
+    assert llm.previous_response_id == "r2"
+
+
 # ---------------------------------------------------------------- review: cancel during send
 
 

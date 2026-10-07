@@ -103,6 +103,49 @@ class TestInterruptionHintInjection:
         assert llm._interruption_hint is None
         assert items[-1]["role"] == "developer"  # hint rides every path, this fallback included
 
+    def test_full_history_drops_the_hint_for_a_reply_nobody_heard(self):
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello, fully heard"},
+            {"role": "user", "content": "what is my balance"},
+            {"role": "user", "content": "for the loan"},
+        ]
+        llm = _make_llm(previous_response_id="resp_cut")
+        llm._in_flight_response_id = "resp_cut"
+        llm.set_interruption_hint("")
+
+        _, items = llm._build_responses_input(messages)
+
+        assert llm.previous_response_id is None
+        assert [item["role"] for item in items] == ["system", "user", "assistant", "user", "user"]
+
+    def test_full_history_hint_follows_the_tool_outputs(self):
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "check order"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "call_1", "function": {"name": "get_order", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "shipped"},
+            {"role": "user", "content": "wait"},
+        ]
+        llm = _make_llm(previous_response_id=None)
+        llm.set_interruption_hint("your order is shi")
+
+        _, items = llm._build_responses_input(messages)
+
+        assert [item.get("role") or item["type"] for item in items] == [
+            "system",
+            "user",
+            "function_call",
+            "function_call_output",
+            "developer",
+            "user",
+        ]
+
     def test_hint_injected_when_tool_outputs_present(self):
         messages = [
             {"role": "system", "content": "sys"},

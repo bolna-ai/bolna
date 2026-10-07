@@ -665,7 +665,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
                 if evt_type == ResponseStreamEvent.CREATED:
                     resp = evt.get("response", {})
-                    self.previous_response_id = resp.get("id")
+                    self._on_response_created(resp.get("id"))
                     self._log_llm_request_id(response_id=resp.get("id"))
                     ws_service_tier = resp.get("service_tier")
                     if latency_data is None:
@@ -756,8 +756,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
                 elif evt_type == ResponseStreamEvent.COMPLETED:
                     resp = evt.get("response", {})
-                    self.previous_response_id = resp.get("id", self.previous_response_id)
-                    self._pending_call_ids = set(func_call_ids.values())
+                    self._on_response_completed(resp.get("id"), func_call_ids.values())
                     ws_service_tier = ws_service_tier or resp.get("service_tier")
                     response_usage = resp.get("usage")
                     break
