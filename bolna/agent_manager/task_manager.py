@@ -41,6 +41,7 @@ from bolna.constants import (
     LANGUAGE_SWITCH_SETTLE_MS,
     LLM_DEFAULT_CONFIGS,
     LLM_REGEN_SETTLE_S,
+    REDELIVERED_TRANSCRIPT_WINDOW_MS,
     REGEN_SETTLE_EXCLUDED_TRANSCRIBERS,
     NON_EVIDENCE_MARK_TYPES,
     SWITCH_LANGUAGE_TOOL_DEFINITION,
@@ -921,6 +922,8 @@ class TaskManager(BaseManager):
             self.__setup_text_chat(self.llm_config)
         else:
             self.__setup_transcriber()
+            if self.tools.get("transcriber") is not None:
+                self.tools["transcriber"].set_agent_context_source(self.conversation_history.last_assistant_content)
             self.__setup_synthesizer(self.llm_config)
             if not self.turn_based_conversation and task_id == 0:
                 self.synthesizer_monitor_task = asyncio.create_task(self.tools["synthesizer"].monitor_connection())
@@ -2784,6 +2787,11 @@ class TaskManager(BaseManager):
             "text_synthesized",
         ):
             followup_meta_info.pop(key, None)
+        # A follow-up answers its parent's caller utterance; without it the duplicate gate can't
+        # tell a barge-in after a tool call from a re-finalized turn and silences the reply.
+        pending_user = self._pending_user_input
+        if pending_user and pending_user[0] == meta_info.get("turn_id"):
+            self._pending_user_input = (followup_meta_info["turn_id"], pending_user[1])
         logger.info(
             "BOLNA_TRACE_META followup seq=%s turn=%s response_uid=%s group_uid=%s parent_response_uid=%s request_id=%s parent_seq=%s parent_turn=%s",
             followup_meta_info.get("sequence_id"),
@@ -3964,6 +3972,8 @@ class TaskManager(BaseManager):
         # Stamped per chunk: after the loop these hold when the LLM actually finished and how
         # fast it started. __store_into_history runs much later (once every chunk has been
         # pushed to TTS), so the response trace row must be stamped from here, not from there.
+        # Row uses the first-text time: TTS starts on the first sentence, so stream end sorts it below its synth rows.
+        llm_first_text_ts = None
         llm_stream_end_ts = None
         llm_first_token_latency = None
         synthesize = True
@@ -4158,6 +4168,8 @@ class TaskManager(BaseManager):
                 end_of_llm_stream = llm_message.end_of_stream
                 latency = llm_message.latency
                 llm_stream_end_ts = time.time()
+                if llm_first_text_ts is None and isinstance(data, str) and data.strip():
+                    llm_first_text_ts = llm_stream_end_ts
                 if latency and latency.first_token_latency_ms is not None and llm_first_token_latency is None:
                     llm_first_token_latency = round(latency.first_token_latency_ms / 1000, 6)
                 trigger_function_call = llm_message.is_function_call
@@ -4226,7 +4238,7 @@ class TaskManager(BaseManager):
                             cached_tokens=actual_cached_tokens,
                             reasoning_content=actual_reasoning_content,
                             overflowed=actual_overflowed,
-                            ts=llm_stream_end_ts,
+                            ts=llm_first_text_ts or llm_stream_end_ts,
                             llm_latency=llm_first_token_latency,
                         )
                         if self.turn_based_conversation:
@@ -4341,7 +4353,7 @@ class TaskManager(BaseManager):
                 reasoning_content=actual_reasoning_content,
                 log_message=empty_turn_detail,
                 overflowed=actual_overflowed,
-                ts=llm_stream_end_ts,
+                ts=llm_first_text_ts or llm_stream_end_ts,
                 llm_latency=llm_first_token_latency,
             )
         elif not self.stream:
@@ -4363,7 +4375,7 @@ class TaskManager(BaseManager):
                 reasoning_tokens=actual_reasoning_tokens,
                 cached_tokens=actual_cached_tokens,
                 reasoning_content=actual_reasoning_content,
-                ts=llm_stream_end_ts,
+                ts=llm_first_text_ts or llm_stream_end_ts,
                 latency=llm_first_token_latency,
             )
 
@@ -5493,10 +5505,17 @@ class TaskManager(BaseManager):
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
                         transcript_content = message["data"].get("content", "")
 
-                        # Re-delivery of a transcript already processed or owed a regen isn't new speech.
+                        # Re-delivery of an already-processed transcript isn't new speech, even while its reply plays.
                         if (
-                            self.response_in_pipeline or self.regen_settle_armed()
-                        ) and self.conversation_history.is_duplicate_user(transcript_content):
+                            (self.response_in_pipeline or self.regen_settle_armed())
+                            and self.conversation_history.is_duplicate_user(transcript_content)
+                        ) or (
+                            self.tools["input"].is_audio_being_played_to_user()
+                            and self.conversation_history.repeats_last_user_turn(transcript_content)
+                            and 0
+                            <= self.interruption_manager.get_time_since_utterance_end()
+                            < REDELIVERED_TRANSCRIPT_WINDOW_MS
+                        ):
                             logger.info(
                                 "Skipping interruption: Deepgram late delivery of already-processing transcript: %s",
                                 transcript_content,
@@ -5596,11 +5615,11 @@ class TaskManager(BaseManager):
                         )
                         eager_eot_threshold = getattr(active_transcriber, "eager_eot_threshold", None)
 
-                        if not eager_eot_threshold:
-                            logger.info(
-                                f"Skipping speculative LLM: EagerEOT disabled (eager_eot_threshold not set or zero)"
-                            )
-                        elif eot_confidence is not None and eot_confidence < eager_eot_threshold:
+                        if not getattr(active_transcriber, "eager_end_of_turn", False):
+                            logger.info("Skipping speculative LLM: eager end of turn is off for this transcriber")
+                        elif (
+                            eot_confidence is not None and eager_eot_threshold and eot_confidence < eager_eot_threshold
+                        ):
                             logger.info(
                                 f"Skipping speculative LLM: EagerEOT confidence {eot_confidence} below threshold {eager_eot_threshold}"
                             )

@@ -4,6 +4,7 @@ import os
 import re
 import time
 import uuid
+from collections import deque
 from websockets.exceptions import InvalidHandshake
 import base64
 
@@ -180,6 +181,37 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
         self.eos_accum_context_id = None  # context whose spoken chars are being accumulated
         self.eos_accum_text = ""  # spoken-so-far for that context (end-of-stream match)
         self.dictionary_context_id = None  # last context whose first message carried the dictionaries
+        self._reported_closed_ws = None  # socket whose close was already logged
+
+    def _report_closed_socket(self, ws):
+        """Log why ElevenLabs closed a socket, once per socket."""
+        if ws is None or ws is self._reported_closed_ws:
+            return
+        self._reported_closed_ws = ws
+        logger.warning(
+            "ElevenLabs WebSocket closed code=%s reason=%r trace_id=%s",
+            getattr(ws, "close_code", None),
+            getattr(ws, "close_reason", None),
+            self.ws_trace_id,
+        )
+
+    def _lost_turn_on(self, ws):
+        """True when the in-flight turn was fully sent on `ws` and never reached its end-of-stream."""
+        return self.last_text_sent and self.has_unsettled_turn_on(ws)
+
+    def _settle_lost_turn(self, ws):
+        """Mark the turn lost with `ws`; the caller yields its end-of-stream."""
+        self._report_closed_socket(ws)
+        logger.error("ElevenLabs WebSocket dropped mid-turn, ending the turn")
+        self.current_turn_socket = None  # settled: a second check must not emit again
+
+    def _send_hit_closed_socket(self, end_of_llm_stream):
+        """Not fatal: the receiver settles the turn once the socket is drained, or the replacement's isFinal ends it."""
+        logger.warning("ElevenLabs socket closed mid-send trace_id=%s", self.ws_trace_id)
+        if end_of_llm_stream:
+            # no more text is coming, so the turn counts as fully sent; the next turn opens a fresh context
+            self.last_text_sent = True
+            self.context_id = None
 
     def _on_push(self, meta_info, text):
         # Mint only for pushes that will actually synthesize — a superseded push must not
@@ -206,10 +238,10 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                 # next turn must be re-detected as new to clear stale queue entries.
                 self.current_turn_start_time = None
             if self.context_id:
-                self.context_ids_to_ignore.add(self.context_id)
-                interrupt_message = {"context_id": self.context_id, "close_context": True}
-                await self.websocket.send(json.dumps(interrupt_message))
-                self.context_id = None
+                # Clear before sending: a send failing on a dead socket must not leave the next turn on an ignored context.
+                interrupted_context, self.context_id = self.context_id, None
+                self.context_ids_to_ignore.add(interrupted_context)
+                await self.websocket.send(json.dumps({"context_id": interrupted_context, "close_context": True}))
         except Exception:
             pass
 
@@ -239,7 +271,12 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                         if self.pronunciation_dictionary_locators and self.context_id != self.dictionary_context_id:
                             message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
                             self.dictionary_context_id = self.context_id
+                        # Claim before sending: text lost into a socket that dies mid-send is still this turn's.
+                        self.current_turn_socket = self.websocket
                         await self.websocket.send(json.dumps(message))
+                    except websockets.exceptions.ConnectionClosed:
+                        self._send_hit_closed_socket(end_of_llm_stream)
+                        return
                     except Exception as e:
                         logger.info(f"Error sending chunk: {e}")
                         self.connection_error = str(e)
@@ -248,6 +285,7 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
             if end_of_llm_stream:
                 self.last_text_sent = True
                 try:
+                    self.current_turn_socket = self.websocket
                     await self.websocket.send(json.dumps({"text": "", "context_id": self.context_id, "flush": True}))
                     # Closing the context makes ElevenLabs emit isFinal, which the receiver uses
                     # as end-of-stream. The context's remaining frames are still delivered. The
@@ -255,6 +293,8 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                     if self.context_id:
                         await self.websocket.send(json.dumps({"context_id": self.context_id, "close_context": True}))
                         self.context_id = None
+                except websockets.exceptions.ConnectionClosed:
+                    self._send_hit_closed_socket(end_of_llm_stream)
                 except Exception as e:
                     logger.info(f"Error sending end-of-stream signal: {e}")
                     self.connection_error = str(e)
@@ -276,11 +316,24 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
         # loop so the call never tears down.
         consecutive_errors = 0
         max_consecutive_errors = 10
+        # Read every socket, oldest first, until it raises: frames queued before a close are still delivered.
+        sockets_to_read = deque()
+        last_installed_ws = None
+        drained_ws = set()
+        reading_ws = None
         while True:
             try:
                 if self.conversation_ended:
                     return
-                if not self._is_ws_connected():
+                if self.websocket is not None and self.websocket is not last_installed_ws:
+                    last_installed_ws = self.websocket
+                    sockets_to_read.append(last_installed_ws)
+                # A turn drained without its isFinal ends here, whichever of sender/receiver noticed last.
+                turn_ws = self.current_turn_socket
+                if turn_ws in drained_ws and self._lost_turn_on(turn_ws):
+                    self._settle_lost_turn(turn_ws)
+                    yield b"\x00", ""
+                if not sockets_to_read:
                     if self.connection_error:
                         return
                     now = time.perf_counter()
@@ -297,7 +350,8 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                     not_connected_since = None
 
                 recv_start = time.perf_counter()
-                response = await self.websocket.recv()
+                reading_ws = sockets_to_read[0]
+                response = await reading_ws.recv()
                 recv_duration = (time.perf_counter() - recv_start) * 1000
                 data = json.loads(response)
                 consecutive_errors = 0  # successful recv — reset the error backoff
@@ -379,10 +433,17 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                 # only once per context.
                 elif emit_eos and not (ctx is not None and ctx == self._eos_context_id):
                     self._eos_context_id = ctx
+                    self.current_turn_socket = None  # ended for real: draining its socket must not end it again
                     yield b"\x00", ""
 
             except websockets.exceptions.ConnectionClosed:
-                break
+                # Keep looping like v3 and Sarvam: ending here would end generate() for the rest of the call.
+                if self.conversation_ended or self.connection_error:
+                    return
+                self._report_closed_socket(reading_ws)
+                drained_ws.add(reading_ws)
+                if sockets_to_read and sockets_to_read[0] is reading_ws:
+                    sockets_to_read.popleft()
             except Exception as e:
                 consecutive_errors += 1
                 logger.error(f"Error occurred in receiver - {e}")
