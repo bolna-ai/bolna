@@ -530,9 +530,7 @@ class TaskManager(BaseManager):
 
         self.first_message_task_new = asyncio.create_task(self.message_task_new())
 
-        self.conversation_history = ConversationHistory(
-            conversation_history, on_assistant_message=self._share_agent_reply_with_transcriber
-        )
+        self.conversation_history = ConversationHistory(conversation_history)
         self.label_flow = []
 
         # Setup IO SERVICE, TRANSCRIBER, LLM, SYNTHESIZER
@@ -921,6 +919,8 @@ class TaskManager(BaseManager):
             self.__setup_text_chat(self.llm_config)
         else:
             self.__setup_transcriber()
+            if self.tools.get("transcriber") is not None:
+                self.tools["transcriber"].set_agent_context_source(self.conversation_history.last_assistant_content)
             self.__setup_synthesizer(self.llm_config)
             if not self.turn_based_conversation and task_id == 0:
                 self.synthesizer_monitor_task = asyncio.create_task(self.tools["synthesizer"].monitor_connection())
@@ -2679,8 +2679,6 @@ class TaskManager(BaseManager):
             self.tools["input"].is_welcome_message_played = True
 
         await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
-        # History now holds only what the caller heard of the interrupted reply.
-        self._share_agent_reply_with_transcriber(self.conversation_history.last_assistant_content())
         self.tools["input"].reset_response_heard_by_user()
 
         self.interruption_manager.invalidate_pending_responses()
@@ -5090,11 +5088,6 @@ class TaskManager(BaseManager):
             staged["response_uid"],
             len(staged["content"]),
         )
-
-    def _share_agent_reply_with_transcriber(self, text):
-        transcriber = self.tools.get("transcriber")
-        if transcriber is not None:
-            transcriber.set_agent_context(text)
 
     def _drop_staged_assistant_history(self, sequence_id, reason):
         staged = self._pending_assistant_history.pop(sequence_id, None)

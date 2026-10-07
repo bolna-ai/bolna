@@ -9,7 +9,6 @@ import pytest
 from pydantic import ValidationError
 
 from bolna.agent_manager.task_manager import TaskManager
-from bolna.helpers.conversation_history import ConversationHistory
 from bolna.models import AssemblyAITranscriberConfig
 from bolna.transcriber.assemblyai_transcriber import AssemblyAITranscriber
 from bolna.transcriber.transcriber_pool import TranscriberPool
@@ -75,9 +74,16 @@ def test_invalid_assemblyai_config_is_rejected(config):
         AssemblyAITranscriberConfig(**config)
 
 
+def _reply_source(transcriber, reply=None):
+    """Give the transcriber a mutable "latest spoken reply", as conversation history would."""
+    latest = {"text": reply}
+    transcriber.set_agent_context_source(lambda: latest["text"])
+    return latest
+
+
 async def test_session_gets_prompting_once_and_each_reply_once_ahead_of_the_audio(monkeypatch):
     transcriber = _make_transcriber(keywords="Vireo, Kestrel", context="A caller booking a test drive.")
-    transcriber.set_agent_context("  Which car would you like to drive?  ")
+    reply = _reply_source(transcriber, "  Which car would you like to drive?  ")
     assert not {"keyterms_prompt", "prompt", "agent_context"} & _params(transcriber).keys()
 
     await _connect(transcriber, monkeypatch)
@@ -90,7 +96,7 @@ async def test_session_gets_prompting_once_and_each_reply_once_ahead_of_the_audi
     }
     assert all(isinstance(message, bytes) for message in first[1:3])
 
-    transcriber.set_agent_context("And which day suits you?")
+    reply["text"] = "And which day suits you?"
     assert (await _sent_for_audio(transcriber))[0] == {
         "type": "UpdateConfiguration",
         "agent_context": "And which day suits you?",
@@ -100,12 +106,25 @@ async def test_session_gets_prompting_once_and_each_reply_once_ahead_of_the_audi
     assert set((await _sent_for_audio(transcriber))[0]) == {"type", "keyterms_prompt", "prompt", "agent_context"}
 
 
+async def test_context_follows_a_barge_in_trim_and_clears_when_nothing_was_heard(monkeypatch):
+    transcriber = _make_transcriber()
+    reply = _reply_source(transcriber, "Your total is 500. Pay by UPI or card?")
+    await _connect(transcriber, monkeypatch)
+    await _sent_for_audio(transcriber)
+
+    reply["text"] = "Your total"
+    assert (await _sent_for_audio(transcriber))[0] == {"type": "UpdateConfiguration", "agent_context": "Your total"}
+
+    reply["text"] = None
+    assert (await _sent_for_audio(transcriber))[0] == {"type": "UpdateConfiguration", "agent_context": ""}
+
+
 @pytest.mark.parametrize("model", ["universal", "universal-streaming-multilingual", "whisper-rt"])
 async def test_other_models_get_keyterms_but_no_universal_3_only_settings(model, monkeypatch):
     transcriber = _make_transcriber(
         model=model, keywords="Aster Insure", context="Insurance call.", assemblyai_config=SESSION_CONFIG
     )
-    transcriber.set_agent_context("Which insurer is your policy with?")
+    _reply_source(transcriber, "Which insurer is your policy with?")
     params = _params(transcriber)
     assert (params["min_turn_silence"], params["max_turn_silence"], params["vad_threshold"]) == ("200", "1500", "0.4")
     assert not {"mode", "interruption_delay", "voice_focus", "voice_focus_threshold"} & params.keys()
@@ -117,32 +136,26 @@ async def test_other_models_get_keyterms_but_no_universal_3_only_settings(model,
     }
 
 
+def test_missing_model_does_not_break_construction():
+    assert not _make_transcriber(model=None).is_universal_3_model
+
+
 def test_non_latin_prompting_stays_out_of_the_connect_url():
     hindi = "क्या आप अपना पिनकोड बता सकते हैं? " * 60
     transcriber = _make_transcriber(language="hi", keywords="पिनकोड, आधार", context=hindi)
-    transcriber.set_agent_context(hindi)
+    _reply_source(transcriber, hindi)
     assert len(transcriber.get_assemblyai_ws_url()) < 500
 
 
 def test_long_reply_keeps_its_closing_question_within_the_limit():
     transcriber = _make_transcriber()
-    transcriber.set_agent_context("x" * 2000 + " What's your email address?")
-    assert len(transcriber.agent_context) == 1750
-    assert transcriber.agent_context.endswith("What's your email address?")
+    _reply_source(transcriber, "x" * 2000 + " What's your email address?")
+    context = transcriber._agent_context()
+    assert len(context) == 1750
+    assert context.endswith("What's your email address?")
 
 
-def test_history_reports_each_spoken_assistant_message():
-    spoken = []
-    history = ConversationHistory(on_assistant_message=spoken.append)
-    history.append_welcome_message("Hi, how can I help?")
-    history.append_user("I want to change my address")
-    history.append_assistant("Sure, what's the new pincode?", turn_id=1)
-    history.append_assistant("Sure, what's the new pincode?", turn_id=1)
-    history.append_assistant(None, tool_calls=[{"id": "call_1"}])
-    assert spoken == ["Hi, how can I help?", "Sure, what's the new pincode?"]
-
-
-async def test_task_manager_wires_config_and_spoken_replies_into_the_transcriber(monkeypatch):
+async def test_task_manager_points_the_transcriber_at_the_conversation(monkeypatch):
     monkeypatch.setenv("ELEVENLABS_API_KEY", "env-key")
     task_config = {
         "task_type": "conversation",
@@ -176,14 +189,19 @@ async def test_task_manager_wires_config_and_spoken_replies_into_the_transcriber
     assert isinstance(transcriber, AssemblyAITranscriber)
     assert transcriber.session_params == SESSION_CONFIG
 
+    tm.conversation_history.setup_system_prompt({"role": "system", "content": "You book test drives."})
+    tm.conversation_history.append_welcome_message("Hi {name}, how can I help?")
+    tm.conversation_history.update_welcome_message("Hi Asha, how can I help?")
+    assert transcriber._agent_context() == "Hi Asha, how can I help?"
     tm.conversation_history.append_assistant("Can you spell your last name?", turn_id=1)
-    assert transcriber.agent_context == "Can you spell your last name?"
+    assert transcriber._agent_context() == "Can you spell your last name?"
 
 
-def test_pool_shares_agent_context_with_every_leg():
+def test_pool_points_every_leg_at_the_conversation():
     legs = {"en": MagicMock(), "hi": MagicMock()}
     pool = TranscriberPool.__new__(TranscriberPool)
     pool.transcribers = legs
-    pool.set_agent_context("Anything else?")
+    source = MagicMock()
+    pool.set_agent_context_source(source)
     for leg in legs.values():
-        leg.set_agent_context.assert_called_once_with("Anything else?")
+        leg.set_agent_context_source.assert_called_once_with(source)

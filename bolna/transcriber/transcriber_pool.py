@@ -587,10 +587,10 @@ class TranscriberPool:
             self.active_label = label
             logger.info(f"TranscriberPool: switched {old} -> {label} (inherited turn_counter={inherited_turn_counter})")
 
-    def set_agent_context(self, text):
+    def set_agent_context_source(self, source):
         # Standbys too, so a language switch keeps the conversation context.
         for transcriber in self.transcribers.values():
-            transcriber.set_agent_context(text)
+            transcriber.set_agent_context_source(source)
 
     async def toggle_connection(self):
         """Stop all transcriber connections."""
