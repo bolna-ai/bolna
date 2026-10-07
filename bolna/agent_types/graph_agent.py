@@ -73,6 +73,8 @@ class GraphAgent(BaseAgent):
         self.agent_information = self.config.get("agent_information")
         self.current_node_id = self.config.get("current_node_id")
         self.context_data = self.config.get("context_data") or {}
+        # Edge-parameter values collected during the call, latest value per variable.
+        self.node_extracted_data: Dict[str, Any] = {}
         execution_id = self.config.get("execution_id")
         if execution_id and isinstance(self.context_data.get("recipient_data"), dict):
             self.context_data["recipient_data"]["execution_id"] = execution_id
@@ -901,8 +903,7 @@ class GraphAgent(BaseAgent):
                 )
                 if next_node_id:
                     self._advance_to_node(next_node_id, entry_index=len(history))
-                    if extracted_params:
-                        self.context_data.update(extracted_params)
+                    self._apply_extracted_params(extracted_params)
                     logger.info(
                         f"Router dispatch (intent) on node '{previous_node}': -> {self.current_node_id} "
                         f"| {reasoning} (latency: {latency_ms:.1f}ms)"
@@ -972,6 +973,11 @@ class GraphAgent(BaseAgent):
     def mark_first_response_delivered(self) -> None:
         """Unblock routing once the active node's first customer-facing TTS turn is delivered."""
         self._active_node_first_response_delivered = True
+
+    def _apply_extracted_params(self, extracted_params: Optional[dict]) -> None:
+        if extracted_params:
+            self.context_data.update(extracted_params)
+            self.node_extracted_data.update(extracted_params)
 
     def _should_hold_for_first_delivery(self, node: Optional[dict]) -> bool:
         return (
@@ -1614,8 +1620,7 @@ class GraphAgent(BaseAgent):
                 if next_node_id:
                     logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
                     self._advance_to_node(next_node_id, entry_index=len(message))
-                    if extracted_params:
-                        self.context_data.update(extracted_params)
+                    self._apply_extracted_params(extracted_params)
 
                 routing_type = (
                     "deterministic" if (reasoning and reasoning.startswith(_DETERMINISTIC_REASONING_PREFIX)) else "llm"

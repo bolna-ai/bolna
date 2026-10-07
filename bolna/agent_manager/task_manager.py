@@ -9196,6 +9196,9 @@ class TaskManager(BaseManager):
                     ),
                     "ended_by_assistant": self.ended_by_assistant,
                     "user_spoke": self.user_spoke,
+                    "node_extracted_data": (
+                        dict(self.tools["llm_agent"].node_extracted_data) if self.__is_graph_agent() else None
+                    ),
                     "latency_dict": {
                         "llm_latencies": self.llm_latencies.model_dump(),
                         "transcriber_latencies": self.transcriber_latencies.model_dump(),
