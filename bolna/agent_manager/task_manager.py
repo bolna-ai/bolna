@@ -7615,6 +7615,16 @@ class TaskManager(BaseManager):
             return
         meta_info["text_synthesized"] = meta_info.get("text", "")
 
+    @staticmethod
+    def _static_clip_to_wire(mp3_audio, mulaw_wire):
+        """Decode a pre-rendered static clip into the call's wire format. Blocking."""
+        if mulaw_wire:
+            # Telephony wire format is 8k mu-law. Providers key off meta_info["format"]:
+            # plivo/vobiz send non-wav bytes as audio/x-mulaw without converting, so raw
+            # linear16 would play as noise. mu-law is correct across plivo/twilio/exotel.
+            return audioop.lin2ulaw(mp3_bytes_to_pcm(mp3_audio, target_sample_rate=8000), 2)
+        return mp3_bytes_to_pcm(mp3_audio, target_sample_rate=WEBCALL_TTS_SAMPLE_RATE)
+
     def __static_audio_identity(self, label):
         """Audio identity of the synth that speaks `label` text, else of the active synth."""
         if label in self.static_audio_identities:
@@ -7684,11 +7694,10 @@ class TaskManager(BaseManager):
                             text, self.assistant_name, "mp3", assistant_id=self.assistant_id, local=self.is_local
                         )
                         if audio is not None:
-                            # Telephony wire format is 8k mu-law. Providers key off meta_info["format"]:
-                            # plivo/vobiz send non-wav bytes as audio/x-mulaw without converting, so raw
-                            # linear16 would play as noise. mu-law is correct across plivo/twilio/exotel.
-                            audio_chunk = audioop.lin2ulaw(mp3_bytes_to_pcm(audio, target_sample_rate=8000), 2)
-                            meta_info["format"] = "mulaw"
+                            mulaw_wire = self.__handoff_mulaw_wire()
+                            # The decode shells out to ffmpeg, so it runs off the event loop.
+                            audio_chunk = await asyncio.to_thread(self._static_clip_to_wire, audio, mulaw_wire)
+                            meta_info["format"] = "mulaw" if mulaw_wire else "pcm"
                     except Exception as static_audio_err:
                         logger.error(f"Failed to prepare static node audio {text}: {static_audio_err}")
                     if audio_chunk is None:
