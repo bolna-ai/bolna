@@ -30,7 +30,7 @@ def _history(reply_committed=True):
     return history
 
 
-def _make_tm(*, history, audio_playing, response_in_pipeline=False, regen_armed=False):
+def _make_tm(*, history, audio_playing, response_in_pipeline=False, regen_armed=False, ms_since_final=1000):
     tm = MagicMock()
     tm.hangup_triggered = False
     tm._end_call_in_progress = False
@@ -51,6 +51,8 @@ def _make_tm(*, history, audio_playing, response_in_pipeline=False, regen_armed=
     tm.conversation_history = history
     # the threshold is met: this is the call that cut the agent off in production
     tm.interruption_manager.should_trigger_interruption = MagicMock(return_value=True)
+    # production: the repeat landed 1.0s after the final
+    tm.interruption_manager.get_time_since_utterance_end = MagicMock(return_value=ms_since_final)
     tm._TaskManager__cleanup_downstream_tasks = AsyncMock()
     tm._end_call_on_component_error = AsyncMock()
     tm.task_config = {"tools_config": {"transcriber": {"provider": "deepgram"}}}
@@ -90,6 +92,20 @@ async def test_repeat_then_real_speech_still_barges_in():
     # skipping the phantom must not swallow genuine speech that follows it
     tm = _make_tm(history=_history(), audio_playing=True)
     await _drive(tm, QUESTION, "actually cancel my order")
+    assert _barged_in(tm)
+
+
+async def test_repeat_long_after_the_final_is_real_speech_and_barges_in():
+    # outside the re-delivery window a word-for-word repeat is the caller saying it again
+    tm = _make_tm(history=_history(), audio_playing=True, ms_since_final=3000)
+    await _drive(tm, QUESTION)
+    assert _barged_in(tm)
+
+
+async def test_repeat_with_no_final_on_record_barges_in():
+    # -1: utterance end was reset (e.g. user continuation), so there is no final to be a re-delivery of
+    tm = _make_tm(history=_history(), audio_playing=True, ms_since_final=-1)
+    await _drive(tm, QUESTION)
     assert _barged_in(tm)
 
 
