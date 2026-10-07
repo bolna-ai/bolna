@@ -80,9 +80,10 @@ class TestEdgeParameterValidation:
         assert edge.parameters["b"].type == "string"
         assert edge.parameters["b"].allowed_values == ["x", "y"]
 
-    def test_rejects_allowed_values_on_a_non_string_parameter(self):
-        with pytest.raises(ValidationError, match="only supported on string parameters"):
+    def test_rejects_allowed_values_on_a_non_string_parameter_with_one_error(self):
+        with pytest.raises(ValidationError, match="only supported on string parameters") as exc:
             GraphEdge(to_node_id="done", parameters={"years": {"type": "number", "allowed_values": ["1", "2"]}})
+        assert exc.value.error_count() == 1
 
     def test_rejects_an_empty_allowed_values_list(self):
         with pytest.raises(ValidationError, match="at least one value"):

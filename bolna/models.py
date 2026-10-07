@@ -1,7 +1,7 @@
 import json
 import annotated_types
-from typing import Any, Literal, Optional, List, Union, Dict, Callable
-from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
+from typing import Annotated, Any, Literal, Optional, List, Union, Dict, Callable
+from pydantic import BaseModel, Discriminator, Field, Tag, field_validator, ValidationError, Json, model_validator
 from pydantic_core import PydanticCustomError
 from .providers import *
 from .enums import (
@@ -577,6 +577,13 @@ class GraphEdgeParameter(BaseModel):
         return self
 
 
+# Discriminated so an invalid definition reports its own error, not also "Input should be a valid string".
+GraphEdgeParameterSpec = Annotated[
+    Union[Annotated[str, Tag("type")], Annotated[GraphEdgeParameter, Tag("definition")]],
+    Discriminator(lambda value: "type" if isinstance(value, str) else "definition"),
+]
+
+
 class GraphEdge(BaseModel):
     """Edge definition for graph-based conversation flow.
 
@@ -595,7 +602,7 @@ class GraphEdge(BaseModel):
     function_description: Optional[str] = None  # Detailed description for LLM
     # Optional parameters to collect during transition
     # Name -> type, e.g. {"city": "string"}, or name -> GraphEdgeParameter for a per-key definition.
-    parameters: Optional[Dict[str, Union[str, GraphEdgeParameter]]] = None
+    parameters: Optional[Dict[str, GraphEdgeParameterSpec]] = None
     # lower = evaluated first within a tier (expression/intent/unconditional); does not rank across tiers.
     # Defaults: expression/unconditional=0, llm=100
     priority: Optional[int] = None
