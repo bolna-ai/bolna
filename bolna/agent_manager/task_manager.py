@@ -1746,6 +1746,8 @@ class TaskManager(BaseManager):
             raise
         error = f"search unavailable (provider={provider})" if result == SEARCH_UNAVAILABLE else None
         self._finalize_api_call_detail(api_call_detail, response=result, error=error)
+        if api_call_detail is not None and api_call_detail.get("response_json") is None:
+            api_call_detail["response_json"] = cap_tool_payload({"result": result}, "response_json")
         return result
 
     def _get_voice_name_for_label(self, label):

@@ -245,8 +245,19 @@ async def test_successful_search_is_recorded_in_call_details():
     assert detail["request_params"] == {"query": "ai news", "provider": "exa"}
     assert detail["status"] == "completed"
     assert detail["response_body"] == "Search results"
+    assert detail["response_json"] == {"result": "Search results"}
     assert detail["latency_ms"] is not None
     assert detail["meta"]["turn_id"] == 2
+
+
+async def test_no_results_output_is_recorded_as_is():
+    tm = _recording_tm()
+    with patch("bolna.agent_manager.task_manager.run_web_search", AsyncMock(return_value=NO_RESULTS)):
+        await TaskManager._run_web_search(tm, "ai news", META, "call-1")
+
+    [detail] = tm.function_tool_api_call_details
+    assert detail["status"] == "completed"
+    assert detail["response_json"] == json.loads(NO_RESULTS)
 
 
 async def test_unavailable_search_is_recorded_as_error():
