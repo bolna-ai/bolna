@@ -24,6 +24,26 @@ class BaseTranscriber:
         self.connection_error = None
         self.is_transcript_sent_for_processing = False
         self.reset_audio_frame_state()
+        self.reset_billed_audio()
+
+    def reset_billed_audio(self) -> None:
+        """Start a connection's billing window. task_manager sums every closing packet, and a pool
+        reconnect reuses the instance, so each connection must report only its own audio."""
+        self.audio_sent_s = 0.0
+        self.provider_audio_duration_s = None
+
+    def count_audio_sent(self, num_bytes: int, sample_rate: int, mulaw: bool = False) -> None:
+        self.audio_sent_s += num_bytes / ((1 if mulaw else 2) * sample_rate)
+
+    def closing_meta(self) -> dict:
+        """Meta for the connection's single transcriber_connection_closed packet: the provider's own
+        billed duration when it reports one, else the audio actually sent on this connection."""
+        meta = dict(getattr(self, "meta_info", None) or {})
+        billed_s = self.provider_audio_duration_s
+        meta["transcriber_duration"] = round(billed_s if billed_s is not None else self.audio_sent_s, 4)
+        if self.connection_error:
+            meta["connection_error"] = self.connection_error
+        return meta
 
     def reset_audio_frame_state(self) -> None:
         """Restart the audio position -> send-time map; ASR stream positions restart per connection."""

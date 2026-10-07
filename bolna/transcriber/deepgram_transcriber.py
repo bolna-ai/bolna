@@ -650,6 +650,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 data = ws_data_packet.get("data")
                 if isinstance(data, (bytes, bytearray)):
                     self.record_audio_frame(self._audio_frame_seconds(len(data)), timestamp_ms())
+                    self.count_audio_sent(len(data), self.sampling_rate, mulaw=self.encoding == "mulaw")
 
                 try:
                     await ws.send(data)
@@ -907,7 +908,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     # Capture duration from final Metadata message (actual audio processed by Deepgram)
                     deepgram_duration = msg.get("duration")
                     if deepgram_duration is not None:
-                        self.meta_info["deepgram_duration"] = deepgram_duration
+                        self.provider_audio_duration_s = deepgram_duration
                         logger.info(f"Received Deepgram Metadata with duration: {deepgram_duration}s")
 
             except Exception as e:
@@ -1240,6 +1241,7 @@ class DeepgramTranscriber(BaseTranscriber):
         # on the same instance — stale values from the previous connection would
         # map new positions onto old wall-clock times.
         self.reset_audio_frame_state()
+        self.reset_billed_audio()
         try:
             start_time = timestamp_ms()
             try:
@@ -1279,7 +1281,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                                 async def drain_metadata():
                                     async for _ in self.receiver(deepgram_ws):
-                                        if "deepgram_duration" in self.meta_info:
+                                        if self.provider_audio_duration_s is not None:
                                             return
 
                                 try:
@@ -1327,11 +1329,6 @@ class DeepgramTranscriber(BaseTranscriber):
             if hasattr(self, "flux_watchdog_task") and self.flux_watchdog_task is not None:
                 self.flux_watchdog_task.cancel()
 
-            # Use Deepgram's actual audio duration for billing
-            if self.meta_info is not None and "deepgram_duration" in self.meta_info:
-                self.meta_info["transcriber_duration"] = self.meta_info["deepgram_duration"]
-
-            meta = dict(getattr(self, "meta_info", None) or {})
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )
