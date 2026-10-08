@@ -14,6 +14,10 @@ Four registrations, one synthesizer class, one smoke run.
 4. `bolna/synthesizer/__init__.py` and `bolna/providers.py`: export it and register it in
    `SUPPORTED_SYNTHESIZER_MODELS`.
 
+A provider whose server speaks the OpenAI speech API (`POST /v1/audio/speech`) skips step 3: point it
+at `OPENAISynthesizer` with `OpenAIConfig`, passing the server's URL as `endpoint` (see
+`custom_synthesizer` in `bolna/providers.py`).
+
 ## The contract
 
 `StreamSynthesizer` owns push routing, latency bookkeeping, reconnects and cleanup. A subclass
