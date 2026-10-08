@@ -429,10 +429,11 @@ def pronunciation_rules_digest(rules):
     return hashlib.sha256(json.dumps(pairs, ensure_ascii=False).encode()).hexdigest()[:16]
 
 
-def pronunciation_dictionary_key(provider, provider_config, pronunciation_rules=None):
+def pronunciation_dictionary_key(provider, provider_config, pronunciation_rules=None, on_platform_key=False):
     """The provider pronunciation dictionaries a synthesizer config applies, as a cache-key part.
 
-    Empty when none apply, including a dictionary set on a model that ignores it."""
+    Empty when none apply, including a dictionary set on a model that ignores it. On Bolna's key the
+    dictionary is Bolna's own copy, keyed by its rules so one clip serves every region's copy."""
     if hasattr(provider_config, "model_dump"):
         provider_config = provider_config.model_dump()
     config = provider_config or {}
@@ -451,6 +452,8 @@ def pronunciation_dictionary_key(provider, provider_config, pronunciation_rules=
         key = config.get("dict_id") or ""
     # A dictionary edited in place keeps its ID, so the rules join the key to stop old clips matching.
     digest = pronunciation_rules_digest(pronunciation_rules) if key else ""
+    if on_platform_key and digest:
+        return digest
     return f"{key}#{digest}" if digest else key
 
 

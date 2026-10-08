@@ -1931,7 +1931,10 @@ class TaskManager(BaseManager):
             self.synthesizer_model = provider_config.get("model")
             self.synthesizer_render_settings = tts_render_settings(self.synthesizer_provider, provider_config)
             self.synthesizer_pronunciation_key = pronunciation_dictionary_key(
-                self.synthesizer_provider, provider_config, synth_config.get("pronunciation_rules")
+                self.synthesizer_provider,
+                provider_config,
+                synth_config.get("pronunciation_rules"),
+                on_platform_key=not self.kwargs.get("synthesizer_key"),
             )
             if self.turn_based_conversation:
                 synth_config["audio_format"] = "mp3"  # Hard code mp3 if we're connected through dashboard

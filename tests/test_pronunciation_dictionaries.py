@@ -413,3 +413,19 @@ def test_pronunciation_key_carries_the_rules_only_with_a_dictionary():
     assert pronunciation_dictionary_key("cartesia", config, RULES).startswith("pdict_1#")
     assert pronunciation_dictionary_key("cartesia", config, None) == "pdict_1"
     assert pronunciation_dictionary_key("cartesia", {"model": "sonic-3"}, RULES) == ""
+
+
+def test_bolna_copies_share_one_key_across_regions():
+    # Each region holds its own copy of the same rules, so a clip rendered with one serves the other.
+    us = {"model": "eleven_flash_v2_5", "pronunciation_dictionary_locators": [LOCATOR]}
+    india = {
+        "model": "eleven_flash_v2_5",
+        "pronunciation_dictionary_locators": [{"pronunciation_dictionary_id": "dict-in", "version_id": "ver-in"}],
+    }
+    us_key = pronunciation_dictionary_key("elevenlabs", us, RULES, on_platform_key=True)
+    assert us_key == pronunciation_dictionary_key("elevenlabs", india, RULES, on_platform_key=True)
+    assert us_key == pronunciation_rules_digest(RULES)
+    assert pronunciation_dictionary_key("elevenlabs", us, RULES) != pronunciation_dictionary_key(
+        "elevenlabs", india, RULES
+    )
+    assert pronunciation_dictionary_key("elevenlabs", {"model": "eleven_flash_v2_5"}, RULES, on_platform_key=True) == ""
