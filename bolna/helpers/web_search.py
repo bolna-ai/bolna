@@ -19,6 +19,8 @@ FIRECRAWL_SEARCH_URL = "https://api.firecrawl.dev/v2/search"
 EXA_SEARCH_URL = "https://api.exa.ai/search"
 PARALLEL_SEARCH_URL = "https://api.parallel.ai/v1/search"
 
+OPENAI_REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
 PROVIDER_KEY_ENV = {
     "openai": "OPENAI_API_KEY",
     "firecrawl": "FIRECRAWL_API_KEY",
@@ -151,12 +153,15 @@ def _openai_citations(response) -> list[str]:
 
 async def _search_openai(query, api_key, cfg, timeout_s) -> list[SearchHit]:
     client = AsyncOpenAI(api_key=api_key, timeout=timeout_s, http_client=get_shared_http_client(http2=False))
-    response = await client.responses.create(
-        model=cfg.model,
-        input=query,
-        tools=[{"type": "web_search"}],
-        tool_choice={"type": "web_search"},
-    )
+    request = {
+        "model": cfg.model,
+        "input": query,
+        "tools": [{"type": "web_search", "search_context_size": "low"}],
+        "tool_choice": {"type": "web_search"},
+    }
+    if cfg.model.startswith(OPENAI_REASONING_MODEL_PREFIXES):
+        request["reasoning"] = {"effort": "low"}
+    response = await client.responses.create(**request)
     answer = getattr(response, "output_text", None) or ""
     if not answer.strip():
         return []

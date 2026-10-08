@@ -28,6 +28,7 @@ def test_tools_config_accepts_web_search():
     tc = ToolsConfig(web_search={"enabled": True, "provider": "exa"})
     assert tc.web_search.provider == "exa"
     assert tc.web_search.max_results == 3
+    assert tc.web_search.model == "gpt-5.4-mini"
 
 
 def test_unknown_provider_is_rejected():
@@ -105,10 +106,23 @@ async def test_openai_side_call_forces_hosted_search():
     assert ctor.call_args.kwargs["http_client"] is shared
     pool.assert_called_once_with(http2=False)
     kwargs = client.responses.create.await_args.kwargs
-    assert kwargs["tools"] == [{"type": "web_search"}]
+    assert kwargs["tools"] == [{"type": "web_search", "search_context_size": "low"}]
     assert kwargs["tool_choice"] == {"type": "web_search"}
+    assert kwargs["reasoning"] == {"effort": "low"}
     assert "Team A won 2-1. (source: bbc.co.uk)" in out
     client.close.assert_not_awaited()
+
+
+async def test_openai_non_reasoning_model_gets_no_reasoning_effort():
+    client = MagicMock()
+    client.responses.create = AsyncMock(return_value=SimpleNamespace(output_text="", output=[]))
+    with (
+        patch(f"{MOD}.AsyncOpenAI", return_value=client),
+        patch(f"{MOD}.get_shared_http_client", return_value=MagicMock()),
+    ):
+        await run_web_search("q", _cfg(provider="openai", model="gpt-4.1-mini"), fallback_openai_key="sk")
+
+    assert "reasoning" not in client.responses.create.await_args.kwargs
 
 
 async def test_empty_results_say_so():

@@ -926,7 +926,7 @@ class WebSearchConfig(BaseModel):
     nodes: List[str] = []
     description: Optional[str] = None
     # Used only by the openai provider's Responses side call.
-    model: str = "gpt-5.4"
+    model: str = "gpt-5.4-mini"
 
 
 class ToolsConfig(BaseModel):
