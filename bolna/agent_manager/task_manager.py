@@ -47,6 +47,8 @@ from bolna.constants import (
     SWITCH_LANGUAGE_TOOL_DEFINITION,
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
+    WEB_SEARCH_FUNCTION_NAME,
+    WEB_SEARCH_TOOL_DEFINITION,
     RESPONSES_API_MODEL_PREFIXES,
     LLM_GENERATION_TIMEOUT_S,
     S2S_GOODBYE_TIMEOUT_S,
@@ -79,6 +81,7 @@ from bolna.enums import (
     HangupReason,
     NodeType,
     ChatRole,
+    S2SProvider,
     ToolScope,
 )
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
@@ -126,7 +129,8 @@ from bolna.helpers.utils import (
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
-from bolna.models import S2SConfig, tts_render_settings
+from bolna.models import S2SConfig, WebSearchConfig, tts_render_settings
+from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
 from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
 
@@ -191,6 +195,29 @@ def _inject_end_call_tool(api_tools, *, scope, nodes, description=None):
         "pre_call_message": None,
         "scope": scope.value if scope else None,
         "nodes": list(nodes or []),
+    }
+    return api_tools
+
+
+def _inject_web_search_tool(api_tools, cfg: WebSearchConfig):
+    """Add the platform web_search tool to api_tools; no-op if already present."""
+    if api_tools is None:
+        api_tools = {"tools": [], "tools_params": {}}
+    if WEB_SEARCH_FUNCTION_NAME in api_tools.get("tools_params", {}):
+        return api_tools
+    tool_def = copy.deepcopy(WEB_SEARCH_TOOL_DEFINITION)
+    if cfg.description:
+        tool_def["function"]["description"] = cfg.description
+    tools_list = api_tools.get("tools") or []
+    if isinstance(tools_list, str):
+        tools_list = json.loads(tools_list)
+    tools_list.append(tool_def)
+    api_tools["tools"] = tools_list
+    # The entry must exist or ToolCallAccumulator drops the call; url stays empty like end_call.
+    api_tools.setdefault("tools_params", {})[WEB_SEARCH_FUNCTION_NAME] = {
+        "pre_call_message": cfg.pre_call_message,
+        "scope": cfg.scope,
+        "nodes": list(cfg.nodes or []),
     }
     return api_tools
 
@@ -386,6 +413,21 @@ class TaskManager(BaseManager):
 
         if task["tools_config"].get("api_tools", None) is not None:
             self.kwargs["api_tools"] = task["tools_config"]["api_tools"]
+
+        self.web_search_config = None
+        web_search_raw = task["tools_config"].get("web_search")
+        if web_search_raw:
+            try:
+                if hasattr(web_search_raw, "model_dump"):
+                    web_search_raw = web_search_raw.model_dump()
+                web_search_config = WebSearchConfig(**web_search_raw)
+            except Exception as e:
+                logger.error(f"Ignoring invalid web_search config: {e}")
+                web_search_config = None
+            if web_search_config and web_search_config.enabled:
+                self.web_search_config = web_search_config
+                self.kwargs["api_tools"] = _inject_web_search_tool(self.kwargs.get("api_tools"), web_search_config)
+                logger.info(f"web_search tool active provider={web_search_config.provider}")
 
         # Speech-to-speech agents carry no llm_agent/transcriber/synthesizer at all.
         self.s2s_config = task["tools_config"].get("s2s")
@@ -1670,6 +1712,46 @@ class TaskManager(BaseManager):
         self.kwargs["api_tools"]["tools_params"]["switch_language"] = {}
         logger.info(f"Injected switch_language tool (labels={sorted(labels)})")
 
+    def _web_search_openai_fallback_key(self):
+        """The agent's own OpenAI key, only when it talks to api.openai.com; never a Gemini/Groq/proxy key."""
+        if self.kwargs.get("base_url"):
+            return None
+        s2s_provider = getattr(self, "s2s_provider_name", None)
+        if s2s_provider:
+            return self.kwargs.get("s2s_key") if s2s_provider == S2SProvider.OPENAI_REALTIME.value else None
+        if (getattr(self, "llm_config", None) or {}).get("provider") == "openai":
+            return self.kwargs.get("llm_key")
+        return None
+
+    async def _run_web_search(self, query, meta_info=None, tool_call_id=""):
+        provider = self.web_search_config.provider
+        api_call_detail = self._start_api_call_detail(
+            called_fun=WEB_SEARCH_FUNCTION_NAME,
+            url=None,
+            method="POST",
+            param=None,
+            headers={},
+            meta_info=meta_info or {},
+            runtime_args={"tool_call_id": tool_call_id, "query": query},
+            api_params={"query": query, "provider": provider},
+        )
+        try:
+            result = await run_web_search(
+                query,
+                self.web_search_config,
+                fallback_openai_key=self._web_search_openai_fallback_key(),
+                run_id=self.run_id,
+            )
+        except asyncio.CancelledError:
+            logger.info(f"web_search cancelled provider={provider} query={query!r}")
+            self._finalize_api_call_detail(api_call_detail, error="cancelled before the search finished")
+            raise
+        error = f"search unavailable (provider={provider})" if result == SEARCH_UNAVAILABLE else None
+        self._finalize_api_call_detail(api_call_detail, response=result, error=error)
+        if api_call_detail is not None and api_call_detail.get("response_json") is None:
+            api_call_detail["response_json"] = cap_tool_payload({"result": result}, "response_json")
+        return result
+
     def _get_voice_name_for_label(self, label):
         """Get agent name for a language label from configured agent_names."""
         return self.agent_names.get(label, "")
@@ -2918,7 +3000,14 @@ class TaskManager(BaseManager):
             self.tools["output"].set_hangup_sent()
             await self.__process_end_of_conversation()
 
+    def _caller_disconnected(self) -> bool:
+        """No media stream is left to play to: the caller hung up or run() already released the tools."""
+        input_handler = self.tools.get("input")
+        return input_handler is None or bool(getattr(input_handler, "input_stream_ended", False))
+
     async def wait_for_current_message(self):
+        if self._caller_disconnected():
+            return
         try:
             await asyncio.wait_for(self._turn_audio_flushed.wait(), timeout=3.0)
         except asyncio.TimeoutError:
@@ -2926,6 +3015,9 @@ class TaskManager(BaseManager):
 
         entry_time = time.time()
         while not self.conversation_ended:
+            if self._caller_disconnected():
+                logger.info("wait_for_current_message: caller disconnected, not waiting for playout")
+                break
             mark_events = self.mark_event_meta_data.mark_event_meta_data
             mark_items_list = [{"mark_id": k, "mark_data": v} for k, v in mark_events.items()]
             logger.info(
@@ -3141,7 +3233,7 @@ class TaskManager(BaseManager):
 
         # Check completion of agent_hangup_message sent from output
         # Only wait for hangup chunk if a hangup message was actually queued
-        while self.hangup_triggered and self.hangup_message_queued:
+        while self.hangup_triggered and self.hangup_message_queued and not self._caller_disconnected():
             try:
                 if self.tools["output"].hangup_sent():
                     logger.info("final hangup chunk is now sent. Breaking now")
@@ -3197,8 +3289,11 @@ class TaskManager(BaseManager):
         # to finish playing out what it has buffered, then sends HANGUP. Hanging up from here
         # instead would cut the agent's goodbye short — Asterisk is handed audio faster than
         # real time, so a chunk of it is still queued when the conversation ends.
-        await self.tools["input"].stop_handler()
-        logger.info("Stopped input handler")
+        # A detached end_call teardown can finish after run() has already released the tools.
+        input_handler = self.tools.get("input")
+        if input_handler is not None:
+            await input_handler.stop_handler()
+            logger.info("Stopped input handler")
         if self.turn_based_conversation:
             # _listen_llm_input_queue is the chat's run loop; the sentinel lets it exit so run() can finish.
             self.queues["llm"].put_nowait(create_ws_data_packet(None, {"io": "default", "eos": True}))
@@ -3559,6 +3654,8 @@ class TaskManager(BaseManager):
                 # serialized with the LID decide, so a queued decide isn't stalled for seconds.
                 if not self._turn_audio_flushed.is_set():
                     await self.wait_for_current_message()
+                if self._caller_disconnected():
+                    return
 
                 switched = False
                 async with self.language_switch_lock:
@@ -3583,6 +3680,8 @@ class TaskManager(BaseManager):
                 # voice, then switch.
                 if not self._turn_audio_flushed.is_set():
                     await self.wait_for_current_message()
+                if self._caller_disconnected():
+                    return
 
                 handoff_template = self.switch_handoff_messages.get(self.language, "")
                 if handoff_template:
@@ -3606,6 +3705,8 @@ class TaskManager(BaseManager):
                     self._turn_audio_flushed.clear()
                     await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
                     await self.wait_for_current_message()
+                    if self._caller_disconnected():
+                        return
                     self.conversation_history.append_assistant(handoff_text, turn_id=turn_id, response_uid=response_uid)
                     if turn_id is not None:
                         self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
@@ -3637,11 +3738,59 @@ class TaskManager(BaseManager):
             self.execute_function_call_task = None
             return
 
+        if called_fun == WEB_SEARCH_FUNCTION_NAME and self.web_search_config is not None:
+            convert_to_request_log(
+                json.dumps({"query": resp.get("query", "")}),
+                meta_info,
+                None,
+                LogComponent.FUNCTION_CALL,
+                direction=LogDirection.REQUEST,
+                run_id=self.run_id,
+                tool_name=called_fun,
+            )
+            search_task = asyncio.create_task(
+                self._run_web_search(resp.get("query", ""), meta_info, resp.get("tool_call_id", ""))
+            )
+            try:
+                await self.wait_for_current_message()
+                function_response = await search_task
+            finally:
+                if not search_task.done():
+                    search_task.cancel()
+            if self.hangup_triggered or self.conversation_ended:
+                logger.info("web_search: call ended while searching, dropping the result")
+                return
+
+            self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
+            self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
+            self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
+            convert_to_request_log(
+                function_response,
+                meta_info,
+                None,
+                LogComponent.FUNCTION_CALL,
+                direction=LogDirection.RESPONSE,
+                run_id=self.run_id,
+                tool_name=called_fun,
+            )
+            messages = self.conversation_history.get_copy()
+            followup_meta_info = self._spawn_followup_meta_info(meta_info)
+            await self.__do_llm_generation(
+                messages,
+                followup_meta_info,
+                next_step,
+                should_bypass_synth=meta_info.get("bypass_synth", False),
+                should_trigger_function_call=True,
+            )
+            self.execute_function_call_task = None
+            return
+
         await self.wait_for_current_message()
 
-        if self.hangup_triggered or self.conversation_ended:
+        if self.hangup_triggered or self.conversation_ended or self._caller_disconnected():
             logger.info(
-                f"__execute_function_call: Aborting before API call — hangup_triggered={self.hangup_triggered}, conversation_ended={self.conversation_ended}"
+                f"__execute_function_call: Aborting before API call: hangup_triggered={self.hangup_triggered}, "
+                f"conversation_ended={self.conversation_ended}, caller_disconnected={self._caller_disconnected()}"
             )
             return
 
@@ -4592,6 +4741,11 @@ class TaskManager(BaseManager):
         if exception is not None:
             logger.error(f"Detached end_call hangup failed | error={type(exception).__name__}: {exception}")
 
+    async def __end_without_goodbye(self):
+        self.hangup_message_queued = False
+        self.hangup_triggered_at = time.time()
+        await self.__process_end_of_conversation()
+
     async def process_call_hangup(self):
         if self.hangup_decision_at is None:
             self.hangup_decision_at = time.time()
@@ -4607,19 +4761,19 @@ class TaskManager(BaseManager):
         if self.__is_s2s():
             # The model has already spoken the goodbye by now, prompted by the end_call result
             # or _hangup_after_goodbye, and there is no synthesizer to render one here anyway.
-            self.hangup_message_queued = False
-            self.hangup_triggered_at = time.time()
-            await self.__process_end_of_conversation()
+            await self.__end_without_goodbye()
             return
 
         message = self.call_hangup_message if not self.voicemail_handler.detected else ""
-        if not message or message.strip() == "":
-            self.hangup_message_queued = False  # No hangup message to wait for
-            self.hangup_triggered_at = time.time()
-            await self.__process_end_of_conversation()
+        # A caller who has hung up, before or during the last reply, cannot hear a goodbye.
+        if not message or message.strip() == "" or self._caller_disconnected():
+            await self.__end_without_goodbye()
         else:
             self.hangup_message_queued = True  # Hangup message will be synthesized
             await self.wait_for_current_message()
+            if self._caller_disconnected():
+                await self.__end_without_goodbye()
+                return
             await self.__cleanup_downstream_tasks()
             meta_info = {
                 "io": self.tools["output"].get_provider(),
@@ -8803,6 +8957,14 @@ class TaskManager(BaseManager):
                     tool_name, params.get("url"), params.get("param"), args, meta_info
                 )
                 result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
+        elif tool_name == WEB_SEARCH_FUNCTION_NAME and self.web_search_config is not None:
+            search_task = asyncio.create_task(self._run_web_search(args.get("query", ""), meta_info, event.call_id))
+            try:
+                await self._s2s_before_tool_request(tool_name, args, params, meta_info)
+                result = await search_task
+            finally:
+                if not search_task.done():
+                    search_task.cancel()
         else:
             await self._s2s_before_tool_request(tool_name, args, params, meta_info)
             result = await self._s2s_call_api_tool(tool_name, args, params, meta_info)
@@ -9188,6 +9350,9 @@ class TaskManager(BaseManager):
                     ),
                     "ended_by_assistant": self.ended_by_assistant,
                     "user_spoke": self.user_spoke,
+                    "node_extracted_data": (
+                        dict(self.tools["llm_agent"].node_extracted_data) if self.__is_graph_agent() else None
+                    ),
                     "latency_dict": {
                         "llm_latencies": self.llm_latencies.model_dump(),
                         "transcriber_latencies": self.transcriber_latencies.model_dump(),
