@@ -2992,7 +2992,14 @@ class TaskManager(BaseManager):
             self.tools["output"].set_hangup_sent()
             await self.__process_end_of_conversation()
 
+    def _caller_disconnected(self) -> bool:
+        """No media stream is left to play to: the caller hung up or run() already released the tools."""
+        input_handler = self.tools.get("input")
+        return input_handler is None or bool(getattr(input_handler, "input_stream_ended", False))
+
     async def wait_for_current_message(self):
+        if self._caller_disconnected():
+            return
         try:
             await asyncio.wait_for(self._turn_audio_flushed.wait(), timeout=3.0)
         except asyncio.TimeoutError:
@@ -3000,6 +3007,9 @@ class TaskManager(BaseManager):
 
         entry_time = time.time()
         while not self.conversation_ended:
+            if self._caller_disconnected():
+                logger.info("wait_for_current_message: caller disconnected, not waiting for playout")
+                break
             mark_events = self.mark_event_meta_data.mark_event_meta_data
             mark_items_list = [{"mark_id": k, "mark_data": v} for k, v in mark_events.items()]
             logger.info(
@@ -3215,7 +3225,7 @@ class TaskManager(BaseManager):
 
         # Check completion of agent_hangup_message sent from output
         # Only wait for hangup chunk if a hangup message was actually queued
-        while self.hangup_triggered and self.hangup_message_queued:
+        while self.hangup_triggered and self.hangup_message_queued and not self._caller_disconnected():
             try:
                 if self.tools["output"].hangup_sent():
                     logger.info("final hangup chunk is now sent. Breaking now")
@@ -3271,8 +3281,11 @@ class TaskManager(BaseManager):
         # to finish playing out what it has buffered, then sends HANGUP. Hanging up from here
         # instead would cut the agent's goodbye short — Asterisk is handed audio faster than
         # real time, so a chunk of it is still queued when the conversation ends.
-        await self.tools["input"].stop_handler()
-        logger.info("Stopped input handler")
+        # A detached end_call teardown can finish after run() has already released the tools.
+        input_handler = self.tools.get("input")
+        if input_handler is not None:
+            await input_handler.stop_handler()
+            logger.info("Stopped input handler")
         if self.turn_based_conversation:
             # _listen_llm_input_queue is the chat's run loop; the sentinel lets it exit so run() can finish.
             self.queues["llm"].put_nowait(create_ws_data_packet(None, {"io": "default", "eos": True}))
@@ -3633,6 +3646,8 @@ class TaskManager(BaseManager):
                 # serialized with the LID decide, so a queued decide isn't stalled for seconds.
                 if not self._turn_audio_flushed.is_set():
                     await self.wait_for_current_message()
+                if self._caller_disconnected():
+                    return
 
                 switched = False
                 async with self.language_switch_lock:
@@ -3657,6 +3672,8 @@ class TaskManager(BaseManager):
                 # voice, then switch.
                 if not self._turn_audio_flushed.is_set():
                     await self.wait_for_current_message()
+                if self._caller_disconnected():
+                    return
 
                 handoff_template = self.switch_handoff_messages.get(self.language, "")
                 if handoff_template:
@@ -3680,6 +3697,8 @@ class TaskManager(BaseManager):
                     self._turn_audio_flushed.clear()
                     await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
                     await self.wait_for_current_message()
+                    if self._caller_disconnected():
+                        return
                     self.conversation_history.append_assistant(handoff_text, turn_id=turn_id, response_uid=response_uid)
                     if turn_id is not None:
                         self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
@@ -3760,9 +3779,10 @@ class TaskManager(BaseManager):
 
         await self.wait_for_current_message()
 
-        if self.hangup_triggered or self.conversation_ended:
+        if self.hangup_triggered or self.conversation_ended or self._caller_disconnected():
             logger.info(
-                f"__execute_function_call: Aborting before API call — hangup_triggered={self.hangup_triggered}, conversation_ended={self.conversation_ended}"
+                f"__execute_function_call: Aborting before API call: hangup_triggered={self.hangup_triggered}, "
+                f"conversation_ended={self.conversation_ended}, caller_disconnected={self._caller_disconnected()}"
             )
             return
 
@@ -4713,6 +4733,11 @@ class TaskManager(BaseManager):
         if exception is not None:
             logger.error(f"Detached end_call hangup failed | error={type(exception).__name__}: {exception}")
 
+    async def __end_without_goodbye(self):
+        self.hangup_message_queued = False
+        self.hangup_triggered_at = time.time()
+        await self.__process_end_of_conversation()
+
     async def process_call_hangup(self):
         if self.hangup_decision_at is None:
             self.hangup_decision_at = time.time()
@@ -4728,19 +4753,19 @@ class TaskManager(BaseManager):
         if self.__is_s2s():
             # The model has already spoken the goodbye by now, prompted by the end_call result
             # or _hangup_after_goodbye, and there is no synthesizer to render one here anyway.
-            self.hangup_message_queued = False
-            self.hangup_triggered_at = time.time()
-            await self.__process_end_of_conversation()
+            await self.__end_without_goodbye()
             return
 
         message = self.call_hangup_message if not self.voicemail_handler.detected else ""
-        if not message or message.strip() == "":
-            self.hangup_message_queued = False  # No hangup message to wait for
-            self.hangup_triggered_at = time.time()
-            await self.__process_end_of_conversation()
+        # A caller who has hung up, before or during the last reply, cannot hear a goodbye.
+        if not message or message.strip() == "" or self._caller_disconnected():
+            await self.__end_without_goodbye()
         else:
             self.hangup_message_queued = True  # Hangup message will be synthesized
             await self.wait_for_current_message()
+            if self._caller_disconnected():
+                await self.__end_without_goodbye()
+                return
             await self.__cleanup_downstream_tasks()
             meta_info = {
                 "io": self.tools["output"].get_provider(),
@@ -9308,6 +9333,9 @@ class TaskManager(BaseManager):
                     ),
                     "ended_by_assistant": self.ended_by_assistant,
                     "user_spoke": self.user_spoke,
+                    "node_extracted_data": (
+                        dict(self.tools["llm_agent"].node_extracted_data) if self.__is_graph_agent() else None
+                    ),
                     "latency_dict": {
                         "llm_latencies": self.llm_latencies.model_dump(),
                         "transcriber_latencies": self.transcriber_latencies.model_dump(),

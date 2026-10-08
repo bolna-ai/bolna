@@ -50,6 +50,7 @@ def test_ending_the_input_stream_flags_it_and_sends_eos():
     handler = DefaultInputHandler.__new__(DefaultInputHandler)
     handler.queues = {"transcriber": asyncio.Queue()}
     handler.input_stream_ended = False
+    handler.mark_event_meta_data = None
 
     handler._end_input_stream("plivo", sequence=3)
 

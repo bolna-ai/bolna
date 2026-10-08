@@ -48,6 +48,22 @@ def _strip_server_injected_params(tools):
     return cleaned
 
 
+def _new_items_start(messages):
+    """Index of the first message after the last assistant message, where a chained request begins."""
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == ChatRole.ASSISTANT:
+            return i + 1
+    return 0
+
+
+def _last_assistant_turn_end(messages):
+    """Index past the last assistant message and the tool outputs answering it."""
+    i = _new_items_start(messages)
+    while i < len(messages) and messages[i].get("role") == ChatRole.TOOL:
+        i += 1
+    return i
+
+
 class OpenAICompatibleLLM(BaseLLM):
     """Base class for OpenAI-API-compatible LLM providers.
 
@@ -273,6 +289,7 @@ class OpenAICompatibleLLM(BaseLLM):
     def _init_responses_api(self, use_responses_api: bool = False, compact_threshold: Optional[int] = None):
         self.use_responses_api = use_responses_api
         self.previous_response_id = None
+        self._in_flight_response_id: Optional[str] = None
         self._pending_call_ids: set[str] = set()
         self.compact_threshold = compact_threshold
         self._interruption_hint: Optional[str] = None
@@ -287,17 +304,16 @@ class OpenAICompatibleLLM(BaseLLM):
         return self.async_client
 
     def _build_responses_input(self, messages):
-        """Build (instructions, input_items) for Responses API.
-
-        With previous_response_id set, only sends items after the last
-        assistant. Falls back to full history when pending tool outputs are
-        missing. Any pending interruption hint is consumed exactly once and
-        prepended on every path.
-        """
+        """Build (instructions, input_items): chained when the head completed and tool outputs are in, else full history."""
         hint = self._interruption_hint
         self._interruption_hint = None
 
         chained = bool(self.previous_response_id)
+        if chained and self.previous_response_id == self._in_flight_response_id:
+            logger.info("Chain head never completed, sending full context")
+            self.previous_response_id = None
+            self._pending_call_ids = set()
+            chained = False
         if chained and self._pending_call_ids:
             completed = {m.get("tool_call_id") for m in messages if m.get("role") == ChatRole.TOOL}
             if not self._pending_call_ids.issubset(completed):
@@ -305,12 +321,17 @@ class OpenAICompatibleLLM(BaseLLM):
                 self.previous_response_id = None
                 chained = False
         if chained:
-            instructions, input_items = self._extract_new_input(messages)
+            instructions, new_items = self._extract_new_input(messages)
+            history_items = []
         else:
-            instructions, input_items = MessageFormatAdapter.chat_to_responses_input(messages)
-        if hint is not None:
-            input_items = [self._build_interruption_hint_item(hint), *input_items]
-        return instructions, input_items
+            split = _last_assistant_turn_end(messages)
+            instructions, history_items = MessageFormatAdapter.chat_to_responses_input(messages[:split])
+            _, new_items = MessageFormatAdapter.chat_to_responses_input(messages[split:])
+            # Full history holds only what was heard, so a reply nobody heard leaves nothing to qualify.
+            if hint is not None and not hint.strip():
+                hint = None
+        hint_items = [] if hint is None else [self._build_interruption_hint_item(hint)]
+        return instructions, [*history_items, *hint_items, *new_items]
 
     @staticmethod
     def _build_interruption_hint_item(heard_text: str) -> dict:
@@ -329,18 +350,7 @@ class OpenAICompatibleLLM(BaseLLM):
 
     def _extract_new_input(self, messages):
         """Send only items after the last assistant; prior context (including system) lives on the chain."""
-        last_assistant_idx = -1
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == ChatRole.ASSISTANT:
-                last_assistant_idx = i
-                break
-
-        if last_assistant_idx < 0:
-            _, input_items = MessageFormatAdapter.chat_to_responses_input(messages)
-            return "", input_items
-
-        new_messages = messages[last_assistant_idx + 1 :]
-        _, input_items = MessageFormatAdapter.chat_to_responses_input(new_messages)
+        _, input_items = MessageFormatAdapter.chat_to_responses_input(messages[_new_items_start(messages) :])
         return "", input_items
 
     @staticmethod
@@ -391,8 +401,19 @@ class OpenAICompatibleLLM(BaseLLM):
 
     def invalidate_response_chain(self):
         self.previous_response_id = None
+        self._in_flight_response_id = None
         self._pending_call_ids = set()
         self._interruption_hint = None
+
+    def _on_response_created(self, response_id):
+        self.previous_response_id = response_id
+        self._in_flight_response_id = response_id
+
+    def _on_response_completed(self, response_id, call_ids):
+        if response_id:
+            self.previous_response_id = response_id
+        self._in_flight_response_id = None
+        self._pending_call_ids = set(call_ids)
 
     def _build_function_call_chunk(
         self,
@@ -538,7 +559,9 @@ class OpenAICompatibleLLM(BaseLLM):
         tool_choice=None,
         tools=None,
         retry_on_empty=True,
+        started_at=None,
     ):
+        """``started_at`` carries a retried turn's original start so its latency includes the failed attempt."""
         if not messages:
             raise ValueError("No messages provided")
 
@@ -554,7 +577,7 @@ class OpenAICompatibleLLM(BaseLLM):
         received_textual = False
         reasoning_summary_parts = []
 
-        start_time = now_ms()
+        start_time = started_at if started_at is not None else now_ms()
         first_token_time = None
         latency_data = None
         service_tier = None
@@ -574,7 +597,14 @@ class OpenAICompatibleLLM(BaseLLM):
                     )
                 self.previous_response_id = None
                 async for chunk in self._generate_stream_responses(
-                    messages, synthesize, request_json, meta_info, tool_choice, tools, retry_on_empty=retry_on_empty
+                    messages,
+                    synthesize,
+                    request_json,
+                    meta_info,
+                    tool_choice,
+                    tools,
+                    retry_on_empty=retry_on_empty,
+                    started_at=start_time,
                 ):
                     yield chunk
                 return
@@ -585,7 +615,7 @@ class OpenAICompatibleLLM(BaseLLM):
             now = now_ms()
 
             if event.type == ResponseStreamEvent.CREATED:
-                self.previous_response_id = event.response.id
+                self._on_response_created(event.response.id)
                 self._log_llm_request_id(stream, event.response.id)
                 service_tier = getattr(event.response, "service_tier", None)
                 if latency_data is None:
@@ -673,9 +703,7 @@ class OpenAICompatibleLLM(BaseLLM):
                 reasoning_summary_parts.append(event.delta)
 
             elif event.type == ResponseStreamEvent.COMPLETED:
-                if hasattr(event.response, "id"):
-                    self.previous_response_id = event.response.id
-                self._pending_call_ids = set(func_call_ids.values())
+                self._on_response_completed(getattr(event.response, "id", None), func_call_ids.values())
                 service_tier = service_tier or getattr(event.response, "service_tier", None)
                 if hasattr(event.response, "usage") and event.response.usage:
                     response_usage = event.response.usage
@@ -689,7 +717,14 @@ class OpenAICompatibleLLM(BaseLLM):
                     {"error_type": "incomplete_empty_response", "error": incomplete_reason, "model": self.model}
                 )
             async for chunk in self._generate_stream_responses(
-                messages, synthesize, request_json, meta_info, tool_choice, tools, retry_on_empty=False
+                messages,
+                synthesize,
+                request_json,
+                meta_info,
+                tool_choice,
+                tools,
+                retry_on_empty=False,
+                started_at=start_time,
             ):
                 yield chunk
             return
