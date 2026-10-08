@@ -20,6 +20,7 @@ def _handler(turn_streamed_text):
     stub._turn_audio_flushed = asyncio.Event()
     if not turn_streamed_text:
         stub._turn_audio_flushed.set()
+    stub.stream_end_pushed_sequence_id = None
     stub.synthesizer_tasks = []
     stub.forwarded = []
 
@@ -51,3 +52,43 @@ async def test_a_mid_turn_empty_buffer_is_still_dropped():
     meta = {"request_id": "r", "sequence_id": 4}
     await TaskManager._handle_llm_output(stub, "synthesizer", "", False, meta)
     assert stub.synthesizer_tasks == []
+
+
+async def push(stub, text, sequence_id, end_of_llm_stream):
+    meta = {"request_id": "r", "sequence_id": sequence_id}
+    if end_of_llm_stream:
+        meta["end_of_llm_stream"] = True
+    await TaskManager._handle_llm_output(stub, "synthesizer", text, False, meta)
+    await asyncio.gather(*stub.synthesizer_tasks)
+
+
+async def test_a_second_end_marker_after_a_closed_turn_is_dropped():
+    """A pre-call filler already ends the stream; a trailing empty end marker would open an
+    empty synthesizer turn whose instant end drops the filler's audio."""
+    stub = _handler(turn_streamed_text=False)
+    await push(stub, "Just give me a moment.", 8, end_of_llm_stream=True)
+    await push(stub, "", 8, end_of_llm_stream=True)
+    assert [p["data"] for p in stub.forwarded] == ["Just give me a moment."]
+
+
+async def test_a_follow_up_reply_in_the_same_sequence_still_gets_its_end_marker():
+    stub = _handler(turn_streamed_text=False)
+    await push(stub, "Just give me a moment.", 8, end_of_llm_stream=True)
+    await push(stub, "Here are the details.", 8, end_of_llm_stream=False)
+    await push(stub, "", 8, end_of_llm_stream=True)
+    assert [p["data"] for p in stub.forwarded] == ["Just give me a moment.", "Here are the details.", ""]
+
+
+async def test_an_end_marker_for_a_new_sequence_is_forwarded():
+    stub = _handler(turn_streamed_text=False)
+    await push(stub, "Hello there.", 4, end_of_llm_stream=True)
+    await push(stub, "Next answer", 5, end_of_llm_stream=False)
+    await push(stub, "", 5, end_of_llm_stream=True)
+    assert [p["data"] for p in stub.forwarded] == ["Hello there.", "Next answer", ""]
+
+
+async def test_an_end_marker_without_a_sequence_id_is_never_suppressed():
+    stub = _handler(turn_streamed_text=False)
+    await push(stub, "Partial answer", None, end_of_llm_stream=False)
+    await push(stub, "", None, end_of_llm_stream=True)
+    assert [p["data"] for p in stub.forwarded] == ["Partial answer", ""]
