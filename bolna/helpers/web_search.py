@@ -8,6 +8,7 @@ import aiohttp
 from openai import AsyncOpenAI
 
 from bolna.helpers.logger_config import configure_logger
+from bolna.llms.http_client_pool import get_shared_http_client
 
 logger = configure_logger(__name__)
 
@@ -17,8 +18,6 @@ NO_RESULTS = json.dumps({"status": "success", "message": "The search returned no
 FIRECRAWL_SEARCH_URL = "https://api.firecrawl.dev/v2/search"
 EXA_SEARCH_URL = "https://api.exa.ai/search"
 PARALLEL_SEARCH_URL = "https://api.parallel.ai/v1/search"
-
-HTTP_PROVIDER_TIMEOUT_CAP_S = 4.0
 
 PROVIDER_KEY_ENV = {
     "openai": "OPENAI_API_KEY",
@@ -151,16 +150,13 @@ def _openai_citations(response) -> list[str]:
 
 
 async def _search_openai(query, api_key, cfg, timeout_s) -> list[SearchHit]:
-    client = AsyncOpenAI(api_key=api_key, timeout=timeout_s)
-    try:
-        response = await client.responses.create(
-            model=cfg.model,
-            input=query,
-            tools=[{"type": "web_search"}],
-            tool_choice={"type": "web_search"},
-        )
-    finally:
-        await client.close()
+    client = AsyncOpenAI(api_key=api_key, timeout=timeout_s, http_client=get_shared_http_client(http2=False))
+    response = await client.responses.create(
+        model=cfg.model,
+        input=query,
+        tools=[{"type": "web_search"}],
+        tool_choice={"type": "web_search"},
+    )
     answer = getattr(response, "output_text", None) or ""
     if not answer.strip():
         return []
@@ -199,8 +195,6 @@ async def run_web_search(query: str, cfg, *, fallback_openai_key: str | None = N
         return SEARCH_UNAVAILABLE
 
     timeout_s = cfg.timeout_seconds
-    if cfg.provider != "openai":
-        timeout_s = min(timeout_s, HTTP_PROVIDER_TIMEOUT_CAP_S)
 
     try:
         hits = await asyncio.wait_for(adapter(query, api_key, cfg, timeout_s), timeout=timeout_s)

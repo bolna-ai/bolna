@@ -78,11 +78,11 @@ async def test_parallel_uses_fast_mode_and_excerpts():
     assert "P - e1" in out
 
 
-async def test_http_provider_timeout_is_capped():
+async def test_http_provider_uses_configured_timeout():
     post = AsyncMock(return_value={"results": []})
     with patch(f"{MOD}._post_json", post):
         await run_web_search("q", _cfg(provider="exa", api_key="k", timeout_seconds=20))
-    assert post.await_args.args[3] == web_search.HTTP_PROVIDER_TIMEOUT_CAP_S
+    assert post.await_args.args[3] == 20
 
 
 async def test_openai_side_call_forces_hosted_search():
@@ -94,15 +94,21 @@ async def test_openai_side_call_forces_hosted_search():
     client = MagicMock()
     client.responses.create = AsyncMock(return_value=response)
     client.close = AsyncMock()
-    with patch(f"{MOD}.AsyncOpenAI", return_value=client) as ctor:
+    shared = MagicMock()
+    with (
+        patch(f"{MOD}.AsyncOpenAI", return_value=client) as ctor,
+        patch(f"{MOD}.get_shared_http_client", return_value=shared) as pool,
+    ):
         out = await run_web_search("score", _cfg(provider="openai"), fallback_openai_key="sk-agent")
 
     assert ctor.call_args.kwargs["api_key"] == "sk-agent"
+    assert ctor.call_args.kwargs["http_client"] is shared
+    pool.assert_called_once_with(http2=False)
     kwargs = client.responses.create.await_args.kwargs
     assert kwargs["tools"] == [{"type": "web_search"}]
     assert kwargs["tool_choice"] == {"type": "web_search"}
     assert "Team A won 2-1. (source: bbc.co.uk)" in out
-    client.close.assert_awaited_once()
+    client.close.assert_not_awaited()
 
 
 async def test_empty_results_say_so():
