@@ -7,7 +7,8 @@ from urllib.parse import urlparse
 import aiohttp
 from openai import AsyncOpenAI
 
-from bolna.constants import is_reasoning_model
+from bolna.constants import default_reasoning_effort, is_reasoning_model
+from bolna.enums import ReasoningEffort
 from bolna.helpers.logger_config import configure_logger
 from bolna.llms.http_client_pool import get_shared_http_client
 
@@ -150,6 +151,12 @@ def _openai_citations(response) -> list[str]:
     return urls
 
 
+def _search_reasoning_effort(model: str) -> str:
+    effort = default_reasoning_effort(model)
+    # OpenAI rejects web_search with minimal effort, so low is the floor there.
+    return ReasoningEffort.LOW.value if effort == ReasoningEffort.MINIMAL.value else effort
+
+
 async def _search_openai(query, api_key, cfg, timeout_s) -> list[SearchHit]:
     client = AsyncOpenAI(api_key=api_key, timeout=timeout_s, http_client=get_shared_http_client(http2=False))
     request = {
@@ -159,7 +166,7 @@ async def _search_openai(query, api_key, cfg, timeout_s) -> list[SearchHit]:
         "tool_choice": {"type": "web_search"},
     }
     if is_reasoning_model(cfg.model):
-        request["reasoning"] = {"effort": "low"}
+        request["reasoning"] = {"effort": _search_reasoning_effort(cfg.model)}
     response = await client.responses.create(**request)
     answer = getattr(response, "output_text", None) or ""
     if not answer.strip():

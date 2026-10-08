@@ -108,12 +108,21 @@ async def test_openai_side_call_forces_hosted_search():
     kwargs = client.responses.create.await_args.kwargs
     assert kwargs["tools"] == [{"type": "web_search", "search_context_size": "low"}]
     assert kwargs["tool_choice"] == {"type": "web_search"}
-    assert kwargs["reasoning"] == {"effort": "low"}
+    assert kwargs["reasoning"] == {"effort": "none"}
     assert "Team A won 2-1. (source: bbc.co.uk)" in out
     client.close.assert_not_awaited()
 
 
-@pytest.mark.parametrize("model,reasoning", [("gpt-6", {"effort": "low"}), ("gpt-4.1-mini", None)])
+@pytest.mark.parametrize(
+    "model,reasoning",
+    [
+        ("gpt-5.4-mini", {"effort": "none"}),
+        ("gpt-6-astra", {"effort": "low"}),
+        ("gpt-5-mini", {"effort": "low"}),
+        ("gpt-6", {"effort": "low"}),
+        ("gpt-4.1-mini", None),
+    ],
+)
 async def test_openai_reasoning_effort_follows_the_model(model, reasoning):
     client = MagicMock()
     client.responses.create = AsyncMock(return_value=SimpleNamespace(output_text="", output=[]))
