@@ -844,6 +844,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         if self._ws_transport and self.previous_response_id:
             asyncio.ensure_future(self._ws_transport.cancel_response(self.previous_response_id))
             self.previous_response_id = None
+            self._in_flight_response_id = None
             self._pending_call_ids = set()
 
     async def close(self):

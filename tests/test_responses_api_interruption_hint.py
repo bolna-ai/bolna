@@ -211,6 +211,7 @@ class TestCancelInFlightResponse:
         import asyncio
 
         llm = _make_llm(previous_response_id="resp_1", _pending_call_ids={"call_ghost"})
+        llm._in_flight_response_id = "resp_1"
         llm.set_interruption_hint("hello th")
         llm._ws_transport = MagicMock()
         llm._ws_transport.cancel_response = AsyncMock()
@@ -227,6 +228,7 @@ class TestCancelInFlightResponse:
 
         llm._ws_transport.cancel_response.assert_awaited_once_with("resp_1")
         assert llm.previous_response_id is None
+        assert llm._in_flight_response_id is None
         assert llm._pending_call_ids == set()
         assert llm._interruption_hint == "hello th"
         assert llm._pending_call_ids == set()
