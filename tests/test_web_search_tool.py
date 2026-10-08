@@ -113,16 +113,17 @@ async def test_openai_side_call_forces_hosted_search():
     client.close.assert_not_awaited()
 
 
-async def test_openai_non_reasoning_model_gets_no_reasoning_effort():
+@pytest.mark.parametrize("model,reasoning", [("gpt-6", {"effort": "low"}), ("gpt-4.1-mini", None)])
+async def test_openai_reasoning_effort_follows_the_model(model, reasoning):
     client = MagicMock()
     client.responses.create = AsyncMock(return_value=SimpleNamespace(output_text="", output=[]))
     with (
         patch(f"{MOD}.AsyncOpenAI", return_value=client),
         patch(f"{MOD}.get_shared_http_client", return_value=MagicMock()),
     ):
-        await run_web_search("q", _cfg(provider="openai", model="gpt-4.1-mini"), fallback_openai_key="sk")
+        await run_web_search("q", _cfg(provider="openai", model=model), fallback_openai_key="sk")
 
-    assert "reasoning" not in client.responses.create.await_args.kwargs
+    assert client.responses.create.await_args.kwargs.get("reasoning") == reasoning
 
 
 async def test_empty_results_say_so():

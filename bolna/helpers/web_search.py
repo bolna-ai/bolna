@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import aiohttp
 from openai import AsyncOpenAI
 
+from bolna.constants import is_reasoning_model
 from bolna.helpers.logger_config import configure_logger
 from bolna.llms.http_client_pool import get_shared_http_client
 
@@ -18,8 +19,6 @@ NO_RESULTS = json.dumps({"status": "success", "message": "The search returned no
 FIRECRAWL_SEARCH_URL = "https://api.firecrawl.dev/v2/search"
 EXA_SEARCH_URL = "https://api.exa.ai/search"
 PARALLEL_SEARCH_URL = "https://api.parallel.ai/v1/search"
-
-OPENAI_REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
 
 PROVIDER_KEY_ENV = {
     "openai": "OPENAI_API_KEY",
@@ -159,7 +158,7 @@ async def _search_openai(query, api_key, cfg, timeout_s) -> list[SearchHit]:
         "tools": [{"type": "web_search", "search_context_size": "low"}],
         "tool_choice": {"type": "web_search"},
     }
-    if cfg.model.startswith(OPENAI_REASONING_MODEL_PREFIXES):
+    if is_reasoning_model(cfg.model):
         request["reasoning"] = {"effort": "low"}
     response = await client.responses.create(**request)
     answer = getattr(response, "output_text", None) or ""
