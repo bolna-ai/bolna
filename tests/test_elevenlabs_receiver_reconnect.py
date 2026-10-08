@@ -326,7 +326,7 @@ async def test_sender_claims_the_socket_for_text_and_flush():
     first = FakeSocket(state=OPEN)
     synth.websocket = first
     synth.context_id = CTX
-    await synth.sender("hello there", sequence_id=4)
+    await synth.sender("hello there. how", sequence_id=4)
     assert synth.current_turn_socket is first
 
     second = FakeSocket(state=OPEN)
