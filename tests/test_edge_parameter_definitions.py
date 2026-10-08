@@ -88,3 +88,8 @@ class TestEdgeParameterValidation:
     def test_rejects_an_empty_allowed_values_list(self):
         with pytest.raises(ValidationError, match="at least one value"):
             GraphEdge(to_node_id="done", parameters={"a": {"allowed_values": []}})
+
+    @pytest.mark.parametrize("name", ["reasoning", "confidence", "recipient_data", "detected_language", "_last_event"])
+    def test_rejects_a_reserved_parameter_name(self, name):
+        with pytest.raises(ValidationError, match=f'"{name}" is a reserved name'):
+            GraphEdge(to_node_id="done", parameters={name: "string"})

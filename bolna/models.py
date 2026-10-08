@@ -577,6 +577,10 @@ class GraphEdgeParameter(BaseModel):
         return self
 
 
+# Names the routing call or the agent's context_data already use: a parameter with one of these
+# names would lose its value or overwrite theirs. Names starting with "_" are internal state.
+RESERVED_EDGE_PARAMETER_NAMES = frozenset({"reasoning", "confidence", "recipient_data", "detected_language"})
+
 # Discriminated so an invalid definition reports its own error, not also "Input should be a valid string".
 GraphEdgeParameterSpec = Annotated[
     Union[Annotated[str, Tag("type")], Annotated[GraphEdgeParameter, Tag("definition")]],
@@ -606,6 +610,14 @@ class GraphEdge(BaseModel):
     # lower = evaluated first within a tier (expression/intent/unconditional); does not rank across tiers.
     # Defaults: expression/unconditional=0, llm=100
     priority: Optional[int] = None
+
+    @field_validator("parameters")
+    @classmethod
+    def validate_parameter_names(cls, parameters):
+        for name in parameters or {}:
+            if name in RESERVED_EDGE_PARAMETER_NAMES or name.startswith("_"):
+                raise ValueError(f'Edge parameter "{name}" is a reserved name; rename it.')
+        return parameters
 
 
 class GraphNodeLlmOverride(BaseModel):
