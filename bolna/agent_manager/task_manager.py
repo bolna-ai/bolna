@@ -2444,19 +2444,6 @@ class TaskManager(BaseManager):
                 latest_response_uid = response_uid
         return latest_response_uid
 
-    def _get_unsent_target_from_pre_marks(self, mark_events_data):
-        latest = None
-        for _, mark_data in mark_events_data:
-            if mark_data.get("type") != "pre_mark_message" or mark_data.get("message_category") == "backchanneling":
-                continue
-            if mark_data.get("turn_id") is None or mark_data.get("response_uid") is None:
-                continue
-            if latest is None or mark_data.get("counter", -1) >= latest.get("counter", -1):
-                latest = mark_data
-        if latest is None or self.mark_event_meta_data.has_sent_audio_for_response(latest["response_uid"]):
-            return None, None
-        return latest["turn_id"], latest["response_uid"]
-
     def _get_latest_assistant_turn_id(self):
         for msg in reversed(self.conversation_history.messages):
             if msg.get("role") == ChatRole.ASSISTANT and msg.get("turn_id") is not None:
@@ -2540,9 +2527,6 @@ class TaskManager(BaseManager):
             # blind fallback.  We must NOT trim a previously-committed message (e.g. a
             # filler) when a *later* interruption has no pending marks at all.
             target_from_evidence = target_turn_id is not None or target_response_uid is not None
-            if not target_from_evidence:
-                target_turn_id, target_response_uid = self._get_unsent_target_from_pre_marks(mark_events_data)
-                target_from_evidence = target_turn_id is not None
             if target_turn_id is None:
                 target_turn_id = getattr(self.tools.get("input"), "last_heard_turn_id", None)
             if target_response_uid is None:
@@ -7896,13 +7880,15 @@ class TaskManager(BaseManager):
 
                     if status == "SEND":
                         # Audio approved - send it
-                        if sequence_id is not None:
-                            self._sent_audio_sequences.add(sequence_id)
-                        self._commit_staged_assistant_history(sequence_id)
                         self.tools["input"].update_is_audio_being_played(True, AudioPlaybackReason.AUDIO_SENT)
                         self.response_in_pipeline = False
                         self._synthesis_awaiting_first_audio = False
                         await self.tools["output"].handle(message)
+                        # A reply sent into a closed socket (caller hung up) never played; keep it out of history.
+                        if not self.tools["output"].is_closed():
+                            if sequence_id is not None:
+                                self._sent_audio_sequences.add(sequence_id)
+                            self._commit_staged_assistant_history(sequence_id)
                         # Track when agent audio first starts flowing for this sequence.
                         # Only fire on real audio bytes — BOS/EOS control packets are strings
                         # and fire before _synthesize() sets tts_start_ms, causing inversion.
