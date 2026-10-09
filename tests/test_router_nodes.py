@@ -821,3 +821,111 @@ class TestFirstDeliveryHold:
 
         mock_llm.assert_called_once()
         assert agent.current_node_id == "C"
+
+
+def _static_extract_agent():
+    """Static question -> extract router (intent edge with parameters) -> check router (expression)."""
+    nodes = [
+        {"id": "start", "prompt": "Start.", "edges": [{"to_node_id": "avail_ask", "condition_type": "unconditional"}]},
+        {
+            "id": "avail_ask",
+            "node_type": "static",
+            "static_message": "Are you available to speak right now?",
+            "edges": [{"to_node_id": "avail_extract", "condition_type": "unconditional"}],
+        },
+        {
+            "id": "avail_extract",
+            "node_type": "router",
+            "edges": [
+                {
+                    "to_node_id": "avail_check",
+                    "condition": "The candidate replied.",
+                    "function_name": "record_availability",
+                    "parameters": {"availability": "string"},
+                },
+                {"to_node_id": "avail_check", "condition_type": "unconditional"},
+            ],
+        },
+        {
+            "id": "avail_check",
+            "node_type": "router",
+            "edges": [
+                {
+                    "to_node_id": "edu_ask",
+                    "condition_type": "expression",
+                    "expression": _expr("availability", "eq", "Yes"),
+                },
+                {"to_node_id": "avail_retry", "condition_type": "unconditional"},
+            ],
+        },
+        {
+            "id": "avail_retry",
+            "node_type": "static",
+            "static_message": "Sorry, are you available now?",
+            "edges": [
+                {
+                    "to_node_id": "edu_ask",
+                    "condition": "The candidate replied.",
+                    "function_name": "record_availability",
+                    "parameters": {"availability": "string"},
+                }
+            ],
+        },
+        {"id": "edu_ask", "node_type": "static", "static_message": "What is your qualification?", "edges": []},
+    ]
+    agent = _make_agent(_base_config(nodes, "start"))
+    agent._advance_to_node("avail_ask", 0)
+    agent.mark_first_response_delivered()
+    return agent
+
+
+def _extraction(to_node, params):
+    return (to_node, params, 300.0, [{"role": "system", "content": "routing"}], [], "replied", 1.0, None)
+
+
+class TestNodeExtractedData:
+    async def test_extract_router_value_drives_check_router_and_is_recorded(self):
+        agent = _static_extract_agent()
+        with patch.object(
+            agent,
+            "_decide_next_node_llm",
+            new_callable=AsyncMock,
+            return_value=_extraction("avail_check", {"availability": "Yes"}),
+        ):
+            await _collect(agent.generate([{"role": "user", "content": "yes, go ahead"}]))
+
+        assert agent.current_node_id == "edu_ask"
+        assert agent.node_extracted_data == {"availability": "Yes"}
+        assert agent.context_data["availability"] == "Yes"
+
+    async def test_later_extraction_overwrites_earlier_value(self):
+        agent = _static_extract_agent()
+        with patch.object(
+            agent,
+            "_decide_next_node_llm",
+            new_callable=AsyncMock,
+            return_value=_extraction("avail_check", {"availability": "N/A"}),
+        ):
+            await _collect(agent.generate([{"role": "user", "content": "why?"}]))
+        assert agent.current_node_id == "avail_retry"
+
+        agent.mark_first_response_delivered()
+        with patch.object(
+            agent,
+            "_decide_next_node_llm",
+            new_callable=AsyncMock,
+            return_value=_extraction("edu_ask", {"availability": "Yes"}),
+        ):
+            await _collect(agent.generate([{"role": "user", "content": "yes"}]))
+
+        assert agent.current_node_id == "edu_ask"
+        assert agent.node_extracted_data == {"availability": "Yes"}
+
+    async def test_routing_without_parameters_records_nothing(self):
+        agent = _static_extract_agent()
+        with patch.object(
+            agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=_extraction("avail_check", {})
+        ):
+            await _collect(agent.generate([{"role": "user", "content": "hmm"}]))
+
+        assert agent.node_extracted_data == {}

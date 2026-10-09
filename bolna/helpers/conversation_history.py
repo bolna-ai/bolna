@@ -385,6 +385,13 @@ class ConversationHistory:
         last = self._messages[-1]
         return last.get("role") == ChatRole.USER and last.get("content", "").strip() == content.strip()
 
+    def repeats_last_user_turn(self, content: str) -> bool:
+        """True when content equals the most recent user turn, even once the agent's reply follows it."""
+        for message in reversed(self._messages):
+            if message.get("role") == ChatRole.USER:
+                return (message.get("content") or "").strip() == content.strip()
+        return False
+
     def __len__(self) -> int:
         return len(self._messages)
 
