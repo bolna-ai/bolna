@@ -4,6 +4,7 @@ never against OpenAI's, and never against a non-public address."""
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT
 
 from bolna.helpers.function_calling_helpers import SSRFError
 from bolna.models import OpenAIConfig, Synthesizer
@@ -98,6 +99,36 @@ class TestEndpointCheck:
         _answer(synth)
         await synth.synthesize("hello")
         check.assert_not_awaited()
+
+
+class TestErrors:
+    """Failures reach the call as clear errors: the task manager logs them to the call's raw logs."""
+
+    async def _reason(self, monkeypatch, message):
+        monkeypatch.setattr(
+            "bolna.synthesizer.openai_synthesizer.validate_outbound_url", AsyncMock(side_effect=SSRFError(message))
+        )
+        synth = _custom_tts()
+        _answer(synth)
+        with pytest.raises(SSRFError) as raised:
+            await synth.synthesize("hello")
+        return str(raised.value)
+
+    async def test_a_blocked_address_is_reported_without_revealing_it(self, monkeypatch):
+        reason = await self._reason(monkeypatch, "Blocked request to non-public address 10.0.0.5 (resolved from h)")
+        assert reason == "Custom TTS endpoint rejected: it resolves to a non-public address"
+
+    async def test_an_unknown_host_is_reported_as_such(self, monkeypatch):
+        reason = await self._reason(monkeypatch, "Could not resolve host 'tts.example.invalid': not known")
+        assert reason == "Custom TTS endpoint rejected: Could not resolve host 'tts.example.invalid': not known"
+
+    def test_a_customer_endpoint_waits_a_bounded_time(self):
+        client = _custom_tts().async_client
+        assert (client.timeout, client.max_retries) == (20, 1)
+
+    def test_the_openai_provider_keeps_the_sdk_defaults(self):
+        client = SUPPORTED_SYNTHESIZER_MODELS["openai"](voice="alloy").async_client
+        assert (client.timeout, client.max_retries) == (DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES)
 
 
 class TestTurnTiming:

@@ -14,6 +14,8 @@ from bolna.helpers.utils import convert_audio_to_wav, resample
 logger = configure_logger(__name__)
 load_dotenv()
 
+_CUSTOM_ENDPOINT_TIMEOUT_SECONDS = 20
+
 
 class OPENAISynthesizer(BaseSynthesizer):
     def __init__(
@@ -40,7 +42,8 @@ class OPENAISynthesizer(BaseSynthesizer):
         self.endpoint = endpoint
         self._endpoint_checked = endpoint is None
         http_client = DefaultAsyncHttpxClient(follow_redirects=False) if endpoint else None
-        self.async_client = AsyncOpenAI(api_key=api_key, base_url=endpoint, http_client=http_client)
+        limits = {"timeout": _CUSTOM_ENDPOINT_TIMEOUT_SECONDS, "max_retries": 1} if endpoint else {}
+        self.async_client = AsyncOpenAI(api_key=api_key, base_url=endpoint, http_client=http_client, **limits)
         self._timed_turn_key = None
         self._timed_turn = None
         self._timed_turn_started = None
@@ -97,7 +100,8 @@ class OPENAISynthesizer(BaseSynthesizer):
             await validate_outbound_url(self.endpoint)
         except SSRFError as e:
             logger.warning(f"Blocked custom TTS endpoint: {e}")
-            raise SSRFError("Blocked outbound request to a non-public TTS endpoint") from None
+            reason = "it resolves to a non-public address" if "address" in str(e) else str(e)
+            raise SSRFError(f"Custom TTS endpoint rejected: {reason}") from None
         self._endpoint_checked = True
 
     async def _generate_http(self, text):
