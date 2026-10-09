@@ -98,3 +98,68 @@ class TestEndpointCheck:
         _answer(synth)
         await synth.synthesize("hello")
         check.assert_not_awaited()
+
+
+class TestTurnTiming:
+    """Each turn leaves the timing record the call timeline turns into tts_start, tts_first_audio and tts_end,
+    in the same shape and with the same lifecycle as the streaming providers."""
+
+    META = {"sequence_id": 1, "turn_id": "t1", "tts_start_ms": 1000, "message_category": None}
+
+    @staticmethod
+    def _chunk(synth, meta, characters, started, finished):
+        synth._begin_turn_timing(meta, started)
+        synth._finish_chunk_timing(meta, characters, started, finished)
+
+    def test_chunks_of_one_turn_make_one_record(self):
+        synth = _custom_tts()
+        self._chunk(synth, self.META, 10, started=0.0, finished=0.2)
+        self._chunk(synth, {**self.META, "end_of_llm_stream": True}, 5, started=0.3, finished=0.5)
+        assert synth.turn_latencies == [
+            {
+                "turn_id": "t1",
+                "sequence_id": 1,
+                "tts_start_ms": 1000,
+                "message_category": None,
+                "first_result_latency_ms": 200,
+                "characters": 15,
+                "total_stream_duration_ms": 500,
+            }
+        ]
+
+    def test_the_start_is_recorded_before_any_audio(self):
+        synth = _custom_tts()
+        synth._begin_turn_timing(self.META, 0.0)
+        assert synth.turn_latencies == [
+            {"turn_id": "t1", "sequence_id": 1, "tts_start_ms": 1000, "message_category": None}
+        ]
+
+    def test_a_new_turn_starts_a_new_record(self):
+        synth = _custom_tts()
+        self._chunk(synth, {**self.META, "end_of_llm_stream": True}, 10, started=0.0, finished=0.2)
+        self._chunk(synth, {**self.META, "sequence_id": 2, "tts_start_ms": 5000}, 7, started=1.0, finished=1.1)
+        assert [(t["sequence_id"], t["tts_start_ms"], t["characters"]) for t in synth.turn_latencies] == [
+            (1, 1000, 10),
+            (2, 5000, 7),
+        ]
+
+    def test_a_repeat_of_the_same_canned_message_replaces_rather_than_merges(self):
+        synth = _custom_tts()
+        canned = {"sequence_id": -1, "message_category": "goodbye", "end_of_llm_stream": True}
+        self._chunk(synth, {**canned, "tts_start_ms": 100}, 10, started=0.0, finished=0.2)
+        self._chunk(synth, {**canned, "tts_start_ms": 900}, 4, started=1.0, finished=1.3)
+        (record,) = synth.turn_latencies
+        assert (record["tts_start_ms"], record["characters"], record["total_stream_duration_ms"]) == (900, 4, 300)
+
+    async def test_a_rendered_turn_is_recorded(self, monkeypatch):
+        monkeypatch.setattr("bolna.synthesizer.openai_synthesizer.validate_outbound_url", AsyncMock())
+        task_manager = MagicMock()
+        task_manager.is_sequence_id_in_current_ids.return_value = True
+        synth = _custom_tts(task_manager_instance=task_manager)
+        _answer(synth)
+        monkeypatch.setattr(synth, "_process_http_audio", lambda audio: audio)
+        await synth.push({"data": "hello there", "meta_info": {**self.META, "end_of_llm_stream": True}})
+        await synth.generate().__anext__()
+        (record,) = synth.turn_latencies
+        assert (record["sequence_id"], record["tts_start_ms"], record["characters"]) == (1, 1000, len("hello there"))
+        assert record["first_result_latency_ms"] >= 0 and record["total_stream_duration_ms"] >= 0
