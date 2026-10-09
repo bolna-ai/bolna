@@ -254,8 +254,6 @@ class SmallestConfig(StandardVoiceConfig):
 class SarvamConfig(StandardVoiceConfig):
     speed: Optional[float] = Field(default=1.0, ge=0.3, le=3.0)
     loudness: Optional[float] = Field(default=1.0, ge=SARVAM_LOUDNESS_MIN, le=SARVAM_LOUDNESS_MAX)
-    # Sent on bulbul:v3 only; Sarvam ignores it on other models.
-    dict_id: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_model_controls(self):

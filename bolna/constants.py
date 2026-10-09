@@ -457,7 +457,6 @@ TTS_AUDIO_SETTINGS = {
 ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES = 3
 # Cartesia honours pronunciation_dict_id on sonic-3 and newer, dated snapshots included.
 CARTESIA_PRONUNCIATION_DICT_MODEL_PREFIXES = ("sonic-3", "sonic-preview", "sonic-latest")
-SARVAM_PRONUNCIATION_DICT_MODELS = {"bulbul:v3"}
 # Limits for a synthesizer's word -> say-as pronunciation rules.
 PRONUNCIATION_RULES_MAX = 100
 PRONUNCIATION_RULE_WORD_MAX_LENGTH = 50

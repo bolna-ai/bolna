@@ -29,7 +29,6 @@ from bolna.constants import (
     CONTENT_POLICY_ERROR_MARKERS,
     PREPROCESS_DIR,
     PRE_FUNCTION_CALL_MESSAGE,
-    SARVAM_PRONUNCIATION_DICT_MODELS,
     TRANSFERING_CALL_FILLER,
     END_CALL_FUNCTION_PREFIX,
 )
@@ -414,10 +413,6 @@ def cartesia_supports_pronunciation_dict(model):
     return (model or "").startswith(CARTESIA_PRONUNCIATION_DICT_MODEL_PREFIXES)
 
 
-def sarvam_supports_pronunciation_dict(model):
-    return model in SARVAM_PRONUNCIATION_DICT_MODELS
-
-
 def pronunciation_rules_digest(rules):
     """Stable digest of a synthesizer's pronunciation rules; empty when there are none."""
     pairs = []
@@ -448,8 +443,6 @@ def pronunciation_dictionary_key(provider, provider_config, pronunciation_rules=
         )
     elif provider == SynthesizerProvider.CARTESIA.value and cartesia_supports_pronunciation_dict(config.get("model")):
         key = config.get("pronunciation_dict_id") or ""
-    elif provider == SynthesizerProvider.SARVAM.value and sarvam_supports_pronunciation_dict(config.get("model")):
-        key = config.get("dict_id") or ""
     # A dictionary edited in place keeps its ID, so the rules join the key to stop old clips matching.
     digest = pronunciation_rules_digest(pronunciation_rules) if key else ""
     if on_platform_key and digest:

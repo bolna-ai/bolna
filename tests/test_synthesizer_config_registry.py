@@ -56,7 +56,6 @@ EXPECTED_FIELDS = {
         "language": True,
         "speed": False,
         "loudness": False,
-        "dict_id": False,
     },
     "rime": {
         "voice": True,

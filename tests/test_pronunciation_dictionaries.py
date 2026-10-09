@@ -1,5 +1,5 @@
 """Provider pronunciation dictionaries reach every message that needs them, and only on models
-that honour them: ElevenLabs locators, Cartesia pronunciation_dict_id, Sarvam dict_id. No network."""
+that honour them: ElevenLabs locators and Cartesia pronunciation_dict_id. No network."""
 
 import json
 from unittest.mock import MagicMock
@@ -17,10 +17,9 @@ from pydantic import ValidationError
 
 from bolna.models import ElevenLabsConfig, Synthesizer
 from bolna.providers import elevenlabs_synthesizer as build_elevenlabs_synthesizer
-from bolna.synthesizer import cartesia_synthesizer, elevenlabs_synthesizer, sarvam_synthesizer
+from bolna.synthesizer import cartesia_synthesizer, elevenlabs_synthesizer
 from bolna.synthesizer.cartesia_synthesizer import CartesiaSynthesizer
 from bolna.synthesizer.elevenlabs_synthesizer import ElevenlabsV3Synthesizer
-from bolna.synthesizer.sarvam_synthesizer import SarvamSynthesizer
 
 LOCATOR = {"pronunciation_dictionary_id": "dict-1", "version_id": "ver-1"}
 
@@ -78,7 +77,7 @@ class _FakeSession:
 @pytest.fixture
 def posted_bodies(monkeypatch):
     bodies = []
-    for module in (elevenlabs_synthesizer, cartesia_synthesizer, sarvam_synthesizer):
+    for module in (elevenlabs_synthesizer, cartesia_synthesizer):
         monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _FakeSession(bodies))
     return bodies
 
@@ -114,17 +113,6 @@ def _cartesia(model="sonic-3", **kwargs):
         voice_id="voice-id",
         model=model,
         language="en",
-        synthesizer_key="test-key",
-        task_manager_instance=MagicMock(),
-        **kwargs,
-    )
-
-
-def _sarvam(model="bulbul:v3", **kwargs):
-    return SarvamSynthesizer(
-        voice_id="shubh",
-        model=model,
-        language="hi-IN",
         synthesizer_key="test-key",
         task_manager_instance=MagicMock(),
         **kwargs,
@@ -175,7 +163,6 @@ def test_elevenlabs_dictionaries_need_both_ids(locator):
             "pronunciation_dict_id",
             "pdict_1",
         ),
-        ("sarvam", {"voice": "S", "voice_id": "v", "model": "bulbul:v3", "language": "hi-IN"}, "dict_id", "p_1"),
     ],
 )
 def test_dictionary_fields_survive_agent_validation(provider, provider_config, field, value):
@@ -296,34 +283,6 @@ async def test_cartesia_older_models_do_not_receive_the_dictionary(posted_bodies
 
 
 # ---------------------------------------------------------------------------
-# Sarvam
-# ---------------------------------------------------------------------------
-
-
-async def test_sarvam_v3_sends_dict_id_on_socket_and_http(posted_bodies):
-    synth = _sarvam(dict_id="p_1")
-    assert synth._config_message()["data"]["dict_id"] == "p_1"
-    await synth.synthesize("NAIC policy")
-    assert posted_bodies[0]["dict_id"] == "p_1"
-
-
-async def test_sarvam_language_switch_keeps_the_dictionary():
-    synth = _sarvam(dict_id="p_1")
-    synth.websocket = FakeWS()
-    await synth.set_target_language("en-IN")
-    config = synth.websocket.sent[-1]["data"]
-    assert config["target_language_code"] == "en-IN"
-    assert config["dict_id"] == "p_1"
-
-
-async def test_sarvam_v2_does_not_receive_dict_id(posted_bodies):
-    synth = _sarvam("bulbul:v2", dict_id="p_1")
-    assert "dict_id" not in synth._config_message()["data"]
-    await synth.synthesize("hello")
-    assert "dict_id" not in posted_bodies[0]
-
-
-# ---------------------------------------------------------------------------
 # cache keys
 # ---------------------------------------------------------------------------
 
@@ -338,8 +297,7 @@ async def test_sarvam_v2_does_not_receive_dict_id(posted_bodies):
         ),
         ("cartesia", {"model": "sonic-3.5", "pronunciation_dict_id": "pdict_1"}, "pdict_1"),
         ("cartesia", {"model": "sonic-english", "pronunciation_dict_id": "pdict_1"}, ""),
-        ("sarvam", {"model": "bulbul:v3", "dict_id": "p_1"}, "p_1"),
-        ("sarvam", {"model": "bulbul:v2", "dict_id": "p_1"}, ""),
+        ("sarvam", {"model": "bulbul:v3", "dict_id": "p_1"}, ""),
         ("deepgram", {"model": "aura-2"}, ""),
         ("elevenlabs", None, ""),
     ],

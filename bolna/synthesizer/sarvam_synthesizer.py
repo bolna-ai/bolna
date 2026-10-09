@@ -13,13 +13,7 @@ from websockets.exceptions import InvalidHandshake
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
-from bolna.helpers.utils import (
-    create_ws_data_packet,
-    get_synth_audio_format,
-    resample,
-    sarvam_supports_pronunciation_dict,
-    wav_bytes_to_pcm,
-)
+from bolna.helpers.utils import create_ws_data_packet, get_synth_audio_format, resample, wav_bytes_to_pcm
 from bolna.constants import (
     SARVAM_LOUDNESS_MAX,
     SARVAM_LOUDNESS_MIN,
@@ -43,7 +37,6 @@ class SarvamSynthesizer(StreamSynthesizer):
         speed=1.0,
         loudness=1.0,
         synthesizer_key=None,
-        dict_id=None,
         **kwargs,
     ):
         super().__init__(
@@ -72,12 +65,6 @@ class SarvamSynthesizer(StreamSynthesizer):
         self.pitch = 0.0
         self.pace = speed
         self.enable_preprocessing = True
-        self.dict_id = None
-        if dict_id:
-            if sarvam_supports_pronunciation_dict(model):
-                self.dict_id = dict_id
-            else:
-                logger.warning(f"Sarvam model {model} does not support pronunciation dictionaries; not sending one")
 
     def get_sleep_time(self):
         return 0.01
@@ -244,9 +231,6 @@ class SarvamSynthesizer(StreamSynthesizer):
         }
         if self.model == "bulbul:v2":
             data.update({"pitch": self.pitch, "loudness": self.loudness})
-        # Also re-sent on a language switch, so the dictionary survives it.
-        if self.dict_id:
-            data["dict_id"] = self.dict_id
         return {"type": "config", "data": data}
 
     async def set_target_language(self, language):
@@ -330,8 +314,6 @@ class SarvamSynthesizer(StreamSynthesizer):
         if self.model == "bulbul:v3":
             payload.pop("pitch")
             payload.pop("loudness")
-        if self.dict_id:
-            payload["dict_id"] = self.dict_id
         return payload
 
     async def _generate_http(self, text):
