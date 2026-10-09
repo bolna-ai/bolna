@@ -676,7 +676,13 @@ class OpenAICompatibleLLM(BaseLLM):
                     func_call_names[item.id] = func_name
                     func_call_ids[item.id] = item.call_id
 
-                    if not gave_pre_call_msg and not received_textual and self.trigger_function_call:
+                    # An unconfigured tool is dropped later, so a filler would promise a reply that never comes.
+                    if (
+                        not gave_pre_call_msg
+                        and not received_textual
+                        and self.trigger_function_call
+                        and func_name in self.api_params
+                    ):
                         gave_pre_call_msg = True
                         func_params = self.api_params.get(func_name)
                         api_tool_pre_call_message = (

@@ -321,6 +321,39 @@ class TestResponsesAPIStreaming:
         assert len(pre_call_chunks) == 1
         assert pre_call_chunks[0].function_name == "book_slot"
 
+    async def test_no_pre_call_message_for_an_unconfigured_tool(self):
+        """The call is dropped without running, so a filler would promise a reply that never comes."""
+        llm = _make_llm(
+            use_responses_api=True,
+            trigger_function_call=True,
+            api_params={"book_slot": {"url": "https://api.example.com/book", "method": "POST"}},
+            tools=[{"type": "function", "function": {"name": "book_slot", "parameters": {"type": "object"}}}],
+        )
+
+        fc_item = MagicMock()
+        fc_item.type = "function_call"
+        fc_item.id = "fc_3"
+        fc_item.name = "send_custom_template"
+        fc_item.call_id = "call_unknown"
+
+        events = [
+            _FakeStreamEvent("response.created", response=_FakeResponse("resp_unknown")),
+            _FakeStreamEvent("response.output_item.added", item=fc_item),
+            _FakeStreamEvent("response.function_call_arguments.delta", delta="{}", item_id="fc_3"),
+            _FakeStreamEvent("response.completed", response=_FakeResponse("resp_unknown")),
+        ]
+        llm.async_client.responses.create = AsyncMock(return_value=_async_iter(events))
+
+        chunks = [
+            chunk
+            async for chunk in llm.generate_stream(
+                [{"role": "user", "content": "Send it on WhatsApp"}], synthesize=True, meta_info=_make_meta_info()
+            )
+        ]
+
+        assert [c for c in chunks if c.function_name is not None] == []
+        assert not any(c.is_function_call for c in chunks)
+
 
 # --- Responses API Non-Streaming Tests ---
 

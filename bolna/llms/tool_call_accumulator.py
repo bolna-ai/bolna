@@ -52,6 +52,9 @@ class ToolCallAccumulator:
             return None
         if self.called_fun.startswith(END_CALL_FUNCTION_PREFIX):
             return None
+        # An unconfigured tool is dropped in build_api_payload, so a filler would promise a reply that never comes.
+        if self.called_fun not in self.api_params:
+            return None
         self._gave_pre_call_msg = True
         api_tool_pre_call_message = self.api_params.get(self.called_fun, {}).get("pre_call_message", None)
         detected_lang = meta_info.get("detected_language") if meta_info else None
