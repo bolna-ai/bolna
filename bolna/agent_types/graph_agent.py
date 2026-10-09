@@ -21,7 +21,7 @@ from bolna.helpers.utils import (
     select_message_by_language,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
-from bolna.enums import EdgeConditionType, LLMProvider, NodeType, ToolScope
+from bolna.enums import ChatRole, EdgeConditionType, LLMProvider, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -1492,7 +1492,11 @@ class GraphAgent(BaseAgent):
                 logger.error(f"RAG error for node {self.current_node_id}: {e}")
 
         max_history = 50
-        history_subset = history[-max_history:] if len(history) > max_history else history
+        start = max(0, len(history) - max_history)
+        # a window opening on a tool result orphans it from its assistant tool_calls, which the LLM API rejects
+        while start > 0 and history[start].get("role") == ChatRole.TOOL:
+            start -= 1
+        history_subset = history[start:]
 
         # Pass conversation history as-is to preserve tool_calls/tool_call_id fields
         conversation = [msg for msg in history_subset if msg.get("role") != "system"]
