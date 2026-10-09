@@ -43,6 +43,9 @@ def _telephony_task_manager(last_transmitted_timestamp, *, hang_conversation_aft
     tm.response_in_pipeline = False
     tm._synthesis_awaiting_first_audio = False
     tm.repeat_after_silence_seconds = 0
+    tm.max_silence_repeats = 2
+    tm._silence_repeats_sent = 0
+    tm._silence_period_started_at = 0
     tm.trigger_user_online_message_after = 6
     tm.asked_if_user_is_still_there = False
     tm.tools = {"input": SimpleNamespace(is_audio_being_played_to_user=lambda: False)}

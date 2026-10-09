@@ -87,6 +87,10 @@ REDELIVERED_TRANSCRIPT_WINDOW_MS = 2000
 # made no forward progress at all, e.g. a hung LLM call or an s2s tool task that never
 # completes. BOLNA-2563.
 STALL_HANGUP_HARD_CAP_S = 60.0
+# [silence] re-prompts allowed per silence period (reset when the user speaks). Each re-prompt
+# counts as agent speech and restarts the silence clock, so without a cap a node re-prompt shorter
+# than hangup_after_silence keeps a silent caller on the line until the max call duration.
+DEFAULT_MAX_SILENCE_REPEATS = 2
 # Max time to wait for one LLM reply (_run_llm_task). If the LLM never comes back - no reply,
 # no error, it just hangs - force it to fail after this many seconds and hang up, instead of
 # leaving the call stuck forever. BOLNA-2563.
