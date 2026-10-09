@@ -112,6 +112,14 @@ def test_end_call_gets_no_filler():
     assert acc.get_pre_call_message({}) is None
 
 
+def test_an_unconfigured_tool_gets_no_filler():
+    """The call is dropped without running, so a filler would promise a reply that never comes."""
+    acc = _accumulator()
+    acc.process_delta([_delta(0, "send_custom_template", "{}", call_id="c")])
+    assert acc.get_pre_call_message({}) is None
+    assert acc.build_api_payload({}, {}, "") is None
+
+
 def test_switching_language_is_silent():
     acc = _accumulator()
     acc.process_delta([_delta(0, "switch_language", "{}", call_id="c")])
