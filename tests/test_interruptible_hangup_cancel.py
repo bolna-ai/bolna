@@ -182,6 +182,7 @@ def _cleanup_target():
     tm._synthesis_awaiting_first_audio = True
     tm.output_task = None
     tm.eager_llm_task = None
+    tm.eager_gate_task = None
     tm.first_message_task = None
     tm.synthesizer_tasks = []
     tm.started_transmitting_audio = True

@@ -88,6 +88,7 @@ from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, Tr
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
 from bolna.helpers.language_switcher import LanguageSwitcher
+from bolna.helpers.speculation_gate import SpeculationGate
 from bolna.transcriber.transcriber_pool import TranscriberPool
 from bolna.synthesizer.synthesizer_pool import SynthesizerPool
 from bolna.helpers.utils import (
@@ -582,6 +583,9 @@ class TaskManager(BaseManager):
         self.eager_llm_task = None
         self.eager_history_snapshot = None
         self.eager_meta_info = None
+        # Jev veto on the eager speculation (task_config.speculation_gate); None when not configured.
+        self.speculation_gate = None
+        self.eager_gate_task = None
         self.llm_queue_task = None
         self.chat_watchdog_task = None
         self._chat_turn_in_flight = False
@@ -899,6 +903,12 @@ class TaskManager(BaseManager):
                     and self.tools["output"].requires_custom_voicemail_detection()
                 )
                 self.voicemail_handler = VoicemailHandler(self, self.conversation_config, output_tool_available)
+
+                speculation_gate_config = self.conversation_config.get("speculation_gate")
+                if speculation_gate_config:
+                    self.speculation_gate = SpeculationGate(
+                        speculation_gate_config, provider_api_keys=self.provider_api_keys, run_id=self.run_id
+                    )
 
                 self.time_since_last_spoken_human_word = 0
 
@@ -2782,6 +2792,7 @@ class TaskManager(BaseManager):
             self.llm_task.cancel()
             self.llm_task = None
 
+        self._cancel_eager_gate()
         if self.eager_llm_task is not None:
             logger.info(f"Cancelling Eager LLM Task")
             self.eager_llm_task.cancel()
@@ -5598,6 +5609,39 @@ class TaskManager(BaseManager):
             return
         await set_language(detected)
 
+    def _cancel_eager_gate(self):
+        if self.eager_gate_task is not None:
+            self.eager_gate_task.cancel()
+            self.eager_gate_task = None
+
+    async def _veto_eager_speculation(self, eager_task, transcript, history):
+        """Drop the eager speculation when Jev judges the caller mid-sentence, as TurnResumed would.
+
+        The final EndOfTurn then takes the normal path and answers the whole turn. A verdict that
+        arrives after EndOfTurn adopted the speculation, or after TurnResumed dropped it, is ignored.
+        """
+        verdict = await self.speculation_gate.evaluate(transcript, history)
+        logger.info(
+            "SpeculationGate: allow=%s failed=%s latency_ms=%s error=%s answers=%s",
+            verdict.allow,
+            verdict.failed,
+            verdict.latency_ms,
+            verdict.error,
+            verdict.answers,
+        )
+        if self.eager_gate_task is asyncio.current_task():
+            self.eager_gate_task = None
+        if verdict.allow or self.eager_llm_task is not eager_task:
+            return
+        logger.info(f"SpeculationGate: Jev vetoed the speculative reply to {safe_log_text(transcript)!r}")
+        eager_task.cancel()
+        self.eager_llm_task = None
+        self.eager_meta_info = None
+        snapshot = self.eager_history_snapshot
+        if snapshot is not None and len(self.history) > snapshot:
+            self.history = self.history[:snapshot]
+        self.eager_history_snapshot = None
+
     async def _listen_transcriber(self):
         temp_transcriber_message = ""
         try:
@@ -5802,6 +5846,15 @@ class TaskManager(BaseManager):
                             self.eager_llm_task = asyncio.create_task(
                                 self._run_llm_task(create_ws_data_packet(eager_transcript, meta_info))
                             )
+                            # Runs beside the speculation, never ahead of it: Jev can only drop it early.
+                            if self.speculation_gate is not None and self.speculation_gate.enabled:
+                                if self.eager_gate_task is not None:
+                                    self.eager_gate_task.cancel()
+                                self.eager_gate_task = asyncio.create_task(
+                                    self._veto_eager_speculation(
+                                        self.eager_llm_task, eager_transcript, list(self.history)
+                                    )
+                                )
                             # Committed user row when EndOfTurn(was_eager) skips _handle_transcriber_output.
                             # meta_info["asr_turn_id"] is stale until EndOfTurn, so read the live id.
                             self.user_spoke = True
@@ -5815,6 +5868,7 @@ class TaskManager(BaseManager):
 
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "turn_resumed":
                         logger.info(f"TurnResumed: Cancelling speculative LLM task")
+                        self._cancel_eager_gate()
 
                         if self.eager_llm_task is not None:
                             self.eager_llm_task.cancel()
@@ -5890,6 +5944,9 @@ class TaskManager(BaseManager):
                             None,
                             "_cb_transcriber_connect_reported",
                         )
+
+                        # The turn has ended: a verdict on whether it would end is moot from here.
+                        self._cancel_eager_gate()
 
                         if was_eager and self.eager_llm_task is not None and self.regen_settle_armed():
                             # A regen is owed the merged turn, so drop the eager reply built without it.
