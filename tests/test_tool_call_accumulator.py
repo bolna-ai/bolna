@@ -84,6 +84,16 @@ def test_a_function_outside_api_params_yields_no_payload():
     assert acc.build_api_payload({}, {}, "") is None
 
 
+def test_a_dropped_call_to_an_unknown_function_is_recorded_as_a_non_fatal_error():
+    acc = _accumulator()
+    acc.process_delta([_delta(0, "custom_task_definitely_not_configured", "{}", call_id="c")])
+    meta_info = {"_non_fatal_errors": []}
+    acc.build_api_payload({}, meta_info, "")
+    assert meta_info["_non_fatal_errors"] == [
+        {"error_type": "unresolved_tool_call", "error": "custom_task_definitely_not_configured", "model": "gpt-4o"}
+    ]
+
+
 def test_no_tool_call_yields_no_payload():
     assert _accumulator().build_api_payload({}, {}, "") is None
 
