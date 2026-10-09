@@ -1112,7 +1112,7 @@ def get_date_time_from_timezone(timezone):
 
 
 def select_message_by_language(message_config: Union[str, dict], detected_language: Optional[str] = None) -> str:
-    """Select message by detected language, fallback to 'en'."""
+    """Select message by detected language, fallback to 'en', then to the first language in sorted order."""
     if isinstance(message_config, str):
         return message_config
 
@@ -1125,7 +1125,9 @@ def select_message_by_language(message_config: Union[str, dict], detected_langua
         if en_value and en_value.strip():
             return en_value
 
-        return next((v for v in message_config.values() if v and v.strip()), "")
+        # Sorted so a saved config and the same config read back from storage pick the same text.
+        fallbacks = (message_config[language] for language in sorted(message_config))
+        return next((v for v in fallbacks if v and v.strip()), "")
     return ""
 
 
