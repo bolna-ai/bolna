@@ -659,6 +659,9 @@ class TestUserOnlinePrompt:
         tm.trigger_user_online_message_after = 10
         tm.hang_conversation_after = 0
         tm.repeat_after_silence_seconds = 0
+        tm.max_silence_repeats = 2
+        tm._silence_repeats_sent = 0
+        tm._silence_period_started_at = 0
         tm.asked_if_user_is_still_there = False
         tm.hangup_triggered = False
         tm.response_in_pipeline = False
