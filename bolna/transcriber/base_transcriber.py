@@ -51,10 +51,6 @@ class BaseTranscriber:
         """Point at the agent's latest spoken reply, for providers that bias the caller's next turn with it."""
         self.agent_context_source = source
 
-    def set_agent_context_source(self, source: Callable[[], str | None]) -> None:
-        """Point at the agent's latest spoken reply, for providers that bias the caller's next turn with it."""
-        self.agent_context_source = source
-
     def reset_audio_frame_state(self) -> None:
         """Restart the audio position -> send-time map; ASR stream positions restart per connection."""
         self.audio_cursor_s = 0.0
