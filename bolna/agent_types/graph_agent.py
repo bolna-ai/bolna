@@ -464,10 +464,11 @@ class GraphAgent(BaseAgent):
             for key in ("llm_key", "base_url", "api_version", "extra_body"):
                 if self.config.get(key):
                     base_kwargs[key] = self.config[key]
-        if self.service_tier:
-            base_kwargs["service_tier"] = self.service_tier
-        if self.config.get("overflow_llm"):
-            base_kwargs["overflow_llm"] = self.config["overflow_llm"]
+            # Tier and overflow belong to the conversation's backend, so only routing riding it takes them.
+            if self.service_tier:
+                base_kwargs["service_tier"] = self.service_tier
+            if self.config.get("overflow_llm"):
+                base_kwargs["overflow_llm"] = self.config["overflow_llm"]
         self._routing_base_kwargs = base_kwargs
         self._routing_llm_cache: Dict[Tuple[Optional[str], Optional[str]], Any] = {}
         self._routing_llm_cache_max_size = 100

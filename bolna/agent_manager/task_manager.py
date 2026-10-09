@@ -4052,10 +4052,10 @@ class TaskManager(BaseManager):
                 if usage.get(key) is not None:
                     entry[key] = usage[key]
 
-            # Routing on azure shares the conversation LLM's pool, so its tokens meter against it.
+            # Only routing that followed the conversation onto its pool draws on that pool's capacity.
             overflowed = (routing_info.get("routing_usage") or {}).get("overflowed")
             cb = self.on_overflow if overflowed else self.on_turn_usage
-            if cb and routing_info.get("routing_provider") == "azure" and usage.get("input_tokens"):
+            if cb and self.kwargs.get("route_routing_to_conversation") and usage.get("input_tokens"):
                 await cb(usage.get("input_tokens"), usage.get("output_tokens"), usage.get("cached_tokens"))
         except Exception as e:
             # Observability only; it must never surface into the call or the teardown gather.
@@ -4244,12 +4244,12 @@ class TaskManager(BaseManager):
                             self._routing_tail_tasks.add(_tail_task)
                             _tail_task.add_done_callback(self._routing_tail_tasks.discard)
 
-                    # on_turn_usage meters the conversation LLM's backend; routing on azure means the routing
-                    # hop shares that backend, so its tokens draw on the same capacity.
+                    # on_turn_usage meters the conversation LLM's backend; only routing that followed the
+                    # conversation onto it draws on the same capacity.
                     _routing_cb = self.on_overflow if routing_usage.get("overflowed") else self.on_turn_usage
                     if (
                         _routing_cb
-                        and routing_info.get("routing_provider") == "azure"
+                        and self.kwargs.get("route_routing_to_conversation")
                         and routing_usage.get("input_tokens")
                     ):
                         _routing_task = asyncio.create_task(
