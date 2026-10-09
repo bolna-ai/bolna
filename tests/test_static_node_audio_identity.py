@@ -9,7 +9,7 @@ import pytest
 import bolna.agent_manager.task_manager as tmmod
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.constants import WEBCALL_TTS_SAMPLE_RATE
-from bolna.helpers.utils import static_node_audio_key
+from bolna.helpers.utils import select_message_by_language, static_node_audio_key
 from bolna.models import tts_audio_identity
 
 EN = {
@@ -75,6 +75,13 @@ async def _looked_up_key(monkeypatch, tm, **meta_info):
     await TaskManager._TaskManager__send_preprocessed_audio.__get__(tm, TaskManager)(meta_info, "unused")
     assert len(keys) == 1
     return keys[0]
+
+
+def test_a_language_without_its_own_text_falls_back_to_the_same_text_whatever_the_key_order():
+    saved = {"ta": "Nandri.", "hi": "Dhanyavaad."}
+    read_back = dict(reversed(saved.items()))
+
+    assert select_message_by_language(saved, "kn") == select_message_by_language(read_back, "kn")
 
 
 @pytest.mark.asyncio
