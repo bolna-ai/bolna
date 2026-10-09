@@ -30,6 +30,7 @@ ELEVENLABS_REALTIME_MAX_KEYTERMS = 50
 # Past these the engine rejects the session rather than truncating.
 ASSEMBLYAI_MAX_KEYTERMS = 100
 ASSEMBLYAI_MAX_PROMPT_CHARACTERS = 1750
+ASSEMBLYAI_MAX_AGENT_CONTEXT_CHARACTERS = 1750
 SMALLEST_MAX_KEYWORDS = 100
 
 SARVAM_MAX_KEYTERMS = 50
@@ -80,6 +81,8 @@ DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD = 0.5  # confidence to trigger speculative LLM
 DEEPGRAM_FLUX_EOT_TIMEOUT_MS = 500  # max silence before forcing end-of-turn
 # Min time a Flux turn may stay open with no transcriber events before it is force-closed.
 DEEPGRAM_FLUX_TURN_STALL_FLOOR_S = 3.0
+# Deepgram re-sends a just-finalized sentence ~1s after the final; a word-for-word repeat later than this is real speech
+REDELIVERED_TRANSCRIPT_WINDOW_MS = 2000
 # Past this much silence (no audio playing, both sides silent), force a hangup - the call has
 # made no forward progress at all, e.g. a hung LLM call or an s2s tool task that never
 # completes. BOLNA-2563.
@@ -343,6 +346,7 @@ UNCOMPRESSED_AUDIO_FORMATS = ("pcm", "wav", "mulaw", "ulaw")
 AUDIO_STREAM_END_SENTINELS = (b"\x00", b"\x00\x00")
 
 END_CALL_FUNCTION_PREFIX = "end_call"
+WEB_SEARCH_FUNCTION_NAME = "web_search"
 
 END_CALL_TOOL_DEFINITION = {
     "type": "function",
@@ -358,6 +362,30 @@ END_CALL_TOOL_DEFINITION = {
                 }
             },
             "required": ["reason"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+}
+
+WEB_SEARCH_TOOL_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": WEB_SEARCH_FUNCTION_NAME,
+        "description": (
+            "Look up current public information on the web. Use this for news, prices, scores, "
+            "and facts that may have changed after your knowledge cutoff. Answer the caller in "
+            "one or two spoken sentences."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "A short search query for the fact the caller asked about.",
+                }
+            },
+            "required": ["query"],
             "additionalProperties": False,
         },
         "strict": True,

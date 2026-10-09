@@ -1,7 +1,7 @@
 import json
 import annotated_types
-from typing import Any, Literal, Optional, List, Union, Dict, Callable
-from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
+from typing import Annotated, Any, Literal, Optional, List, Union, Dict, Callable
+from pydantic import BaseModel, Discriminator, Field, Tag, field_validator, ValidationError, Json, model_validator
 from pydantic_core import PydanticCustomError
 from .providers import *
 from .enums import (
@@ -300,6 +300,24 @@ SYNTHESIZER_CONFIG_MODELS = {
 }
 
 
+class AssemblyAITranscriberConfig(BaseModel):
+    """AssemblyAI streaming session parameters; an unset field keeps AssemblyAI's default."""
+
+    mode: Optional[Literal["min_latency", "balanced", "max_accuracy"]] = None
+    min_turn_silence: Optional[int] = Field(default=None, ge=0)
+    max_turn_silence: Optional[int] = Field(default=None, ge=0)
+    interruption_delay: Optional[int] = Field(default=None, ge=0, le=1000)
+    vad_threshold: Optional[float] = Field(default=None, ge=0, le=1)
+    voice_focus: Optional[Literal["near-field", "far-field"]] = None
+    voice_focus_threshold: Optional[float] = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_voice_focus_threshold(self):
+        if self.voice_focus_threshold is not None and self.voice_focus is None:
+            raise ValueError("voice_focus_threshold requires voice_focus")
+        return self
+
+
 class Transcriber(BaseModel):
     model: Optional[str] = "nova-2"
     language: Optional[str] = None
@@ -329,6 +347,7 @@ class Transcriber(BaseModel):
     noise_reduction: Optional[bool] = False
     vad_threshold: Optional[float] = 0.5
     vad_prefix_padding_ms: Optional[int] = 300
+    assemblyai_config: Optional[AssemblyAITranscriberConfig] = None
 
     @field_validator("provider")
     def validate_model(cls, value):
@@ -540,6 +559,35 @@ class CallEvent(BaseModel):
     timestamp: Optional[float] = None
 
 
+class GraphEdgeParameter(BaseModel):
+    """A value an edge collects. description and allowed_values are what the routing model sees on the key."""
+
+    type: str = "string"
+    description: Optional[str] = None
+    allowed_values: Optional[List[str]] = None
+
+    @model_validator(mode="after")
+    def validate_allowed_values(self):
+        if self.allowed_values is None:
+            return self
+        if self.type != "string":
+            raise ValueError("allowed_values is only supported on string parameters")
+        if not self.allowed_values:
+            raise ValueError("allowed_values must list at least one value")
+        return self
+
+
+# Names the routing call or the agent's context_data already use: a parameter with one of these
+# names would lose its value or overwrite theirs. Names starting with "_" are internal state.
+RESERVED_EDGE_PARAMETER_NAMES = frozenset({"reasoning", "confidence", "recipient_data", "detected_language"})
+
+# Discriminated so an invalid definition reports its own error, not also "Input should be a valid string".
+GraphEdgeParameterSpec = Annotated[
+    Union[Annotated[str, Tag("type")], Annotated[GraphEdgeParameter, Tag("definition")]],
+    Discriminator(lambda value: "type" if isinstance(value, str) else "definition"),
+]
+
+
 class GraphEdge(BaseModel):
     """Edge definition for graph-based conversation flow.
 
@@ -557,10 +605,19 @@ class GraphEdge(BaseModel):
     function_name: Optional[str] = None  # e.g., "go_to_city_question"
     function_description: Optional[str] = None  # Detailed description for LLM
     # Optional parameters to collect during transition
-    parameters: Optional[Dict[str, str]] = None  # e.g., {"city": "string"}
+    # Name -> type, e.g. {"city": "string"}, or name -> GraphEdgeParameter for a per-key definition.
+    parameters: Optional[Dict[str, GraphEdgeParameterSpec]] = None
     # lower = evaluated first within a tier (expression/intent/unconditional); does not rank across tiers.
     # Defaults: expression/unconditional=0, llm=100
     priority: Optional[int] = None
+
+    @field_validator("parameters")
+    @classmethod
+    def validate_parameter_names(cls, parameters):
+        for name in parameters or {}:
+            if name in RESERVED_EDGE_PARAMETER_NAMES or name.startswith("_"):
+                raise ValueError(f'Edge parameter "{name}" is a reserved name; rename it.')
+        return parameters
 
 
 class GraphNodeLlmOverride(BaseModel):
@@ -857,6 +914,21 @@ class S2SConfig(BaseModel):
         return values
 
 
+class WebSearchConfig(BaseModel):
+    enabled: bool = False
+    provider: Literal["openai", "firecrawl", "exa", "parallel"] = "openai"
+    api_key: Optional[str] = None
+    max_results: int = Field(default=3, ge=1, le=10)
+    max_snippet_chars: int = Field(default=400, ge=50, le=4000)
+    timeout_seconds: float = Field(default=8.0, gt=0, le=30)
+    pre_call_message: Optional[LocalizedText] = None
+    scope: Optional[str] = None
+    nodes: List[str] = []
+    description: Optional[str] = None
+    # Used only by the openai provider's Responses side call.
+    model: str = "gpt-5.4-mini"
+
+
 class ToolsConfig(BaseModel):
     llm_agent: Optional[Union[LlmAgent, SimpleLlmAgent]] = None
     synthesizer: Optional[Synthesizer] = None
@@ -864,6 +936,7 @@ class ToolsConfig(BaseModel):
     input: Optional[IOModel] = None
     output: Optional[IOModel] = None
     api_tools: Optional[ToolModel] = None
+    web_search: Optional[WebSearchConfig] = None
     s2s: Optional[S2SConfig] = None
     switch_tool_description: Optional[str] = None
     switch_handoff_messages: Optional[Dict[str, str]] = None

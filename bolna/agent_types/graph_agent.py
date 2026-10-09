@@ -37,8 +37,11 @@ from bolna.constants import (
 from typing import List, Tuple, AsyncGenerator, Optional, Dict, Any
 
 # Conversation providers whose own key authenticates the hangup/voicemail OpenAiLLM hops; any
-# other provider (Gemini, Azure, the LiteLLM backends) needs the platform OpenAI key instead.
-OPENAI_KEYED_PROVIDERS = frozenset(p for p, cls in SUPPORTED_LLM_PROVIDERS.items() if cls is OpenAiLLM)
+# other provider (Gemini, Azure, the LiteLLM backends) needs the platform OpenAI key instead. A
+# Bolna-hosted endpoint serves only its own model, so its hops use the platform key too.
+OPENAI_KEYED_PROVIDERS = frozenset(
+    p for p, cls in SUPPORTED_LLM_PROVIDERS.items() if cls is OpenAiLLM and p != LLMProvider.BOLNA.value
+)
 
 load_dotenv()
 logger = configure_logger(__name__)
@@ -70,6 +73,8 @@ class GraphAgent(BaseAgent):
         self.agent_information = self.config.get("agent_information")
         self.current_node_id = self.config.get("current_node_id")
         self.context_data = self.config.get("context_data") or {}
+        # Edge-parameter values collected during the call, latest value per variable.
+        self.node_extracted_data: Dict[str, Any] = {}
         execution_id = self.config.get("execution_id")
         if execution_id and isinstance(self.context_data.get("recipient_data"), dict):
             self.context_data["recipient_data"]["execution_id"] = execution_id
@@ -584,6 +589,19 @@ class GraphAgent(BaseAgent):
     def _edge_function_name(edge: dict) -> str:
         return edge.get("function_name") or f"transition_to_{edge['to_node_id']}"
 
+    @staticmethod
+    def _edge_parameter_schema(param_name: str, spec) -> dict:
+        """A parameter is either a bare type ("string") or a dict with type, description and allowed_values."""
+        if not isinstance(spec, dict):
+            spec = {"type": spec}
+        schema = {
+            "type": spec.get("type") or "string",
+            "description": spec.get("description") or f"The {param_name} provided by the user",
+        }
+        if spec.get("allowed_values"):
+            schema["enum"] = list(spec["allowed_values"])
+        return schema
+
     def _build_transition_tools_for_edges(self, edges: list, allow_stay: bool = True) -> list:
         """allow_stay=False omits stay_on_current_node so the model must pick a real edge."""
         tools = []
@@ -598,11 +616,8 @@ class GraphAgent(BaseAgent):
 
             parameters = {"type": "object", "properties": {}, "required": []}
             if edge.get("parameters"):
-                for param_name, param_type in edge["parameters"].items():
-                    parameters["properties"][param_name] = {
-                        "type": param_type,
-                        "description": f"The {param_name} provided by the user",
-                    }
+                for param_name, spec in edge["parameters"].items():
+                    parameters["properties"][param_name] = self._edge_parameter_schema(param_name, spec)
                     parameters["required"].append(param_name)
 
             parameters["properties"]["reasoning"] = {
@@ -898,8 +913,7 @@ class GraphAgent(BaseAgent):
                 )
                 if next_node_id:
                     self._advance_to_node(next_node_id, entry_index=len(history))
-                    if extracted_params:
-                        self.context_data.update(extracted_params)
+                    self._apply_extracted_params(extracted_params)
                     logger.info(
                         f"Router dispatch (intent) on node '{previous_node}': -> {self.current_node_id} "
                         f"| {reasoning} (latency: {latency_ms:.1f}ms)"
@@ -969,6 +983,11 @@ class GraphAgent(BaseAgent):
     def mark_first_response_delivered(self) -> None:
         """Unblock routing once the active node's first customer-facing TTS turn is delivered."""
         self._active_node_first_response_delivered = True
+
+    def _apply_extracted_params(self, extracted_params: Optional[dict]) -> None:
+        if extracted_params:
+            self.context_data.update(extracted_params)
+            self.node_extracted_data.update(extracted_params)
 
     def _should_hold_for_first_delivery(self, node: Optional[dict]) -> bool:
         return (
@@ -1611,8 +1630,7 @@ class GraphAgent(BaseAgent):
                 if next_node_id:
                     logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
                     self._advance_to_node(next_node_id, entry_index=len(message))
-                    if extracted_params:
-                        self.context_data.update(extracted_params)
+                    self._apply_extracted_params(extracted_params)
 
                 routing_type = (
                     "deterministic" if (reasoning and reasoning.startswith(_DETERMINISTIC_REASONING_PREFIX)) else "llm"
