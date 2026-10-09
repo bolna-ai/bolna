@@ -399,7 +399,7 @@ class MongoDBProviderConfig(BaseModel):
     db_name: Optional[str] = None
     collection_name: Optional[str] = None
     index_name: Optional[str] = None
-    llm_model: Optional[str] = "gpt-3.5-turbo"
+    llm_model: Optional[str] = "gpt-4.1-mini"
     embedding_model: Optional[str] = "text-embedding-3-small"
     embedding_dimensions: Optional[int] = 256
 
@@ -475,7 +475,7 @@ class RagConfig(BaseModel):
 
 
 class Llm(BaseModel):
-    model: Optional[str] = "gpt-3.5-turbo"
+    model: Optional[str] = "gpt-4.1-mini"
     max_tokens: Optional[int] = 100
     family: Optional[str] = "openai"
     temperature: Optional[float] = 0.1
@@ -782,7 +782,7 @@ class MultiAgent(BaseModel):
 class KnowledgebaseAgent(Llm):
     vector_store: VectorStore
     provider: Optional[str] = "openai"
-    model: Optional[str] = "gpt-3.5-turbo"
+    model: Optional[str] = "gpt-4.1-mini"
 
 
 class LlmAgent(BaseModel):
