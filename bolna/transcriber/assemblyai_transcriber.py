@@ -375,6 +375,7 @@ class AssemblyAITranscriber(BaseTranscriber):
                             audio_data = ulaw2lin(audio_data, 2)
 
                         await ws.send(audio_data)
+                        self.count_audio_sent(len(audio_data), self.sampling_rate)
                     except ConnectionClosedError as e:
                         logger.error(f"Connection closed while sending data: {e}")
                         break
@@ -520,7 +521,8 @@ class AssemblyAITranscriber(BaseTranscriber):
                     audio_duration = msg.get("audio_duration_seconds", 0)
                     session_duration = msg.get("session_duration_seconds", 0)
                     logger.info(f"Audio duration: {audio_duration}s, Session duration: {session_duration}s")
-                    yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
+                    # transcribe() emits the single closing packet; a second one here was billed twice.
+                    self.provider_audio_duration_s = msg.get("audio_duration_seconds")
                     return
 
                 elif message_type == "Error":
@@ -582,6 +584,7 @@ class AssemblyAITranscriber(BaseTranscriber):
     async def transcribe(self):
         """Main transcription method"""
         assemblyai_ws = None
+        self.reset_billed_audio()
         try:
             start_time = time.perf_counter()
 
@@ -643,7 +646,6 @@ class AssemblyAITranscriber(BaseTranscriber):
             if hasattr(self, "heartbeat_task") and self.heartbeat_task is not None:
                 self.heartbeat_task.cancel()
 
-            meta = dict(getattr(self, "meta_info", None) or {})
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )
