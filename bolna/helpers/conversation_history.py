@@ -133,6 +133,20 @@ class ConversationHistory:
         )
         self.append_assistant(None, tool_calls=tool_calls, turn_id=turn_id)
 
+    def fill_tool_call_placeholder(self, turn_id: int | None, content: str, **kwargs) -> dict | None:
+        """Put the turn's spoken text into the placeholder attach_tool_calls_to_turn left, so it stays
+        ahead of its tool results. Returns the filled message, or None when there is no placeholder."""
+        if turn_id is None:
+            return None
+        for msg in reversed(self._messages):
+            if msg.get("role") == ChatRole.ASSISTANT and msg.get("turn_id") == turn_id:
+                if msg.get("content") is not None or not msg.get("tool_calls"):
+                    return None
+                msg["content"] = content
+                msg.update(kwargs)
+                return msg
+        return None
+
     def drop_tool_call(self, tool_call_id: str) -> bool:
         """Erase a tool call and its result, keeping anything the agent actually said.
 

@@ -210,3 +210,32 @@ async def test_reply_not_committed_when_handler_returns_without_sending():
     await _play(tm, meta)
 
     assert _assistant_contents(tm) == []
+
+
+@pytest.mark.parametrize("during_send", [True, False])
+async def test_preamble_stays_ahead_of_its_tool_call(during_send):
+    socket = _Socket(alive=True)
+    tm = _make_tm(_plivo(socket))
+    history = tm.conversation_history
+    history.append_user("book it")
+    preamble = _meta(1, 1, "r1", PREAMBLE)
+
+    def store_and_run_tool():
+        socket.on_send = None
+        tm._stage_assistant_history(preamble, PREAMBLE)
+        history.attach_tool_calls_to_turn(1, TOOL_CALL)
+        history.append_tool_result("call_1", "booked id 42")
+
+    if during_send:
+        socket.on_send = store_and_run_tool
+    else:
+        store_and_run_tool()
+    await _play(tm, preamble)
+
+    assert [(m["role"], m["content"]) for m in history.messages] == [
+        (ChatRole.USER, "book it"),
+        (ChatRole.ASSISTANT, PREAMBLE),
+        (ChatRole.TOOL, "booked id 42"),
+    ]
+    assert history.messages[1]["tool_calls"] == TOOL_CALL
+    assert tm._turn_msg_map[1] is history.messages[1]
