@@ -220,6 +220,7 @@ class SonioxTranscriber(BaseTranscriber):
                     continue
                 if isinstance(data, (bytes, bytearray)):
                     self.record_audio_frame(self._audio_frame_seconds(len(data)), timestamp_ms())
+                    self.count_audio_sent(len(data), self.sampling_rate, mulaw=self.encoding == "mulaw")
                 try:
                     await ws.send(data)
                 except ConnectionClosedError as e:
@@ -308,6 +309,9 @@ class SonioxTranscriber(BaseTranscriber):
                     self.connection_error = f"{res.get('error_code')}: {res.get('error_message')}"
                     logger.error(f"Soniox error: {self.connection_error}")
                     break
+
+                if res.get("total_audio_proc_ms") is not None:
+                    self.provider_audio_duration_s = res["total_audio_proc_ms"] / 1000
 
                 endpoint_hit = False
                 new_final_text = ""
@@ -497,6 +501,7 @@ class SonioxTranscriber(BaseTranscriber):
         soniox_ws = None
         # Audio positions restart at 0 on each connection; reset local frame bookkeeping with them.
         self.reset_audio_frame_state()
+        self.reset_billed_audio()
         try:
             start_time = timestamp_ms()
             try:
@@ -548,7 +553,6 @@ class SonioxTranscriber(BaseTranscriber):
             if self.sender_task is not None:
                 self.sender_task.cancel()
 
-            meta = dict(getattr(self, "meta_info", None) or {})
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )

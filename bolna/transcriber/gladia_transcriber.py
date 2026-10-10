@@ -534,6 +534,8 @@ class GladiaTranscriber(BaseTranscriber):
 
                         message = {"type": "audio_chunk", "data": {"chunk": audio_b64}}
                         await ws.send(json.dumps(message))
+                        if isinstance(audio_data, bytes):
+                            self.count_audio_sent(len(audio_data), self.sample_rate, mulaw=self.encoding == "wav/ulaw")
 
                     except ConnectionClosedError as e:
                         logger.error(f"Connection closed while sending audio: {e}")
@@ -673,9 +675,8 @@ class GladiaTranscriber(BaseTranscriber):
                 elif msg_type == "done" or msg_type == "ended":
                     # Session complete
                     logger.info("Gladia session completed")
-                    duration = data.get("data", {}).get("duration", 0)
-                    self.meta_info["transcriber_duration"] = duration
-                    yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
+                    # transcribe() emits the single closing packet; a second one here was billed twice.
+                    self.provider_audio_duration_s = data.get("data", {}).get("duration")
                     return
 
             except Exception as e:
@@ -702,6 +703,7 @@ class GladiaTranscriber(BaseTranscriber):
         """Main transcription method."""
         gladia_ws = None
         self.connection_error = None
+        self.reset_billed_audio()
         try:
             start_time = timestamp_ms()
 
@@ -765,8 +767,6 @@ class GladiaTranscriber(BaseTranscriber):
             if hasattr(self, "utterance_timeout_task") and self.utterance_timeout_task:
                 self.utterance_timeout_task.cancel()
 
-            # Send connection closed message
-            meta = dict(getattr(self, "meta_info", None) or {})
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )

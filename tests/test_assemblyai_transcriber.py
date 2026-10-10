@@ -226,5 +226,6 @@ async def test_session_end_reports_the_audio_duration_for_billing():
 
     packets = [packet async for packet in transcriber.receiver(socket)]
 
-    assert packets[-1]["data"] == "transcriber_connection_closed"
-    assert packets[-1]["meta_info"]["transcriber_duration"] == 37
+    # transcribe() sends the connection's only closing packet; one from the receiver too was billed twice.
+    assert all(packet["data"] != "transcriber_connection_closed" for packet in packets)
+    assert transcriber.closing_meta()["transcriber_duration"] == 37
