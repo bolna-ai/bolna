@@ -30,7 +30,7 @@ class _InputStub:
         return 0.0
 
 
-def _make_tm():
+def _make_tm(prefix=PREFIX, tail=TAIL):
     tm = TaskManager.__new__(TaskManager)
     history = ConversationHistory()
     history.append_user("haan main purchase karne mein interested hoon")
@@ -49,12 +49,12 @@ def _make_tm():
             "response_uid": "r8",
             "sequence_id": 8,
             "duration": 2.0,
-            "text_synthesized": PREFIX,
+            "text_synthesized": prefix,
             "sent_ts": time.time() - 30,
         },
     )
     acked = marks.fetch_data("m1")
-    marks.record_heard_text(acked, PREFIX)
+    marks.record_heard_text(acked, prefix)
     # Tail chunk (9.6s audio): sent, mark never arrived before teardown.
     marks.update_data(
         "m2",
@@ -64,7 +64,7 @@ def _make_tm():
             "response_uid": "r8",
             "sequence_id": 8,
             "duration": 9.6,
-            "text_synthesized": TAIL,
+            "text_synthesized": tail,
             "sent_ts": time.time() - 28,
         },
     )
@@ -124,3 +124,9 @@ async def test_acked_text_without_ack_time_gets_no_tail_credit():
     tm.tools["input"].get_response_heard_for_response = lambda uid: PREFIX
     await tm.sync_history(tm.mark_event_meta_data.mark_event_meta_data.items(), time.time() + 20)
     assert _assistant_content(history) == PREFIX.strip()
+
+
+async def test_tail_joins_without_space_when_chunk_boundary_splits_a_word():
+    tm, history, marks = _make_tm(prefix="aapka final pr", tail="ice " + TAIL)
+    await tm.sync_history(marks.mark_event_meta_data.items(), marks.get_last_ack_ts_for_turn(8) + 2)
+    assert _assistant_content(history) == "aapka final price rupees two"
