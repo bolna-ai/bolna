@@ -625,7 +625,8 @@ class TaskManager(BaseManager):
         self.stream_sid = None
 
         # metering
-        self.transcriber_duration = 0
+        # Non-streaming transcription bills per result; streaming usage is read from the transcriber.
+        self.http_transcriber_duration = 0
         self.synthesizer_characters = 0
         self.ended_by_assistant = False
         # False until the caller's own words land in conversation history as a user turn.
@@ -5608,11 +5609,6 @@ class TaskManager(BaseManager):
                 if self._should_ignore_transcriber_input():
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
-                        self.transcriber_duration += (
-                            message.get("meta_info", {}).get("transcriber_duration", 0)
-                            if message["meta_info"] is not None
-                            else 0
-                        )
                         await self._log_transcriber_connection_error(
                             (message.get("meta_info") or {}).get("connection_error")
                         )
@@ -5954,11 +5950,6 @@ class TaskManager(BaseManager):
                         temp_transcriber_message = ""
 
                     elif message["data"] == "transcriber_connection_closed":
-                        self.transcriber_duration += (
-                            message.get("meta_info", {}).get("transcriber_duration", 0)
-                            if message["meta_info"] is not None
-                            else 0
-                        )
                         # In a pool, a standby transcriber closing is expected (e.g. Deepgram
                         # inactivity timeout). But if the active transcriber closed, the call
                         # is over (e.g. user hung up via telephony stop event).
@@ -5984,11 +5975,6 @@ class TaskManager(BaseManager):
                 else:
                     logger.info(f"Processing http transcription for message {message}")
                     if message["data"] == "transcriber_connection_closed":
-                        self.transcriber_duration += (
-                            message.get("meta_info", {}).get("transcriber_duration", 0)
-                            if message["meta_info"] is not None
-                            else 0
-                        )
                         if isinstance(self.tools.get("transcriber"), TranscriberPool):
                             if self.tools["transcriber"].is_active_transcriber_alive():
                                 logger.info(f"TranscriberPool: standby transcriber closed, continuing")
@@ -6021,12 +6007,19 @@ class TaskManager(BaseManager):
             )
             raise TranscriberError(str(e), provider=provider, model=model) from e
 
+    def _transcriber_billed_duration(self):
+        """The call's ASR usage. Read from the transcriber, not the closing packets: after a hangup the
+        listener stops at the first one, which in a pool can be a standby that only got keepalives."""
+        transcriber = self.tools.get("transcriber")
+        streamed_s = transcriber.billed_audio_s() if transcriber is not None else 0
+        return round(self.http_transcriber_duration + streamed_s, 4)
+
     async def __process_http_transcription(self, message):
         meta_info = self.__get_updated_meta_info(message["meta_info"])
 
         sequence = message["meta_info"].get("sequence", 0)
         next_task = self._get_next_step(sequence, "transcriber")
-        self.transcriber_duration += (
+        self.http_transcriber_duration += (
             message["meta_info"]["transcriber_duration"] if "transcriber_duration" in message["meta_info"] else 0
         )
 
@@ -9335,7 +9328,7 @@ class TaskManager(BaseManager):
                     "language_switch_events": list(self.language_switch_events),
                     "call_sid": self.call_sid,
                     "stream_sid": self.stream_sid,
-                    "transcriber_duration": self.transcriber_duration,
+                    "transcriber_duration": self._transcriber_billed_duration(),
                     "synthesizer_characters": (
                         self.tools["synthesizer"].get_synthesized_characters() if _has_asr_tts else 0
                     ),

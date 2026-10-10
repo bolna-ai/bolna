@@ -198,6 +198,9 @@ class TranscriberPool:
     def get_meta_info(self):
         return self.transcribers[self.active_label].get_meta_info()
 
+    def billed_audio_s(self):
+        return sum(transcriber.billed_audio_s() for transcriber in self.transcribers.values())
+
     async def run(self):
         """Start all transcribers, the audio router, standby keepalive, and LID tap."""
         for label, transcriber in self.transcribers.items():
