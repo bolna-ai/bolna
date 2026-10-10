@@ -5236,14 +5236,22 @@ class TaskManager(BaseManager):
         self._committed_assistant_sequences.add(sequence_id)
         self._last_spoken_assistant = (staged["turn_id"], staged["content"])
         self._last_spoken_user_input = staged.get("user_input")
-        self.conversation_history.append_assistant(
+        msg = self.conversation_history.fill_tool_call_placeholder(
+            staged["turn_id"],
             staged["content"],
-            turn_id=staged["turn_id"],
             response_uid=staged["response_uid"],
             message_category=staged.get("message_category"),
         )
+        if msg is None:
+            self.conversation_history.append_assistant(
+                staged["content"],
+                turn_id=staged["turn_id"],
+                response_uid=staged["response_uid"],
+                message_category=staged.get("message_category"),
+            )
+            msg = self.conversation_history.messages[-1]
         if staged["turn_id"] is not None:
-            self._turn_msg_map[staged["turn_id"]] = self.conversation_history.messages[-1]
+            self._turn_msg_map[staged["turn_id"]] = msg
         logger.info(
             "BOLNA_TRACE_TM commit_assistant_history seq=%s turn=%s response_uid=%s text_len=%s",
             sequence_id,
@@ -7888,13 +7896,15 @@ class TaskManager(BaseManager):
 
                     if status == "SEND":
                         # Audio approved - send it
-                        if sequence_id is not None:
-                            self._sent_audio_sequences.add(sequence_id)
-                        self._commit_staged_assistant_history(sequence_id)
                         self.tools["input"].update_is_audio_being_played(True, AudioPlaybackReason.AUDIO_SENT)
                         self.response_in_pipeline = False
                         self._synthesis_awaiting_first_audio = False
-                        await self.tools["output"].handle(message)
+                        sent = await self.tools["output"].handle(message)
+                        # A reply whose audio never went out (caller hung up) never played; keep it out of history.
+                        if sent:
+                            if sequence_id is not None:
+                                self._sent_audio_sequences.add(sequence_id)
+                            self._commit_staged_assistant_history(sequence_id)
                         # Track when agent audio first starts flowing for this sequence.
                         # Only fire on real audio bytes — BOS/EOS control packets are strings
                         # and fire before _synthesize() sets tts_start_ms, causing inversion.

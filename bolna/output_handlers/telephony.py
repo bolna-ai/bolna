@@ -50,6 +50,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
     async def handle(self, ws_data_packet):
         if self._closed:
             return
+        sent = False
         try:
             audio_chunk = ws_data_packet.get("data")
             meta_info = ws_data_packet.get("meta_info")
@@ -97,6 +98,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                             audio_format = "wav"
                         media_message = await self.form_media_message(audio_chunk, audio_format)
                         await self._send_text(json.dumps(media_message))
+                        sent = True
                         if (
                             meta_info.get("message_category", "") == "agent_welcome_message"
                             and not self.welcome_message_sent_ts
@@ -144,3 +146,4 @@ class TelephonyOutputHandler(DefaultOutputHandler):
         except Exception as e:
             self._closed = True
             logger.debug(f"WebSocket handling failed (client disconnected): {e}")
+        return sent
