@@ -32,6 +32,7 @@ def _task_manager_with_pending_goodbye():
     task_manager._turn_audio_flushed.set()
     task_manager.mark_event_meta_data = marks
     task_manager.tools = {"input": input_handler}
+    task_manager.has_transfer = False
     return task_manager, input_handler
 
 
