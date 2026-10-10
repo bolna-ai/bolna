@@ -12,6 +12,7 @@ import aiohttp
 import websockets
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.constants import ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, resample
@@ -38,6 +39,7 @@ class ElevenlabsBase(StreamSynthesizer):
         style=0,
         synthesizer_key=None,
         caching=True,
+        pronunciation_dictionary_locators=None,
         **kwargs,
     ):
         super().__init__(
@@ -53,6 +55,7 @@ class ElevenlabsBase(StreamSynthesizer):
         self.sampling_rate = sampling_rate
         self.speed = speed
         self.style = style
+        self.pronunciation_dictionary_locators = self._pronunciation_locators(pronunciation_dictionary_locators)
         self.audio_format = "mp3"
         self.use_mulaw = kwargs.get("use_mulaw", True)
         self.temperature = temperature
@@ -75,6 +78,23 @@ class ElevenlabsBase(StreamSynthesizer):
             rate = int(self.sampling_rate)
             self.wire_pcm_rate = rate if rate in (16000, 22050, 24000, 44100) else 24000
             self.wire_format = f"pcm_{self.wire_pcm_rate}"
+
+    @staticmethod
+    def _pronunciation_locators(locators):
+        """Plain-dict locators, held to the same limits as ElevenLabsConfig for direct package use."""
+        locators = [locator.model_dump() if hasattr(locator, "model_dump") else locator for locator in locators or []]
+        if len(locators) > ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES:
+            raise ValueError(
+                f"ElevenLabs accepts at most {ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES} pronunciation dictionaries"
+            )
+        if not all(locator.get("pronunciation_dictionary_id") and locator.get("version_id") for locator in locators):
+            raise ValueError(
+                "ElevenLabs pronunciation dictionaries need both pronunciation_dictionary_id and version_id"
+            )
+        return [
+            {"pronunciation_dictionary_id": locator["pronunciation_dictionary_id"], "version_id": locator["version_id"]}
+            for locator in locators
+        ]
 
     def _get_audio_format(self):
         return "mulaw" if self.wire_format == "ulaw_8000" else "wav"
@@ -123,6 +143,8 @@ class ElevenlabsBase(StreamSynthesizer):
                 "style": self.style,
             },
         }
+        if self.pronunciation_dictionary_locators:
+            payload["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
         headers = {"xi-api-key": self.api_key}
         fmt = format or self._get_output_format()
         url = f"{self.api_url}{fmt}"
@@ -158,6 +180,7 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
         self.current_turn_ttfb = None
         self.eos_accum_context_id = None  # context whose spoken chars are being accumulated
         self.eos_accum_text = ""  # spoken-so-far for that context (end-of-stream match)
+        self.dictionary_context_id = None  # last context whose first message carried the dictionaries
         self._reported_closed_ws = None  # socket whose close was already logged
 
     def _report_closed_socket(self, ws):
@@ -243,9 +266,14 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                         if self.ws_send_time is None:
                             self.ws_send_time = time.perf_counter()
                             logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
+                        message = {"text": text_chunk, "context_id": self.context_id}
+                        # ElevenLabs reads dictionaries only from a context's first message.
+                        if self.pronunciation_dictionary_locators and self.context_id != self.dictionary_context_id:
+                            message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
+                            self.dictionary_context_id = self.context_id
                         # Claim before sending: text lost into a socket that dies mid-send is still this turn's.
                         self.current_turn_socket = self.websocket
-                        await self.websocket.send(json.dumps({"text": text_chunk, "context_id": self.context_id}))
+                        await self.websocket.send(json.dumps(message))
                     except websockets.exceptions.ConnectionClosed:
                         self._send_hit_closed_socket(end_of_llm_stream)
                         return
@@ -451,6 +479,8 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                 "xi_api_key": self.api_key,
             }
             await websocket.send(json.dumps(bos_message))
+            # A new socket knows none of our contexts, so the next message must carry the dictionaries again.
+            self.dictionary_context_id = None
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
@@ -522,15 +552,14 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
                 self.ws_trace_id = websocket.response.headers.get("x-trace-id")
                 logger.info(f"Elevenlabs v3 WebSocket connected trace_id={self.ws_trace_id}")
-            # First message only. stability is the sole setting v3 honours.
-            await websocket.send(
-                json.dumps(
-                    {
-                        "voices": [self.voice],
-                        "voice_settings": {"stability": self.temperature},
-                    }
-                )
-            )
+            # First message only. stability is the sole setting v3 honours; dictionaries apply to the whole socket.
+            first_message = {
+                "voices": [self.voice],
+                "voice_settings": {"stability": self.temperature},
+            }
+            if self.pronunciation_dictionary_locators:
+                first_message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
+            await websocket.send(json.dumps(first_message))
             self._last_send_time = time.perf_counter()
             self._new_turn_pending = True
             # Teardown is over once a replacement is up.

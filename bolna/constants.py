@@ -452,6 +452,16 @@ TTS_AUDIO_SETTINGS = {
     SynthesizerProvider.SONIOX: frozenset({"speed", "reduce_silence"}),
 }
 
+# Provider pronunciation dictionaries, referenced by ID and applied by the provider. A dictionary
+# lives in one provider account, so it only works with that account's API key.
+ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES = 3
+# Cartesia honours pronunciation_dict_id on sonic-3 and newer, dated snapshots included.
+CARTESIA_PRONUNCIATION_DICT_MODEL_PREFIXES = ("sonic-3", "sonic-preview", "sonic-latest")
+# Limits for a synthesizer's word -> say-as pronunciation rules.
+PRONUNCIATION_RULES_MAX = 100
+PRONUNCIATION_RULE_WORD_MAX_LENGTH = 50
+PRONUNCIATION_RULE_SAY_AS_MAX_LENGTH = 100
+
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
     "bulbul:v3": 22050,  # NOTE: Documentation claims 24000, but WAV header shows 22050

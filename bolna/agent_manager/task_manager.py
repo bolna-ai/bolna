@@ -110,6 +110,7 @@ from bolna.helpers.utils import (
     save_audio_file_to_s3,
     update_prompt_with_context,
     get_md5_hash,
+    pronunciation_dictionary_key,
     scalar_fields,
     static_node_audio_key,
     clean_json_string,
@@ -407,6 +408,7 @@ class TaskManager(BaseManager):
         self.synthesizer_voice_id = None
         self.synthesizer_model = None
         self.synthesizer_render_settings = ""
+        self.synthesizer_pronunciation_key = None
         self.transfer_call_params = self.kwargs.get("transfer_call_params", None)
 
         if task["tools_config"].get("api_tools", None) is not None:
@@ -2011,6 +2013,12 @@ class TaskManager(BaseManager):
             self.synthesizer_voice_id = provider_config.get("voice_id")
             self.synthesizer_model = provider_config.get("model")
             self.synthesizer_render_settings = tts_render_settings(self.synthesizer_provider, provider_config)
+            self.synthesizer_pronunciation_key = pronunciation_dictionary_key(
+                self.synthesizer_provider,
+                provider_config,
+                synth_config.get("pronunciation_rules"),
+                on_platform_key=not self.kwargs.get("synthesizer_key"),
+            )
             if self.turn_based_conversation:
                 synth_config["audio_format"] = "mp3"  # Hard code mp3 if we're connected through dashboard
                 synth_config["stream"] = (
@@ -7119,16 +7127,24 @@ class TaskManager(BaseManager):
 
         # A call has exactly one transport, so render in its wire format only.
         mulaw_wire = self.__handoff_mulaw_wire()
+        multilingual = (self.task_config["tools_config"].get("synthesizer") or {}).get("multilingual") or {}
 
         async def render(label, synth):
             text = self.__handoff_text_for(label)
             if not text:
                 return
+            label_config = multilingual.get(label) or {}
             cache_key = (
                 synth.__class__.__name__,
                 getattr(synth, "voice_id", None) or getattr(synth, "voice", None),
                 text,
                 "mulaw" if mulaw_wire else f"pcm{WEBCALL_TTS_SAMPLE_RATE}",
+                # The cache is process-wide: another agent may share this voice with other dictionaries.
+                pronunciation_dictionary_key(
+                    label_config.get("provider"),
+                    label_config.get("provider_config"),
+                    label_config.get("pronunciation_rules"),
+                ),
             )
             cached = HANDOFF_CLIP_CACHE.get(cache_key)
             if cached:
@@ -7639,6 +7655,7 @@ class TaskManager(BaseManager):
                     voice_id=self.synthesizer_voice_id,
                     model=self.synthesizer_model,
                     render_settings=self.synthesizer_render_settings,
+                    pronunciation=self.synthesizer_pronunciation_key,
                 )
             if self.turn_based_conversation or self.task_config["tools_config"]["output"]["provider"] == "default":
                 # Static-node clips are pre-generated as mp3 keyed by md5(text); fetch that

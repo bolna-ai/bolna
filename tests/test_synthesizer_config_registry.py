@@ -28,6 +28,7 @@ EXPECTED_FIELDS = {
         "similarity_boost": False,
         "speed": False,
         "style": False,
+        "pronunciation_dictionary_locators": False,
     },
     "openai": {"voice": True, "model": True, "speed": False},
     "deepgram": {
@@ -45,6 +46,7 @@ EXPECTED_FIELDS = {
         "language": True,
         "speed": False,
         "volume": False,
+        "pronunciation_dict_id": False,
     },
     "smallest": {"voice": True, "voice_id": True, "model": True, "language": True, "speed": False},
     "sarvam": {
