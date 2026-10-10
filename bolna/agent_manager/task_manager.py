@@ -2516,10 +2516,29 @@ class TaskManager(BaseManager):
             cumulative_duration += chunk_duration
         return "".join(played_text)
 
-    async def sync_history(self, mark_events_data, interruption_processed_at, extend_with_playback_estimate=False):
-        """Sync history to reflect only what was actually spoken. Uses confirmed text or falls back to pending marks.
-        extend_with_playback_estimate: end-of-call only — credit the unACKed tail proportionally
-        to the wall clock elapsed since the last ACK (marks can lag playback and get lost)."""
+    @staticmethod
+    def _pending_text_chunks(mark_events_data, turn_id):
+        """Unacked audio marks of turn_id that carry text, in send order."""
+        return [
+            {"text": text, "duration": mark_data.get("duration", 0), "sent_ts": mark_data.get("sent_ts") or 0}
+            for _, mark_data in mark_events_data
+            if (text := mark_data.get("text_synthesized"))
+            and mark_data.get("type") not in NON_EVIDENCE_MARK_TYPES
+            and (turn_id is None or mark_data.get("turn_id") == turn_id)
+        ]
+
+    def _unacked_playback_start(self, pending_chunks, turn_id, has_acked_text):
+        """When the first unacked chunk began playing; None if ACKed audio precedes it at an unknown time."""
+        last_ack_ts = self.mark_event_meta_data.get_last_ack_ts_for_turn(turn_id)
+        first_sent_ts = pending_chunks[0]["sent_ts"]
+        if last_ack_ts:
+            return max(last_ack_ts, first_sent_ts)
+        if has_acked_text:
+            return None
+        return first_sent_ts or self.tools["input"].get_current_mark_started_time()
+
+    async def sync_history(self, mark_events_data, interruption_processed_at):
+        """Trim the interrupted turn to its ACKed text plus the unacked audio played by interruption_processed_at."""
         try:
             mark_events_data = list(mark_events_data)
             target_turn_id = self._get_latest_turn_id_from_marks(mark_events_data)
@@ -2561,146 +2580,110 @@ class TaskManager(BaseManager):
             if response_heard:
                 logger.info(f"response_heard (last 10 chars): {response_heard[-10:]}")
 
-            if extend_with_playback_estimate and response_heard:
-                pending_tail = []
-                for mark_id, mark_data in mark_events_data:
-                    text = mark_data.get("text_synthesized", "")
-                    if mark_data.get("type") in NON_EVIDENCE_MARK_TYPES or not text:
-                        continue
-                    if target_turn_id is not None and mark_data.get("turn_id") != target_turn_id:
-                        continue
-                    pending_tail.append({"text": text, "duration": mark_data.get("duration", 0)})
-                last_ack_ts = self.mark_event_meta_data.get_last_ack_ts_for_turn(target_turn_id)
-                if pending_tail and last_ack_ts:
-                    # Proportional by the wall clock since the last ACK. The ACK itself lags true
-                    # playout end, so this window under-credits — it can't stamp unheard text.
-                    tail_play_time = max(0.0, interruption_processed_at - last_ack_ts)
-                    tail_text = self.estimate_played_text_for_time(pending_tail, tail_play_time)
+            pending_chunks = self._pending_text_chunks(mark_events_data, target_turn_id)
+            if pending_chunks:
+                played_from = self._unacked_playback_start(pending_chunks, target_turn_id, bool(response_heard))
+                if played_from is not None:
+                    played_for = max(0.0, interruption_processed_at - played_from)
+                    tail_text = self.estimate_played_text_for_time(pending_chunks, played_for)
                     if tail_text:
                         logger.info(
-                            f"sync_history: crediting unacked tail ({tail_play_time:.2f}s elapsed, {len(tail_text)} chars)"
+                            f"sync_history: crediting unacked tail ({played_for:.2f}s played, {len(tail_text)} chars)"
                         )
                         # Restore the stripped chunk-boundary space or the exact-match trim drops the tail.
-                        joiner = "" if (response_heard[-1:].isspace() or tail_text[:1].isspace()) else " "
-                        response_heard += joiner + tail_text
+                        joins_words = (
+                            response_heard and not response_heard[-1:].isspace() and not tail_text[:1].isspace()
+                        )
+                        response_heard += (" " if joins_words else "") + tail_text
 
-            if not response_heard:
+            if not response_heard and not pending_chunks:
                 pending_marks = [{"mark_id": k, "mark_data": v} for k, v in mark_events_data]
-                pending_chunks = []
+                # No text_synthesized on marks (streaming synths). Group pending
+                # marks by turn_id and use audio duration to determine play state.
+                pending_by_turn = {}  # turn_id → {seq_ids: set, pending_dur: float}
                 for mark in pending_marks:
                     mark_data = mark.get("mark_data", {})
-                    mark_type = mark_data.get("type", "")
-                    text = mark_data.get("text_synthesized", "")
-                    if target_turn_id is not None and mark_data.get("turn_id") != target_turn_id:
+                    if mark_data.get("type") == "pre_mark_message":
                         continue
-                    if mark_type in ["pre_mark_message", "backchanneling"] or not text:
+                    t_id = mark_data.get("turn_id")
+                    s_id = mark_data.get("sequence_id")
+                    if t_id is None:
                         continue
-                    pending_chunks.append(
-                        {"text": text, "duration": mark_data.get("duration", 0), "sent_ts": mark_data.get("sent_ts", 0)}
+                    entry = pending_by_turn.setdefault(t_id, {"seq_ids": set(), "pending_dur": 0.0})
+                    if s_id is not None and s_id != -1:
+                        entry["seq_ids"].add(s_id)
+                    entry["pending_dur"] += mark_data.get("duration", 0.0)
+
+                if not pending_by_turn:
+                    if target_turn_id is None:
+                        logger.info(
+                            "No pending marks with turn_id and no target_turn_id; "
+                            "skipping trim to avoid removing non-turn assistant messages like welcome"
+                        )
+                        return
+                    if not target_from_evidence:
+                        # target_turn_id was obtained via blind fallback (_get_latest_assistant_turn_id)
+                        # with no marks and no ack evidence — this is a second cleanup after a
+                        # previous one already committed the filler.  Do NOT remove it.
+                        logger.info(
+                            f"No pending marks and target_turn_id={target_turn_id} came from blind fallback; "
+                            "skipping trim to avoid removing already-committed history"
+                        )
+                        return
+                    logger.info(
+                        "No pending marks with turn_id to estimate played text; "
+                        f"will trim target_turn_id={target_turn_id} as unheard"
                     )
+                    response_heard = ""
 
-                if pending_chunks:
-                    first_sent_ts = pending_chunks[0].get("sent_ts", 0)
-                    if first_sent_ts > 0:
-                        time_since_first_send = interruption_processed_at - first_sent_ts
-                        actual_play_time = max(0, time_since_first_send)
-                    else:
-                        elapsed_time = interruption_processed_at - self.tools["input"].get_current_mark_started_time()
-                        actual_play_time = max(0, elapsed_time)
-
-                    estimated = self.estimate_played_text_for_time(pending_chunks, actual_play_time)
-                    if estimated:
-                        response_heard = estimated
-                        logger.info(
-                            f"Estimated played text (last 10 chars): {response_heard[-10:]}, len={len(response_heard)}"
-                        )
                 else:
-                    # No text_synthesized on marks (streaming synths). Group pending
-                    # marks by turn_id and use audio duration to determine play state.
-                    pending_by_turn = {}  # turn_id → {seq_ids: set, pending_dur: float}
-                    for mark in pending_marks:
-                        mark_data = mark.get("mark_data", {})
-                        if mark_data.get("type") == "pre_mark_message":
-                            continue
-                        t_id = mark_data.get("turn_id")
-                        s_id = mark_data.get("sequence_id")
-                        if t_id is None:
-                            continue
-                        entry = pending_by_turn.setdefault(t_id, {"seq_ids": set(), "pending_dur": 0.0})
-                        if s_id is not None and s_id != -1:
-                            entry["seq_ids"].add(s_id)
-                        entry["pending_dur"] += mark_data.get("duration", 0.0)
+                    # Use the most recently interrupted turn
+                    t_id = target_turn_id if target_turn_id in pending_by_turn else max(pending_by_turn.keys())
+                    target_turn_id = t_id
+                    info = pending_by_turn[t_id]
+                    msg = self._turn_msg_map.get(t_id)
+                    full_text = (msg.get("content") or "") if msg else ""
 
-                    if not pending_by_turn:
-                        if target_turn_id is None:
-                            logger.info(
-                                "No pending marks with turn_id and no target_turn_id; "
-                                "skipping trim to avoid removing non-turn assistant messages like welcome"
-                            )
-                            return
-                        if not target_from_evidence:
-                            # target_turn_id was obtained via blind fallback (_get_latest_assistant_turn_id)
-                            # with no marks and no ack evidence — this is a second cleanup after a
-                            # previous one already committed the filler.  Do NOT remove it.
-                            logger.info(
-                                f"No pending marks and target_turn_id={target_turn_id} came from blind fallback; "
-                                "skipping trim to avoid removing already-committed history"
-                            )
-                            return
-                        logger.info(
-                            "No pending marks with turn_id to estimate played text; "
-                            f"will trim target_turn_id={target_turn_id} as unheard"
-                        )
-                        response_heard = ""
-
-                    else:
-                        # Use the most recently interrupted turn
-                        t_id = target_turn_id if target_turn_id in pending_by_turn else max(pending_by_turn.keys())
-                        target_turn_id = t_id
-                        info = pending_by_turn[t_id]
-                        msg = self._turn_msg_map.get(t_id)
-                        full_text = (msg.get("content") or "") if msg else ""
-
-                        # Sum total audio duration across ALL sequences for this turn
-                        # (not just sequences with pending marks), so that fully-acked
-                        # early sequences are included in the proportion calculation.
+                    # Sum total audio duration across ALL sequences for this turn
+                    # (not just sequences with pending marks), so that fully-acked
+                    # early sequences are included in the proportion calculation.
+                    total_dur = sum(
+                        seq_stat.total_audio_duration
+                        for seq_stat in self.mark_event_meta_data._mark_stats.per_sequence.values()
+                        if seq_stat.turn_id == t_id
+                    )
+                    if total_dur <= 0:
+                        # Fallback: use only pending sequences (may underestimate)
                         total_dur = sum(
-                            seq_stat.total_audio_duration
-                            for seq_stat in self.mark_event_meta_data._mark_stats.per_sequence.values()
-                            if seq_stat.turn_id == t_id
+                            self.mark_event_meta_data._mark_stats.per_sequence[s].total_audio_duration
+                            for s in info["seq_ids"]
+                            if s in self.mark_event_meta_data._mark_stats.per_sequence
                         )
-                        if total_dur <= 0:
-                            # Fallback: use only pending sequences (may underestimate)
-                            total_dur = sum(
-                                self.mark_event_meta_data._mark_stats.per_sequence[s].total_audio_duration
-                                for s in info["seq_ids"]
-                                if s in self.mark_event_meta_data._mark_stats.per_sequence
-                            )
 
-                        if total_dur <= 0:
-                            logger.info(f"turn_id={t_id}: no duration stats, treating as fully unheard")
-                            response_heard = ""
+                    if total_dur <= 0:
+                        logger.info(f"turn_id={t_id}: no duration stats, treating as fully unheard")
+                        response_heard = ""
+                    else:
+                        heard_dur = max(0.0, total_dur - info["pending_dur"])
+                        proportion = min(1.0, heard_dur / total_dur)
+                        logger.info(
+                            f"turn_id={t_id}: total={total_dur:.3f}s pending={info['pending_dur']:.3f}s proportion={proportion:.2f}"
+                        )
+
+                        if proportion >= 1.0:
+                            # Fully played — nothing to trim
+                            return
+
+                        if proportion > 0 and full_text.strip():
+                            char_count = int(len(full_text.strip()) * proportion)
+                            if char_count < len(full_text.strip()):
+                                partial_text = self._trim_partial_to_complete_words(full_text.strip()[:char_count])
+                                char_count = len(partial_text)
+                            response_heard = full_text.strip()[:char_count]
+                            logger.info(f"turn_id={t_id}: partial, heard (last 20): {response_heard[-20:]!r}")
                         else:
-                            heard_dur = max(0.0, total_dur - info["pending_dur"])
-                            proportion = min(1.0, heard_dur / total_dur)
-                            logger.info(
-                                f"turn_id={t_id}: total={total_dur:.3f}s pending={info['pending_dur']:.3f}s proportion={proportion:.2f}"
-                            )
-
-                            if proportion >= 1.0:
-                                # Fully played — nothing to trim
-                                return
-
-                            if proportion > 0 and full_text.strip():
-                                char_count = int(len(full_text.strip()) * proportion)
-                                if char_count < len(full_text.strip()):
-                                    partial_text = self._trim_partial_to_complete_words(full_text.strip()[:char_count])
-                                    char_count = len(partial_text)
-                                response_heard = full_text.strip()[:char_count]
-                                logger.info(f"turn_id={t_id}: partial, heard (last 20): {response_heard[-20:]!r}")
-                            else:
-                                response_heard = ""
-                                logger.info(f"turn_id={t_id}: nothing heard")
+                            response_heard = ""
+                            logger.info(f"turn_id={t_id}: nothing heard")
 
             if target_response_uid is not None and response_heard:
                 logger.info(
@@ -9161,11 +9144,7 @@ class TaskManager(BaseManager):
                 has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
                 has_response_heard = bool(self.tools["input"].response_heard_by_user)
                 if has_pending_marks or has_response_heard:
-                    await self.sync_history(
-                        self.mark_event_meta_data.mark_event_meta_data.items(),
-                        time.time(),
-                        extend_with_playback_estimate=True,
-                    )
+                    await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), time.time())
                 self.tools["input"].reset_response_heard_by_user()
                 logger.info("Conversation completed")
                 self.conversation_ended = True
