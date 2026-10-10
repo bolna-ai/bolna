@@ -60,7 +60,7 @@ class FreeSwitchInputHandler(DefaultInputHandler):
             self.conversation_recording["input"]["data"] += data
         self.ingest_buffer += data
         # linear16 16 kHz: 32 bytes per ms
-        chunk_bytes = self.audio_chunk_ms * 32 if self.audio_chunk_ms else self.INGEST_CHUNK_BYTES
+        chunk_bytes = self.input_chunk_ms * 32 if self.input_chunk_ms else self.INGEST_CHUNK_BYTES
         if len(self.ingest_buffer) < chunk_bytes:
             return
         chunk, self.ingest_buffer = self.ingest_buffer, b""

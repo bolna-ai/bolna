@@ -55,7 +55,7 @@ class DefaultInputHandler:
         self.update_start_ts = time.time()
         self.io_provider = "default"
         # Milliseconds of caller audio per transcriber packet, when the transcriber asks; None keeps each handler's batch.
-        self.audio_chunk_ms = None
+        self.input_chunk_ms = None
         self.is_dtmf_active = False
         self.dtmf_digits = ""
         self.plivo_latency_samples = []

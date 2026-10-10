@@ -112,11 +112,11 @@ class TelephonyInputHandler(DefaultInputHandler):
         return False
 
     def _batch_full(self, buffered_bytes):
-        """10 provider messages (200 ms of 20 ms frames), or `audio_chunk_ms` of 8 kHz audio when the transcriber asks."""
-        if self.audio_chunk_ms is None:
+        """10 provider messages (200 ms of 20 ms frames), or `input_chunk_ms` of 8 kHz audio when the transcriber asks."""
+        if self.input_chunk_ms is None:
             return self.message_count == 10
         bytes_per_ms = 8 if self.io_provider in TelephonyProvider.mulaw_values() else 16
-        return buffered_bytes >= self.audio_chunk_ms * bytes_per_ms
+        return buffered_bytes >= self.input_chunk_ms * bytes_per_ms
 
     async def _listen(self):
         buffer = []

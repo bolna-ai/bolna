@@ -967,7 +967,7 @@ class TaskManager(BaseManager):
                 self.tools["transcriber"].set_agent_context_source(self.conversation_history.last_assistant_content)
                 input_chunk_ms = getattr(self.tools["transcriber"], "input_chunk_ms", None)
                 if input_chunk_ms and self.tools.get("input") is not None:
-                    self.tools["input"].audio_chunk_ms = input_chunk_ms
+                    self.tools["input"].input_chunk_ms = input_chunk_ms
             self.__setup_synthesizer(self.llm_config)
             if not self.turn_based_conversation and task_id == 0:
                 self.synthesizer_monitor_task = asyncio.create_task(self.tools["synthesizer"].monitor_connection())
