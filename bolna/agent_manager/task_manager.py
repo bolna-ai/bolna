@@ -2537,6 +2537,14 @@ class TaskManager(BaseManager):
             return None
         return first_sent_ts or self.tools["input"].get_current_mark_started_time()
 
+    def _join_heard_tail(self, response_heard, tail_text, turn_id, first_pending_text):
+        """Append the credited tail, with a space only where the chunk boundary falls between words."""
+        if not response_heard:
+            return tail_text
+        acked_raw = self.mark_event_meta_data.heard_text_by_turn.get(turn_id) or " "
+        between_words = acked_raw[-1:].isspace() or first_pending_text[:1].isspace()
+        return response_heard + (" " if between_words and not tail_text[:1].isspace() else "") + tail_text
+
     async def sync_history(self, mark_events_data, interruption_processed_at):
         """Trim the interrupted turn to its ACKed text plus the unacked audio played by interruption_processed_at."""
         try:
@@ -2590,11 +2598,9 @@ class TaskManager(BaseManager):
                         logger.info(
                             f"sync_history: crediting unacked tail ({played_for:.2f}s played, {len(tail_text)} chars)"
                         )
-                        # Restore the stripped chunk-boundary space or the exact-match trim drops the tail.
-                        joins_words = (
-                            response_heard and not response_heard[-1:].isspace() and not tail_text[:1].isspace()
+                        response_heard = self._join_heard_tail(
+                            response_heard, tail_text, target_turn_id, pending_chunks[0]["text"]
                         )
-                        response_heard += (" " if joins_words else "") + tail_text
 
             if not response_heard and not pending_chunks:
                 pending_marks = [{"mark_id": k, "mark_data": v} for k, v in mark_events_data]
