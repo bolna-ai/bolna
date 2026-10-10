@@ -4,6 +4,7 @@ import time
 from starlette.websockets import WebSocketDisconnect
 
 from bolna.input_handlers.default import DefaultInputHandler
+from bolna.input_handlers.dtmf import DtmfAccumulator
 from bolna.helpers.utils import create_ws_data_packet
 from bolna.helpers.logger_config import configure_logger
 
@@ -12,8 +13,10 @@ logger = configure_logger(__name__)
 
 class FreeSwitchInputHandler(DefaultInputHandler):
     """Reads the mod_audio_stream fork: raw L16 mono @16k binary frames (caller audio),
-    plus optional text frames (JSON control/metadata). Same audio pipeline as the web/default
-    path (linear16 16k → transcriber); only the transport differs (binary vs base64-in-JSON)."""
+    plus text frames (JSON control/metadata). Same audio pipeline as the web/default path
+    (linear16 16k → transcriber); only the transport differs (binary vs base64-in-JSON).
+    Browser web calls and SIP trunk legs share this fork; a trunk leg additionally delivers
+    RFC2833 digits as {"type":"dtmf","digit":"5","duration_ms":N} frames from nodestatus."""
 
     # mod_audio_stream sends 20ms (640B) frames; ASR providers wrap each packet as an
     # independent audio unit (sarvam: one WAV per message), and 20ms slivers are undecodable.
@@ -30,6 +33,12 @@ class FreeSwitchInputHandler(DefaultInputHandler):
         self.on_playout_done = None
         # set by FreeSwitchOutputHandler: per-mark playback echoes from the module
         self.on_mark_played = None
+        # set by TaskManager: the media node reporting a consultative transfer that never / did connect
+        self.on_transfer_failed = None
+        self.on_transfer_connected = None
+        # set by TaskManager: the call id /process_transfer requires (the trunk plane keys on the run)
+        self.call_sid = None
+        self._dtmf = DtmfAccumulator(self.queues["dtmf"].put_nowait)
 
     async def process_message(self, message):
         if message.get("type") == "markPlayed":
@@ -45,6 +54,19 @@ class FreeSwitchInputHandler(DefaultInputHandler):
             if self.on_mark_played:
                 self.on_mark_played(name)
             return
+        if message.get("type") == "dtmf":
+            # is_dtmf_active mirrors the agent's dtmf_enabled (set by task_manager)
+            if self.is_dtmf_active:
+                self._dtmf.press(str(message.get("digit") or ""))
+            return
+        if message.get("type") == "transfer_failed":
+            if self.on_transfer_failed:
+                self.on_transfer_failed(message.get("cause") or "")
+            return
+        if message.get("type") == "transfer_connected":
+            if self.on_transfer_connected:
+                self.on_transfer_connected()
+            return
         if message.get("type") == "playoutDone":
             # mod_audio_stream: all queued TTS has really been played to the caller — hand the
             # signal to the output handler so turn-taking state matches what was heard
@@ -52,6 +74,13 @@ class FreeSwitchInputHandler(DefaultInputHandler):
                 self.on_playout_done()
             return
         await super().process_message(message)
+
+    def get_call_sid(self):
+        return self.call_sid
+
+    async def stop_handler(self):
+        self._dtmf.close()
+        await super().stop_handler()
 
     def ingest_audio(self, data):
         if self.conversation_recording:

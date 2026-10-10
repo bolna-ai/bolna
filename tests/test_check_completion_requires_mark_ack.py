@@ -22,6 +22,7 @@ def _telephony_task_manager(last_transmitted_timestamp, *, hang_conversation_aft
     now = time.time()
     tm.is_web_based_call = False
     tm.has_transfer = False
+    tm.transfer_call_params = {"provider": "plivo"}
     tm.start_time = now - age
     tm.stream_sid_ts = None
     tm.task_config = {
@@ -135,6 +136,15 @@ async def test_call_terminate_caps_a_telephony_call(monkeypatch):
     tm = _telephony_task_manager(time.time(), hang_conversation_after=0, call_terminate=600, age=900)
     assert await _drive(tm, monkeypatch) == "loop_exited"
     assert tm.ended == [True]
+    assert tm.hangup_detail == HangupReason.MAX_DURATION_REACHED
+
+
+async def test_call_terminate_caps_a_trunk_call(monkeypatch):
+    # A trunk call's audio rides the freeswitch fork, which is not a carrier handler.
+    tm = _telephony_task_manager(time.time(), hang_conversation_after=0, call_terminate=600, age=900)
+    tm.task_config["tools_config"]["input"]["provider"] = "freeswitch"
+    tm.transfer_call_params = {"provider": "trunk"}
+    assert await _drive(tm, monkeypatch) == "loop_exited"
     assert tm.hangup_detail == HangupReason.MAX_DURATION_REACHED
 
 
