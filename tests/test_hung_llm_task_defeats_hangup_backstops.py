@@ -84,6 +84,7 @@ async def test_slow_work_after_generation_is_no_longer_capped(monkeypatch):
     monkeypatch.setattr(task_manager_module, "LLM_GENERATION_TIMEOUT_S", 0.05)
     tm = TaskManager.__new__(TaskManager)
     tm.task_config = {"task_type": "conversation"}
+    tm.llm_task = None
 
     async def _slow(*args, **kwargs):
         await asyncio.sleep(0.15)  # deliberately past the patched timeout above
