@@ -7891,9 +7891,9 @@ class TaskManager(BaseManager):
                         self.tools["input"].update_is_audio_being_played(True, AudioPlaybackReason.AUDIO_SENT)
                         self.response_in_pipeline = False
                         self._synthesis_awaiting_first_audio = False
-                        await self.tools["output"].handle(message)
-                        # A reply sent into a closed socket (caller hung up) never played; keep it out of history.
-                        if not self.tools["output"].is_closed():
+                        sent = await self.tools["output"].handle(message)
+                        # A reply whose audio never went out (caller hung up) never played; keep it out of history.
+                        if sent:
                             if sequence_id is not None:
                                 self._sent_audio_sequences.add(sequence_id)
                             self._commit_staged_assistant_history(sequence_id)
