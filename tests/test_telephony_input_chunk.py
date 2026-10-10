@@ -10,6 +10,12 @@ from bolna.input_handlers.telephony_providers.plivo import PlivoInputHandler
 from bolna.input_handlers.telephony_providers.twilio import TwilioInputHandler
 
 
+@pytest.fixture(autouse=True)
+def _plivo_credentials(monkeypatch):
+    monkeypatch.setenv("PLIVO_AUTH_ID", "MA" + "0" * 18)
+    monkeypatch.setenv("PLIVO_AUTH_TOKEN", "test-token")
+
+
 class _FakeWebSocket:
     def __init__(self, frames):
         self.messages = [
