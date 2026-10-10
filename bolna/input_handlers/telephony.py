@@ -5,6 +5,7 @@ import base64
 import json
 from starlette.websockets import WebSocketDisconnect
 from dotenv import load_dotenv
+from bolna.enums import TelephonyProvider
 from bolna.helpers.utils import create_ws_data_packet
 from bolna.helpers.logger_config import configure_logger
 
@@ -110,8 +111,16 @@ class TelephonyInputHandler(DefaultInputHandler):
         self.dtmf_digits += digit
         return False
 
+    def _batch_full(self, buffered_bytes):
+        """10 provider messages (200 ms of 20 ms frames), or `input_chunk_ms` of 8 kHz audio when the transcriber asks."""
+        if self.input_chunk_ms is None:
+            return self.message_count == 10
+        bytes_per_ms = 8 if self.io_provider in TelephonyProvider.mulaw_values() else 16
+        return buffered_bytes >= self.input_chunk_ms * bytes_per_ms
+
     async def _listen(self):
         buffer = []
+        buffered_bytes = 0
         while True:
             try:
                 message = await self.websocket.receive_text()
@@ -142,11 +151,12 @@ class TelephonyInputHandler(DefaultInputHandler):
                         self.last_media_received = media_ts
                         buffer.append(media_audio)
                         self.message_count += 1
+                        buffered_bytes += len(media_audio)
 
-                        # Send 100 ms of audio to deepgram
-                        if self.message_count == 10:
+                        if self._batch_full(buffered_bytes):
                             merged_audio = b"".join(buffer)
                             buffer = []
+                            buffered_bytes = 0
                             await self.ingest_audio(merged_audio, meta_info)
                             self.message_count = 0
                     else:

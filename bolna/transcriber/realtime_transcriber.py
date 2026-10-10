@@ -30,6 +30,9 @@ class RealtimeTranscriber(BaseTranscriber):
     EOS_DRAIN_S = 5.0
     # Read by task_manager: this transcriber starts speculative replies.
     eager_end_of_turn = True
+    # Read by task_manager: caller audio comes in 40 ms chunks instead of the input handlers' 200 ms
+    # batches, since the server's end of turn waits on it.
+    input_chunk_ms = 40
 
     def __init__(
         self,

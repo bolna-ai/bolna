@@ -269,9 +269,9 @@ class SipTrunkInputHandler(TelephonyInputHandler):
 
     async def _listen(self):
         """Receive TEXT (control) and BINARY (ulaw). Forward audio in ~AUDIO_BATCH_MS batches
-        for a balance of latency and transcript accuracy."""
+        for a balance of latency and transcript accuracy, or in the transcriber's `input_chunk_ms`."""
         buffer = []
-        chunks_per_batch = max(2, AUDIO_BATCH_MS // self.ptime) if self.ptime else 4
+        chunks_per_batch = max(2, (self.input_chunk_ms or AUDIO_BATCH_MS) // self.ptime) if self.ptime else 4
         message_count = 0
 
         while self.running:

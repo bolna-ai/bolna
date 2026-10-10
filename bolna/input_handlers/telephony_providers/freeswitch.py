@@ -59,7 +59,9 @@ class FreeSwitchInputHandler(DefaultInputHandler):
                 self.conversation_recording["metadata"]["started"] = time.time()
             self.conversation_recording["input"]["data"] += data
         self.ingest_buffer += data
-        if len(self.ingest_buffer) < self.INGEST_CHUNK_BYTES:
+        # linear16 16 kHz: 32 bytes per ms
+        chunk_bytes = self.input_chunk_ms * 32 if self.input_chunk_ms else self.INGEST_CHUNK_BYTES
+        if len(self.ingest_buffer) < chunk_bytes:
             return
         chunk, self.ingest_buffer = self.ingest_buffer, b""
         ws_data_packet = create_ws_data_packet(
