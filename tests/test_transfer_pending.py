@@ -144,7 +144,7 @@ async def test_the_watchdog_does_not_hang_up_right_after_a_resume(fast_watchdog_
 
 
 def _transfer_call(has_transfer=False, *, transfer_call_params=None, context_data=None):
-    """A task manager on a real FreeSWITCH fork handler, wired the way __init__ wires it."""
+    """A task manager on a real FreeSWITCH fork handler, wired the way __setup_input_handlers wires it."""
     tm = TaskManager.__new__(TaskManager)
     tm.run_id = "exec-1"
     tm.has_transfer = has_transfer
@@ -323,7 +323,7 @@ async def test_refused_transfer_is_answered_inside_the_tool_call_turn(
     ids=["llm_refused", "llm_accepted", "s2s_refused"],
 )
 async def test_a_frame_that_beats_the_backend_answer_resumes_exactly_once(transfer_webhook, mode, status, body):
-    # The sidecar reports a target that failed inside its accept window before /process_transfer answers.
+    # A target that fails fast (busy) can be reported by the sidecar before /process_transfer answers.
     tm, handler = _transfer_call(transfer_call_params={"provider": "trunk"})
     frame = {"type": "transfer_failed", "cause": "USER_BUSY"}
     transfer_webhook(status=status, body=body, during=lambda: handler.process_message(frame))
@@ -387,7 +387,7 @@ async def test_the_deadline_resumes_once_when_the_fork_never_reports(transfer_we
 
 
 async def test_a_transfer_failure_after_the_caller_hung_up_resumes_nothing(transfer_webhook):
-    # Nothing runs for a disconnected caller: no resume turn is generated for nobody.
+    # The caller hung up during the ring, so there is nobody to resume the conversation for.
     tm, handler = _transfer_call(transfer_call_params={"provider": "trunk"})
     transfer_webhook()
 
@@ -459,6 +459,8 @@ async def test_the_failure_follow_up_cannot_dial_the_transfer_again(transfer_web
     assert tm._TaskManager__do_llm_generation.await_count == 2
     assert _tool_result(tm, "retry-0")["status"] == "failed"
     assert tm.has_transfer is False
+    # A declined retry is not a handoff, so "are you still there" must keep working.
+    assert tm.check_if_user_online is True
 
 
 async def test_only_the_callers_next_utterance_lets_the_transfer_be_retried(transfer_webhook):
@@ -549,7 +551,7 @@ async def test_transfer_provider_falls_back_to_the_fork_transport(transfer_webho
     await _call_transfer_tool(tm)
 
     assert session.posted["provider"] == "freeswitch"
-    # Only a trunk POST is bounded; every other provider keeps the session default, as on master.
+    # Only a trunk POST is bounded; every other provider keeps the session default.
     assert session.timeout is None
 
 

@@ -19,8 +19,8 @@ class TelephonyProvider(str, Enum):
     VOBIZ = "vobiz"
     SIP_TRUNK = "sip-trunk"
     FREESWITCH = "freeswitch"  # linear16 16k in / 24k out (not ulaw/8k) — deliberately not a telephony_provider
-    # Agent/execution label for calls on client or platform SIP trunks. Audio still rides the
-    # freeswitch fork, so it is never an IO provider and stays out of the transport lists below.
+    # Agent/execution label for calls on client or platform SIP trunks. Their audio is the 16 kHz
+    # freeswitch fork, so it stays out of the lists below, which switch ASR to 8 kHz carrier audio.
     TRUNK = "trunk"
     DEFAULT = "default"
     DATABASE = "database"

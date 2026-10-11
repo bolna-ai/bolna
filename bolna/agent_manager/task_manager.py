@@ -1575,6 +1575,7 @@ class TaskManager(BaseManager):
         handler.on_transfer_failed = self.on_transfer_failed
         handler.on_transfer_connected = self.on_transfer_connected
         recipient_data = (self.context_data or {}).get("recipient_data") or {}
+        # The trunk backend keys a transfer on execution_id, so the run id is a safe stand-in.
         handler.call_sid = recipient_data.get("call_sid") or self.run_id
 
     async def __await_stream_sid(self, timeout=10.0):
@@ -3595,8 +3596,10 @@ class TaskManager(BaseManager):
                 return
 
             if self._transfer_retry_blocked:
-                # Until the caller speaks, a retry is the model's own idea (the explanation, a nudge).
+                # Until the caller speaks again, a retry is the model's own idea and would redial in a loop.
                 logger.info(f"transfer_call re-emitted right after a failed transfer for run_id={self.run_id}")
+                # Cleared on entry, but no call is handed off here, so "are you still there" stays on.
+                self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
                 self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
                 self.conversation_history.append_tool_result(
                     resp.get("tool_call_id", ""),
@@ -4858,7 +4861,7 @@ class TaskManager(BaseManager):
         return
 
     def _transfer_provider(self) -> str:
-        """Control-plane provider for /process_transfer; the fork's io_provider is only the transport."""
+        """The provider /process_transfer dispatches on; a trunk call's io_provider is only its audio transport."""
         return (self.transfer_call_params or {}).get("provider") or self.tools["input"].io_provider
 
     def _is_trunk_call(self) -> bool:
@@ -4872,16 +4875,15 @@ class TaskManager(BaseManager):
             parsed = None
         parsed = parsed if isinstance(parsed, dict) else {}
         refused = parsed.get("success") is False
-        # A 5xx may have dialled before failing; only the trunk backend tells a refusal apart.
+        # A 5xx may have dialled before failing; only the trunk backend flags one that did not (success: false).
         if parsed.get("unsettled") is True or (status >= 500 and not (refused and self._is_trunk_call())):
             return None
-        # Another provider's bare 4xx keeps the transfer, as on master.
+        # A trunk 4xx dialled nothing, and keeping it would hold the caller in silence until the deadline.
         if refused or (400 <= status < 500 and self._is_trunk_call()):
             return str(parsed.get("message") or parsed.get("detail") or f"HTTP {status}")
         return None
 
     def _transfer_ring_timeout(self, param) -> int:
-        """How long the trunk target rings: the transfer tool's ring_timeout, else the default."""
         try:
             params = json.loads(param) if isinstance(param, str) else (param or {})
             ring_timeout = int(params.get("ring_timeout") or TRUNK_TRANSFER_RING_TIMEOUT_S)
@@ -4931,8 +4933,8 @@ class TaskManager(BaseManager):
     async def _post_transfer_webhook(self, called_fun, url, param, resp, meta_info, ring_timeout) -> str | None:
         """POST the transfer payload to the telephony webhook and record transfer_start/end.
 
-        Split out of __execute_function_call so the speech-to-speech path can hand off a call
-        without duplicating the payload, mock-provider and event-recording behaviour.
+        Shared with the speech-to-speech path through _execute_transfer_call_webhook, so the payload,
+        mock-provider and event-recording behaviour live in one place.
         Returns the refusal reason when the webhook rejected the transfer, else None.
         """
         await asyncio.sleep(2)
@@ -5081,7 +5083,7 @@ class TaskManager(BaseManager):
             )
             _transfer_end_recorded = False
             try:
-                # Only trunk is bounded; other providers keep the session default, as before.
+                # A trunk POST must give up inside the generation it runs in; carriers keep the session default.
                 timeout = (
                     aiohttp.ClientTimeout(total=TRANSFER_WEBHOOK_TIMEOUT_S)
                     if self._is_trunk_call()
@@ -8237,7 +8239,7 @@ class TaskManager(BaseManager):
         self._track_transfer_task(self._inject_and_run_llm(message))
 
     def on_transfer_connected(self) -> None:
-        """Bridged: the fork stops next, so no deadline is needed, not even one armed after the POST."""
+        """Bridged and the fork closes next: drop the deadline, and stop the POST's turn arming one."""
         self._transfer_connected = True
         self._cancel_transfer_deadline()
 

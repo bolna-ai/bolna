@@ -15,8 +15,8 @@ class FreeSwitchInputHandler(DefaultInputHandler):
     """Reads the mod_audio_stream fork: raw L16 mono @16k binary frames (caller audio),
     plus text frames (JSON control/metadata). Same audio pipeline as the web/default path
     (linear16 16k → transcriber); only the transport differs (binary vs base64-in-JSON).
-    Browser web calls and SIP trunk legs share this fork; a trunk leg additionally delivers
-    RFC2833 digits as {"type":"dtmf","digit":"5","duration_ms":N} frames from nodestatus."""
+    Browser web calls and SIP trunk legs share this fork; on a trunk leg the media node's sidecar
+    also sends keypad digits (dtmf) and transfer outcomes as text frames."""
 
     # mod_audio_stream sends 20ms (640B) frames; ASR providers wrap each packet as an
     # independent audio unit (sarvam: one WAV per message), and 20ms slivers are undecodable.
@@ -33,10 +33,10 @@ class FreeSwitchInputHandler(DefaultInputHandler):
         self.on_playout_done = None
         # set by FreeSwitchOutputHandler: per-mark playback echoes from the module
         self.on_mark_played = None
-        # set by TaskManager: the media node reporting a consultative transfer that never / did connect
+        # set by TaskManager: the media node reports whether a trunk transfer's target answered
         self.on_transfer_failed = None
         self.on_transfer_connected = None
-        # set by TaskManager: the call id /process_transfer requires (the trunk plane keys on the run)
+        # set by TaskManager: /process_transfer rejects a POST without a call_sid
         self.call_sid = None
         self._dtmf = DtmfAccumulator(self.queues["dtmf"].put_nowait)
 

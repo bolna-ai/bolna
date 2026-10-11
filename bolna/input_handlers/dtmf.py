@@ -15,15 +15,13 @@ logger = configure_logger(__name__)
 
 DTMF_TERMINATOR = "#"
 DTMF_DIGITS = frozenset("0123456789*#ABCD")
-# SIP_DTMF_INTERDIGIT_TIMEOUT_S is the name the sip-trunk handler shipped with; still honoured.
+# The SIP_ name is read too, for deployments that set it for the sip-trunk handler.
 DTMF_INTERDIGIT_TIMEOUT_S = float(
     os.environ.get("DTMF_INTERDIGIT_TIMEOUT_S") or os.environ.get("SIP_DTMF_INTERDIGIT_TIMEOUT_S") or "3"
 )
 
 
 class DtmfAccumulator:
-    """Collects digits and hands the finished string to `submit`."""
-
     def __init__(self, submit: Callable[[str], None], terminator: str = DTMF_TERMINATOR):
         self._submit = submit
         self._terminator = terminator
@@ -50,7 +48,7 @@ class DtmfAccumulator:
         self._submit(digits)
 
     def close(self) -> None:
-        """Stop the pending timer without submitting; used at handler teardown."""
+        """Drop the pending timer without submitting: at teardown nobody is left to read the digits."""
         self._cancel_timer()
 
     def _cancel_timer(self) -> None:
