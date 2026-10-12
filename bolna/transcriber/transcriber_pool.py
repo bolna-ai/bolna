@@ -26,7 +26,9 @@ class TranscriberPool:
     Each transcriber gets its own private asyncio.Queue. An _audio_router task reads
     from the shared input queue and forwards packets to whichever transcriber is
     currently active. Standby transcribers receive periodic silence keepalives so
-    their provider connections stay alive for instant switching.
+    their provider connections stay alive for instant switching. On the way out, each
+    transcriber writes to its own private output queue and only the active one's
+    events reach the call (forward_leg_output).
 
     Duck-types the single-transcriber interface so TaskManager needs no changes
     in run()/finally.
@@ -71,8 +73,9 @@ class TranscriberPool:
                           Each instance already has its own private input_queue set.
             shared_input_queue: the original audio_queue from TaskManager that
                                 receives raw audio packets from the input handler.
-            output_queue: the shared transcriber_output_queue (all transcribers
-                          write to the same one).
+            output_queue: the call's transcriber_output_queue. Each transcriber
+                          writes to its own private output queue; the pool forwards
+                          into this one.
             active_label: which transcriber label should receive audio initially.
             multilingual_config: raw multilingual config dict from task_config
             lid_provider: "sarvam" | None (disables LID tap)
@@ -93,6 +96,7 @@ class TranscriberPool:
         self.active_label = active_label
         self._router_task = None
         self._keepalive_task = None
+        self.output_forwarder_tasks: list[asyncio.Task] = []
         self._multilingual_config = multilingual_config
         # Serializes switch() — it has an await (reconnecting a dropped standby)
         # between reading and writing active_label, so concurrent switches (e.g.
@@ -204,6 +208,12 @@ class TranscriberPool:
     async def run(self):
         """Start all transcribers, the audio router, standby keepalive, and LID tap."""
         for label, transcriber in self.transcribers.items():
+            leg_queue = getattr(transcriber, "transcriber_output_queue", None)
+            # A leg already writing to the call's queue has nothing to forward (and would loop).
+            if leg_queue is not None and leg_queue is not self.output_queue:
+                self.output_forwarder_tasks.append(asyncio.create_task(self.forward_leg_output(label, leg_queue)))
+
+        for label, transcriber in self.transcribers.items():
             logger.info(f"TranscriberPool: starting transcriber '{label}'")
             await transcriber.run()
 
@@ -248,6 +258,26 @@ class TranscriberPool:
                                 logger.warning(f"TranscriberPool: LID feed error: {e}")
         except asyncio.CancelledError:
             logger.info("TranscriberPool: audio router cancelled")
+
+    async def forward_leg_output(self, label, leg_queue):
+        """Pass one transcriber's events to the call only while it is the active one.
+
+        A transcriber switched away from mid-sentence still holds that sentence's undecoded audio,
+        and every keepalive silence frame advances it — it keeps re-emitting interims of words the
+        caller already finished, which the call took as barge-ins on its own replies. Connection
+        closes pass from every transcriber: the listener tells a standby close from an active one.
+        """
+        try:
+            while True:
+                packet = await leg_queue.get()
+                data = packet.get("data") if isinstance(packet, dict) else None
+                if label == self.active_label or data == "transcriber_connection_closed":
+                    self.output_queue.put_nowait(packet)
+                    continue
+                kind = data.get("type") if isinstance(data, dict) else data
+                logger.info(f"TranscriberPool: dropped standby '{label}' output ({kind}), active='{self.active_label}'")
+        except asyncio.CancelledError:
+            logger.info(f"TranscriberPool: output forwarder for '{label}' cancelled")
 
     async def _standby_keepalive(self):
         """Periodically send silence frames to standby transcribers.
@@ -676,5 +706,14 @@ class TranscriberPool:
         for label, transcriber in self.transcribers.items():
             logger.info(f"TranscriberPool: cleaning up '{label}'")
             await transcriber.cleanup()
+
+        # After the transcribers, so a close they emit while shutting down still reaches the call.
+        for task in self.output_forwarder_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         logger.info("TranscriberPool: cleanup complete")
