@@ -156,6 +156,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
     async def handle(self, packet):
         if self._closed:
             return
+        sent = False
         try:
             meta_info = packet.get("meta_info") or {}
             audio = packet.get("data") if meta_info.get("type") == "audio" else None
@@ -195,6 +196,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
                         )
                     )
                     frames += 1
+                    sent = True
                 logger.info(
                     f"freeswitch out: streamAudio pcm={len(audio)}B in {frames} frames "
                     f"cat={meta_info.get('message_category')} seq={meta_info.get('sequence_id')} final={is_final}"
@@ -251,3 +253,4 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
                 self.mark_closed()
             else:
                 logger.error(f"freeswitch handle error (audio chunk dropped): {e}", exc_info=True)
+        return sent
