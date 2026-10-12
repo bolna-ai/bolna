@@ -450,6 +450,7 @@ TTS_AUDIO_SETTINGS = {
     SynthesizerProvider.SARVAM: frozenset({"speed", "loudness"}),
     SynthesizerProvider.SMALLEST: frozenset({"speed"}),
     SynthesizerProvider.SONIOX: frozenset({"speed", "reduce_silence"}),
+    SynthesizerProvider.CUSTOM: frozenset({"speed"}),
 }
 
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {

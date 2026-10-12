@@ -354,6 +354,8 @@ class SarvamTranscriber(BaseTranscriber):
                     audio_b64 = base64.b64encode(wav_bytes).decode("utf-8")
                     message = {"audio": {"data": audio_b64, "encoding": "audio/wav", "sample_rate": self.sampling_rate}}
                     await ws.send(json.dumps(message))
+                    if isinstance(audio_data, (bytes, bytearray)):
+                        self.count_audio_sent(len(audio_data), self.input_sampling_rate, mulaw=self.encoding == "mulaw")
         except asyncio.CancelledError:
             pass
 
@@ -369,7 +371,6 @@ class SarvamTranscriber(BaseTranscriber):
                     if isinstance(data, dict) and data.get("type") == "data":
                         payload = data.get("data", {})
                         transcript = payload.get("transcript", "")
-                        metrics = payload.get("metrics", {})
                         sarvam_request_id = payload.get("request_id")
                         if sarvam_request_id:
                             logger.info(f"Sarvam request_id: {sarvam_request_id}")
@@ -399,7 +400,6 @@ class SarvamTranscriber(BaseTranscriber):
                                 self.meta_info["transcriber_latency"] = turn_latency_seconds
 
                             transcript_data = {"type": "transcript", "content": transcript.strip()}
-                            self.meta_info["transcriber_duration"] = metrics.get("audio_duration", 0)
 
                             # Accumulate the turn's text so END_SPEECH can record it in
                             # turn_latencies (observability/eval). Each Sarvam "data" message
@@ -482,8 +482,8 @@ class SarvamTranscriber(BaseTranscriber):
                             yield create_ws_data_packet("speech_ended", self.meta_info)
 
                     elif isinstance(data, dict) and data.get("type") == "connection_closed":
-                        self.meta_info["transcriber_duration"] = data.get("duration", 0)
-                        yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
+                        # transcribe() emits the single closing packet; a second one here was billed twice.
+                        self.provider_audio_duration_s = data.get("duration")
                         return
 
                     elif isinstance(data, dict) and data.get("type") == "error":
@@ -629,6 +629,7 @@ class SarvamTranscriber(BaseTranscriber):
             pass
 
     async def transcribe(self):
+        self.reset_billed_audio()
         try:
             start_time = time.perf_counter()
             try:
@@ -637,9 +638,9 @@ class SarvamTranscriber(BaseTranscriber):
                 self.connection_error = str(e)
                 await self.toggle_connection()
                 try:
-                    meta = dict(self.meta_info or {})
-                    meta["connection_error"] = self.connection_error
-                    await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+                    await self.push_to_transcriber_queue(
+                        create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+                    )
                 except Exception:
                     logger.error(f"Sarvam failed to emit connection_closed: {traceback.format_exc()}")
                 return
@@ -673,10 +674,9 @@ class SarvamTranscriber(BaseTranscriber):
                 self.meta_info["total_stream_duration_ms"] = self.total_stream_duration_ms
 
             try:
-                meta = dict(self.meta_info or {})
-                if self.connection_error:
-                    meta["connection_error"] = self.connection_error
-                await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+                await self.push_to_transcriber_queue(
+                    create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+                )
             except Exception:
                 logger.error(f"Sarvam failed to emit connection_closed: {traceback.format_exc()}")
         finally:
