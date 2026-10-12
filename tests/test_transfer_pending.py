@@ -13,13 +13,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from starlette.websockets import WebSocketState
 
 from bolna.agent_manager import task_manager as task_manager_module
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.constants import DEFAULT_MAX_SILENCE_REPEATS, LLM_GENERATION_TIMEOUT_S, STALL_HANGUP_HARD_CAP_S
 from bolna.helpers.conversation_history import ConversationHistory
 from bolna.input_handlers.telephony_providers.freeswitch import FreeSwitchInputHandler
-from starlette.websockets import WebSocketState
 
 # Each mode silences every watchdog branch but one, so a pass either fires that branch or nothing.
 WATCHDOG_MODES = {

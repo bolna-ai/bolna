@@ -1,7 +1,7 @@
 import json
 import time
 
-from starlette.websockets import WebSocketDisconnect
+from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 from bolna.input_handlers.default import DefaultInputHandler
 from bolna.input_handlers.dtmf import DtmfAccumulator
@@ -80,6 +80,10 @@ class FreeSwitchInputHandler(DefaultInputHandler):
 
     async def stop_handler(self):
         self._dtmf.close()
+        # The node drops the fork itself after a failed transfer, and closing a gone socket raises.
+        if self.websocket.client_state == WebSocketState.DISCONNECTED:
+            self.running = False
+            return
         await super().stop_handler()
 
     def ingest_audio(self, data):
