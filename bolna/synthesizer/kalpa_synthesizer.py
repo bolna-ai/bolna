@@ -4,9 +4,10 @@ Kalpa Labs TTS: streaming WSS /v1/tts/{voice_id}/stream, one-shot POST /v1/tts/{
 Kalpa's conversational speech models render named voices from GET /v1/voices
 
 Models:
-1. kalpa-tts-multilingual-beta-v0.1 speaks English and Hindi, including code-switched
+1. kalpa-tts-1 (the default) speaks English and Hindi, including code-switched
 Hinglish with no language parameter
 2. kalpa-tts-beta-v0.1 is English-only.
+kalpa-tts-multilingual-beta-v0.1 is deprecated; Kalpa serves it with kalpa-tts-1.
 
 Flow
 1. The client authenticates with an initializeConnection frame (the handshake itself is
@@ -47,7 +48,7 @@ logger = configure_logger(__name__)
 KALPA_NATIVE_SAMPLE_RATE = 24000
 MULAW_SAMPLE_RATE = 8000
 
-KALPA_DEFAULT_MODEL = "kalpa-tts-multilingual-beta-v0.1"
+KALPA_DEFAULT_MODEL = "kalpa-tts-1"
 
 # Kalpa rejects utterances longer than this; we truncate rather than fail a live turn.
 MAX_TEXT_CHARS = 8000
