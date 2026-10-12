@@ -71,6 +71,15 @@ def resolve_tool_name(name, tools_params):
     return resolved
 
 
+def record_unresolved_tool_call(name, meta_info, model):
+    """Log a dropped tool call that names no configured tool and record it as a non-fatal LLM error."""
+    logger.warning(f"Model called tool {name!r}, which matches no configured tool; dropping the call")
+    if isinstance(meta_info, dict):
+        meta_info.setdefault("_non_fatal_errors", []).append(
+            {"error_type": "unresolved_tool_call", "error": name, "model": model}
+        )
+
+
 def _is_disallowed_ip(ip):
     """True if ``ip`` (an ``ipaddress`` object) is not safe to connect to."""
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:

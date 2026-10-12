@@ -344,6 +344,44 @@ class TestSilenceRepeats:
         assert agent._silence_repeats == 2
 
 
+class TestSilenceExitThreshold:
+    """The re-prompts a node needs before its _silence_repeats edge fires; the task manager's cap never drops below it."""
+
+    def test_reads_the_current_nodes_silence_edge(self):
+        assert _make_agent().silence_exit_threshold() == 3  # greeting: `_silence_repeats gte 3`
+
+    @pytest.mark.parametrize(
+        "operator,value,needed",
+        [("gte", 3, 3), ("eq", 2, 2), ("gt", 3, 4), ("gte", "4", 4), ("lt", 3, 0), ("neq", 1, 0)],
+    )
+    def test_operator_maps_to_reprompts_needed(self, operator, value, needed):
+        agent = _make_agent()
+        agent.get_node_by_id("greeting")["edges"][1]["expression"]["conditions"] = [
+            {"variable": "_silence_repeats", "operator": operator, "value": value}
+        ]
+        assert agent.silence_exit_threshold() == needed
+
+    def test_takes_the_highest_silence_edge_and_ignores_other_variables(self):
+        agent = _make_agent()
+        greeting = agent.get_node_by_id("greeting")
+        greeting["edges"][1]["expression"]["conditions"].append(
+            {"variable": "_node_turns", "operator": "gte", "value": 9}
+        )
+        greeting["edges"].append(
+            {
+                "to_node_id": "sales",
+                "condition_type": "expression",
+                "expression": {"conditions": [{"variable": "_silence_repeats", "operator": "gte", "value": 5}]},
+            }
+        )
+        assert agent.silence_exit_threshold() == 5
+
+    def test_a_node_without_a_silence_edge_needs_none(self):
+        agent = _make_agent()
+        agent.current_node_id = "sales"
+        assert agent.silence_exit_threshold() == 0
+
+
 class TestMd5Hash:
     def test_get_md5_hash_consistency(self):
         text = "Hello! Welcome to Acme Corp."

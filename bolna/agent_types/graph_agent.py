@@ -5,6 +5,7 @@ import re
 import time
 from dotenv import load_dotenv
 import json
+import math
 
 from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
@@ -21,7 +22,7 @@ from bolna.helpers.utils import (
     select_message_by_language,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
-from bolna.enums import EdgeConditionType, LLMProvider, NodeType, ToolScope
+from bolna.enums import ChatRole, EdgeConditionType, ExpressionOperator, LLMProvider, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -73,6 +74,8 @@ class GraphAgent(BaseAgent):
         self.agent_information = self.config.get("agent_information")
         self.current_node_id = self.config.get("current_node_id")
         self.context_data = self.config.get("context_data") or {}
+        # Edge-parameter values collected during the call, latest value per variable.
+        self.node_extracted_data: Dict[str, Any] = {}
         execution_id = self.config.get("execution_id")
         if execution_id and isinstance(self.context_data.get("recipient_data"), dict):
             self.context_data["recipient_data"]["execution_id"] = execution_id
@@ -462,10 +465,11 @@ class GraphAgent(BaseAgent):
             for key in ("llm_key", "base_url", "api_version", "extra_body"):
                 if self.config.get(key):
                     base_kwargs[key] = self.config[key]
-        if self.service_tier:
-            base_kwargs["service_tier"] = self.service_tier
-        if self.config.get("overflow_llm"):
-            base_kwargs["overflow_llm"] = self.config["overflow_llm"]
+            # Tier and overflow belong to the conversation's backend, so only routing riding it takes them.
+            if self.service_tier:
+                base_kwargs["service_tier"] = self.service_tier
+            if self.config.get("overflow_llm"):
+                base_kwargs["overflow_llm"] = self.config["overflow_llm"]
         self._routing_base_kwargs = base_kwargs
         self._routing_llm_cache: Dict[Tuple[Optional[str], Optional[str]], Any] = {}
         self._routing_llm_cache_max_size = 100
@@ -587,6 +591,19 @@ class GraphAgent(BaseAgent):
     def _edge_function_name(edge: dict) -> str:
         return edge.get("function_name") or f"transition_to_{edge['to_node_id']}"
 
+    @staticmethod
+    def _edge_parameter_schema(param_name: str, spec) -> dict:
+        """A parameter is either a bare type ("string") or a dict with type, description and allowed_values."""
+        if not isinstance(spec, dict):
+            spec = {"type": spec}
+        schema = {
+            "type": spec.get("type") or "string",
+            "description": spec.get("description") or f"The {param_name} provided by the user",
+        }
+        if spec.get("allowed_values"):
+            schema["enum"] = list(spec["allowed_values"])
+        return schema
+
     def _build_transition_tools_for_edges(self, edges: list, allow_stay: bool = True) -> list:
         """allow_stay=False omits stay_on_current_node so the model must pick a real edge."""
         tools = []
@@ -601,11 +618,8 @@ class GraphAgent(BaseAgent):
 
             parameters = {"type": "object", "properties": {}, "required": []}
             if edge.get("parameters"):
-                for param_name, param_type in edge["parameters"].items():
-                    parameters["properties"][param_name] = {
-                        "type": param_type,
-                        "description": f"The {param_name} provided by the user",
-                    }
+                for param_name, spec in edge["parameters"].items():
+                    parameters["properties"][param_name] = self._edge_parameter_schema(param_name, spec)
                     parameters["required"].append(param_name)
 
             parameters["properties"]["reasoning"] = {
@@ -901,8 +915,7 @@ class GraphAgent(BaseAgent):
                 )
                 if next_node_id:
                     self._advance_to_node(next_node_id, entry_index=len(history))
-                    if extracted_params:
-                        self.context_data.update(extracted_params)
+                    self._apply_extracted_params(extracted_params)
                     logger.info(
                         f"Router dispatch (intent) on node '{previous_node}': -> {self.current_node_id} "
                         f"| {reasoning} (latency: {latency_ms:.1f}ms)"
@@ -969,9 +982,36 @@ class GraphAgent(BaseAgent):
         if not self.node_history or self.node_history[-1] != self.current_node_id:
             self.node_history.append(self.current_node_id)
 
+    def silence_exit_threshold(self) -> int:
+        """[silence] re-prompts the current node needs before one of its _silence_repeats expression
+        edges can fire (0 if it has none), so the task manager's re-prompt cap never cuts that exit off."""
+        node = self.get_node_by_id(self.current_node_id) or {}
+        needed = 0
+        for edge in node.get("edges", []):
+            if edge.get("condition_type") != EdgeConditionType.EXPRESSION:
+                continue
+            for condition in (edge.get("expression") or {}).get("conditions", []):
+                if condition.get("variable") != "_silence_repeats":
+                    continue
+                try:
+                    value = float(condition.get("value"))
+                except (TypeError, ValueError):
+                    continue
+                operator = condition.get("operator")
+                if operator in (ExpressionOperator.GTE, ExpressionOperator.EQ):
+                    needed = max(needed, math.ceil(value))
+                elif operator == ExpressionOperator.GT:
+                    needed = max(needed, math.floor(value) + 1)
+        return needed
+
     def mark_first_response_delivered(self) -> None:
         """Unblock routing once the active node's first customer-facing TTS turn is delivered."""
         self._active_node_first_response_delivered = True
+
+    def _apply_extracted_params(self, extracted_params: Optional[dict]) -> None:
+        if extracted_params:
+            self.context_data.update(extracted_params)
+            self.node_extracted_data.update(extracted_params)
 
     def _should_hold_for_first_delivery(self, node: Optional[dict]) -> bool:
         return (
@@ -1476,7 +1516,11 @@ class GraphAgent(BaseAgent):
                 logger.error(f"RAG error for node {self.current_node_id}: {e}")
 
         max_history = 50
-        history_subset = history[-max_history:] if len(history) > max_history else history
+        start = max(0, len(history) - max_history)
+        # a window opening on a tool result orphans it from its assistant tool_calls, which the LLM API rejects
+        while start > 0 and history[start].get("role") == ChatRole.TOOL:
+            start -= 1
+        history_subset = history[start:]
 
         # Pass conversation history as-is to preserve tool_calls/tool_call_id fields
         conversation = [msg for msg in history_subset if msg.get("role") != "system"]
@@ -1614,8 +1658,7 @@ class GraphAgent(BaseAgent):
                 if next_node_id:
                     logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
                     self._advance_to_node(next_node_id, entry_index=len(message))
-                    if extracted_params:
-                        self.context_data.update(extracted_params)
+                    self._apply_extracted_params(extracted_params)
 
                 routing_type = (
                     "deterministic" if (reasoning and reasoning.startswith(_DETERMINISTIC_REASONING_PREFIX)) else "llm"

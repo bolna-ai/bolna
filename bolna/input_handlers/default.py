@@ -66,11 +66,14 @@ class DefaultInputHandler:
         self.last_final_chunk_played_ts: Optional[float] = None
 
     def _end_input_stream(self, io, **meta_info):
-        """Mark the caller's audio as over and tell the transcriber to close."""
+        """Mark the caller's audio as over, tell the transcriber to close and wake mark waiters."""
         self.input_stream_ended = True
         self.queues["transcriber"].put_nowait(
             create_ws_data_packet(data=None, meta_info={"io": io, "eos": True, **meta_info})
         )
+        # No mark will be acknowledged on a closed stream, so playout waits must re-check now.
+        if self.mark_event_meta_data is not None:
+            self.mark_event_meta_data.mark_changed.set()
 
     def get_calculated_plivo_latency(self):
         return self.calculated_plivo_latency

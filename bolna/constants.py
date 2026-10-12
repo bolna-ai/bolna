@@ -87,6 +87,11 @@ REDELIVERED_TRANSCRIPT_WINDOW_MS = 2000
 # made no forward progress at all, e.g. a hung LLM call or an s2s tool task that never
 # completes. BOLNA-2563.
 STALL_HANGUP_HARD_CAP_S = 60.0
+# [silence] re-prompts allowed per silence period (reset when the user speaks or the node changes;
+# raised to what the node's own _silence_repeats exit edge needs). Each re-prompt counts as agent
+# speech and restarts the silence clock, so without a cap a node re-prompt shorter than
+# hangup_after_silence keeps a silent caller on the line until the max call duration.
+DEFAULT_MAX_SILENCE_REPEATS = 2
 # Max time to wait for one LLM reply (_run_llm_task). If the LLM never comes back - no reply,
 # no error, it just hangs - force it to fail after this many seconds and hang up, instead of
 # leaving the call stuck forever. BOLNA-2563.
@@ -343,6 +348,7 @@ UNCOMPRESSED_AUDIO_FORMATS = ("pcm", "wav", "mulaw", "ulaw")
 AUDIO_STREAM_END_SENTINELS = (b"\x00", b"\x00\x00")
 
 END_CALL_FUNCTION_PREFIX = "end_call"
+WEB_SEARCH_FUNCTION_NAME = "web_search"
 
 END_CALL_TOOL_DEFINITION = {
     "type": "function",
@@ -358,6 +364,30 @@ END_CALL_TOOL_DEFINITION = {
                 }
             },
             "required": ["reason"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+}
+
+WEB_SEARCH_TOOL_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": WEB_SEARCH_FUNCTION_NAME,
+        "description": (
+            "Look up current public information on the web. Use this for news, prices, scores, "
+            "and facts that may have changed after your knowledge cutoff. Answer the caller in "
+            "one or two spoken sentences."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "A short search query for the fact the caller asked about.",
+                }
+            },
+            "required": ["query"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -425,6 +455,7 @@ TTS_AUDIO_SETTINGS = {
     SynthesizerProvider.SARVAM: frozenset({"speed", "loudness"}),
     SynthesizerProvider.SMALLEST: frozenset({"speed"}),
     SynthesizerProvider.SONIOX: frozenset({"speed", "reduce_silence"}),
+    SynthesizerProvider.CUSTOM: frozenset({"speed"}),
 }
 
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {

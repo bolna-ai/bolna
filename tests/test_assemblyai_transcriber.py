@@ -205,3 +205,27 @@ def test_pool_points_every_leg_at_the_conversation():
     pool.set_agent_context_source(source)
     for leg in legs.values():
         leg.set_agent_context_source.assert_called_once_with(source)
+
+
+class _FakeSocket:
+    def __init__(self, messages):
+        self._messages = [json.dumps(m) for m in messages]
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._messages:
+            raise StopAsyncIteration
+        return self._messages.pop(0)
+
+
+async def test_session_end_reports_the_audio_duration_for_billing():
+    transcriber = _make_transcriber()
+    socket = _FakeSocket([{"type": "Termination", "audio_duration_seconds": 37, "session_duration_seconds": 38}])
+
+    packets = [packet async for packet in transcriber.receiver(socket)]
+
+    # transcribe() sends the connection's only closing packet; one from the receiver too was billed twice.
+    assert all(packet["data"] != "transcriber_connection_closed" for packet in packets)
+    assert transcriber.closing_meta()["transcriber_duration"] == 37

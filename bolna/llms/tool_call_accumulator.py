@@ -1,6 +1,6 @@
 import json
 from bolna.constants import END_CALL_FUNCTION_PREFIX
-from bolna.helpers.function_calling_helpers import redacted_url, resolve_tool_name
+from bolna.helpers.function_calling_helpers import record_unresolved_tool_call, redacted_url, resolve_tool_name
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message
 from bolna.helpers.logger_config import configure_logger
 from .types import FunctionCallPayload
@@ -52,6 +52,9 @@ class ToolCallAccumulator:
             return None
         if self.called_fun.startswith(END_CALL_FUNCTION_PREFIX):
             return None
+        # An unconfigured tool is dropped in build_api_payload, so a filler would promise a reply that never comes.
+        if self.called_fun not in self.api_params:
+            return None
         self._gave_pre_call_msg = True
         api_tool_pre_call_message = self.api_params.get(self.called_fun, {}).get("pre_call_message", None)
         detected_lang = meta_info.get("detected_language") if meta_info else None
@@ -71,6 +74,7 @@ class ToolCallAccumulator:
 
         first_func_name = self.final_tool_calls[0]["function"]["name"]
         if first_func_name not in self.api_params:
+            record_unresolved_tool_call(first_func_name, meta_info, self.model)
             return None
 
         func_conf = self.api_params[first_func_name]
