@@ -75,6 +75,17 @@ async def test_a_node_that_does_not_end_the_call_is_untouched():
     assert not any(c.is_function_call for c in out)
 
 
+async def test_only_an_end_node_is_told_its_reply_is_the_last_turn():
+    history = [{"role": "user", "content": "Tomorrow works"}]
+
+    end_node_messages = await _agent("bye")._build_messages(history)
+    other_node_messages = await _agent("ask")._build_messages(history)
+
+    assert end_node_messages[-1]["role"] == "system"
+    assert "call ends" in end_node_messages[-1]["content"]
+    assert other_node_messages[-1] == history[-1]
+
+
 async def test_generate_on_an_end_node_does_not_force_end_call_and_appends_it():
     agent = _agent()
     node_llm = _node_llm(_text(CLOSING, end=True))

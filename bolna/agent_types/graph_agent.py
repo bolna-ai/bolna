@@ -55,6 +55,10 @@ _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
 _PROMPT_VAR_PATTERN = re.compile(r"\{\{?\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z0-9_]+|\[[^\[\]{}]+\])*\s*\}\}?")
 _ROUTER_REASONING_DESC = "Brief explanation of why this routing decision was made"
 _ROUTER_CONFIDENCE_DESC = "Confidence score from 0.0 to 1.0 for this routing decision"
+_END_NODE_INSTRUCTION = (
+    "This is the final turn: the call ends as soon as you finish speaking. Deliver this step's closing "
+    "message now. Do not ask the user anything or invite a reply."
+)
 
 # Time variables frozen per call for the conversation prompt; see _prompt_context.
 _TIME_VAR_KEYS = (
@@ -1579,6 +1583,9 @@ class GraphAgent(BaseAgent):
         messages = [{"role": "system", "content": prompt}] + conversation
         if rag_message:
             messages.append(rag_message)
+        # end_call follows this reply, so a question here would be left unanswered by a hangup.
+        if self._ends_call(current_node):
+            messages.append({"role": "system", "content": _END_NODE_INSTRUCTION})
         return messages
 
     def _static_message_chunk(self, current_node: Optional[dict]) -> Optional[dict]:
