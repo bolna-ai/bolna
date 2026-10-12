@@ -3,6 +3,7 @@ from collections import OrderedDict
 import os
 import re
 import time
+import uuid
 from dotenv import load_dotenv
 import json
 import math
@@ -23,11 +24,12 @@ from bolna.helpers.utils import (
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
 from bolna.enums import ChatRole, EdgeConditionType, ExpressionOperator, LLMProvider, NodeType, ToolScope
-from bolna.llms.types import LLMStreamChunk, LatencyData
+from bolna.llms.types import FunctionCallPayload, LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 from bolna.constants import (
+    END_CALL_FUNCTION_PREFIX,
     LANGUAGE_NAMES,
     RESPONSES_API_MODEL_PREFIXES,
     canonical_model,
@@ -1354,7 +1356,8 @@ class GraphAgent(BaseAgent):
             return None
 
         fn = current_node.get("function_call")
-        if not fn:
+        # Forcing end_call hangs up before the node speaks; _stream_node_reply appends it after the reply.
+        if not fn or fn == END_CALL_FUNCTION_PREFIX:
             return None
 
         missing = self._missing_forced_function_vars(current_node, fn)
@@ -1398,6 +1401,8 @@ class GraphAgent(BaseAgent):
         for tool in full:
             name = tool.get("function", {}).get("name")
             params = api_params.get(name, {}) or {}
+            if name == END_CALL_FUNCTION_PREFIX and self._ends_call(node):
+                continue  # appended after the reply; offering it lets the model end before speaking
             if name == forced:
                 subset.append(tool)  # must stay visible so the forced tool_choice is valid
             elif params.get("scope") == ToolScope.NODE.value:
@@ -1439,6 +1444,53 @@ class GraphAgent(BaseAgent):
         if not call_ids_for_fn:
             return False
         return any(msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids_for_fn for msg in node_history)
+
+    def _ends_call(self, node: Optional[dict]) -> bool:
+        return bool(
+            node
+            and node.get("function_call") == END_CALL_FUNCTION_PREFIX
+            and self.llm
+            and getattr(self.llm, "trigger_function_call", False)
+        )
+
+    async def _stream_node_reply(self, node_llm, node, messages, meta_info, synthesize, tool_choice, tools):
+        """Stream the node's reply; on an end_call node, follow it with end_call carrying that reply,
+        so the task manager plays it and hangs up afterwards (interruptibly)."""
+        ends_call = self._ends_call(node)
+        spoken, latency = [], None
+        async for chunk in node_llm.generate_stream(
+            messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=tools
+        ):
+            if ends_call and isinstance(chunk, LLMStreamChunk):
+                if chunk.is_function_call:
+                    ends_call = False  # another tool ran first; the follow-up turn on this node ends the call
+                elif isinstance(chunk.data, str) and chunk.data.strip():
+                    spoken.append(chunk.data.strip())
+                latency = chunk.latency or latency
+            yield chunk
+        if not ends_call:
+            return
+
+        reason = f"end node '{node.get('id')}' reached"
+        call_id = f"call_{uuid.uuid4().hex[:24]}"
+        arguments = json.dumps({"reason": reason})
+        payload = FunctionCallPayload(
+            meta_info=meta_info or {},
+            called_fun=END_CALL_FUNCTION_PREFIX,
+            model_response=[
+                {
+                    "index": 0,
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": END_CALL_FUNCTION_PREFIX, "arguments": arguments},
+                }
+            ],
+            tool_call_id=call_id,
+            textual_response=" ".join(spoken) or None,
+            reason=reason,
+            interruptible_hangup=True,
+        )
+        yield LLMStreamChunk(data=payload, latency=latency, is_function_call=True)
 
     def _prompt_context(self) -> Optional[dict]:
         """Context for prompt substitution with time frozen at call start.
@@ -1617,8 +1669,8 @@ class GraphAgent(BaseAgent):
                 forced_name = tool_choice["function"]["name"] if tool_choice else None
                 node_tools = self._tools_for_node(current_node, forced_name)
                 node_llm = self._conversation_llm_for(current_node)
-                async for chunk in node_llm.generate_stream(
-                    messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
+                async for chunk in self._stream_node_reply(
+                    node_llm, current_node, messages, meta_info, synthesize, tool_choice, node_tools
                 ):
                     yield chunk
                 return
@@ -1719,8 +1771,8 @@ class GraphAgent(BaseAgent):
             forced_name = tool_choice["function"]["name"] if tool_choice else None
             node_tools = self._tools_for_node(current_node, forced_name)
             node_llm = self._conversation_llm_for(current_node)
-            async for chunk in node_llm.generate_stream(
-                messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
+            async for chunk in self._stream_node_reply(
+                node_llm, current_node, messages, meta_info, synthesize, tool_choice, node_tools
             ):
                 yield chunk
 

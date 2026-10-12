@@ -869,7 +869,15 @@ class TaskManager(BaseManager):
                     and self.use_llm_to_determine_hangup
                     and cancellation_prompt
                 )
-                if self.end_call_primary:
+                end_call_nodes = []
+                if self.__is_graph_agent():
+                    llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {}) or {}
+                    end_call_nodes = [
+                        n.get("id")
+                        for n in (llm_config.get("nodes") or [])
+                        if n.get("function_call") == END_CALL_FUNCTION_PREFIX and n.get("id")
+                    ]
+                if self.end_call_primary and not end_call_nodes:
                     self.kwargs["api_tools"] = _inject_end_call_tool(
                         self.kwargs.get("api_tools"),
                         scope=ToolScope.GLOBAL,
@@ -877,22 +885,16 @@ class TaskManager(BaseManager):
                         description=end_call_description,
                     )
                     logger.info("end_call tool active as primary hangup")
-                elif self.__is_graph_agent():
-                    # a node opting in via function_call="end_call" needs the tool regardless of the hangup toggle
-                    llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {}) or {}
-                    end_call_nodes = [
-                        n.get("id")
-                        for n in (llm_config.get("nodes") or [])
-                        if n.get("function_call") == END_CALL_FUNCTION_PREFIX and n.get("id")
-                    ]
-                    if end_call_nodes:
-                        self.kwargs["api_tools"] = _inject_end_call_tool(
-                            self.kwargs.get("api_tools"),
-                            scope=ToolScope.NODE,
-                            nodes=end_call_nodes,
-                            description=end_call_description,
-                        )
-                        logger.info(f"end_call tool injected node-scoped on nodes={end_call_nodes}")
+                elif end_call_nodes:
+                    # a node opting in via function_call="end_call" needs the tool regardless of the hangup toggle;
+                    # in primary mode too, so a graph with end nodes hangs up through them rather than from any node
+                    self.kwargs["api_tools"] = _inject_end_call_tool(
+                        self.kwargs.get("api_tools"),
+                        scope=ToolScope.NODE,
+                        nodes=end_call_nodes,
+                        description=end_call_description,
+                    )
+                    logger.info(f"end_call tool injected node-scoped on nodes={end_call_nodes}")
 
                 # Voicemail detection (time-based)
                 output_tool_available = (
@@ -3445,7 +3447,8 @@ class TaskManager(BaseManager):
             self._end_call_in_progress = True
             self._hangup_cancelled = False
             self._end_call_tool_call_id = resp.get("tool_call_id", "")
-            if self.interruptible_hangup_message:
+            # A graph end node's closing stays interruptible so a caller with a follow-up is not cut off.
+            if self.interruptible_hangup_message or resp.get("interruptible_hangup"):
                 self._hangup_interruptible_window = True
             reason = resp.get("reason", "")
 
