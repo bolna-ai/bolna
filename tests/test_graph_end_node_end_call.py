@@ -166,7 +166,12 @@ async def test_primary_mode_scopes_end_call_to_the_end_nodes_of_a_graph():
             "llm_agent": {"agent_type": "graph_agent", "agent_flow_type": "streaming", "llm_config": llm_config},
             "synthesizer": {
                 "provider": "elevenlabs",
-                "provider_config": {"voice": "Nila", "voice_id": "test", "model": "eleven_turbo_v2_5"},
+                "provider_config": {
+                    "voice": "Nila",
+                    "voice_id": "test",
+                    "model": "eleven_turbo_v2_5",
+                    "synthesizer_key": "test-key",
+                },
                 "stream": True,
                 "buffer_size": 100,
             },
