@@ -86,17 +86,17 @@ class AzureTranscriber(BaseTranscriber):
             await self.cancel_audio_pump()
             await self.initialize_connection()
             if self.connection_error:
-                meta = dict(self.meta_info or {})
-                meta["connection_error"] = self.connection_error
-                await self.transcriber_output_queue.put(create_ws_data_packet("transcriber_connection_closed", meta))
+                await self.transcriber_output_queue.put(
+                    create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+                )
                 return
             self.send_audio_to_transcriber_task = asyncio.create_task(self.send_audio_to_transcriber())
         except Exception as e:
             logger.error(f"Error received in run method - {e}")
             self.connection_error = self.connection_error or str(e)
-            meta = dict(self.meta_info or {})
-            meta["connection_error"] = self.connection_error
-            await self.transcriber_output_queue.put(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.transcriber_output_queue.put(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )
 
     async def cancel_audio_pump(self):
         """Stop the pump feeding the previous connection, if one is still running."""
@@ -172,6 +172,9 @@ class AzureTranscriber(BaseTranscriber):
                     push_stream = self.push_stream
                     if push_stream is not None:
                         push_stream.write(ws_data_packet.get("data"))
+                        self.count_audio_sent(
+                            len(ws_data_packet.get("data")), self.sampling_rate, mulaw=self.encoding == "mulaw"
+                        )
         except Exception as e:
             exc_type, exc_obj, exc_tb = sys.exc_info()
             logger.error(f"Error occurred in send_audio_to_transcriber - {e} at {exc_tb.tb_lineno}")
@@ -217,6 +220,7 @@ class AzureTranscriber(BaseTranscriber):
 
             # run() reads this as "connection dead", so it must describe only this attempt.
             self.connection_error = None
+            self.reset_billed_audio()
 
             speech_config = speechsdk.SpeechConfig(subscription=self.subscription_key, region=self.service_region)
             speech_config.speech_recognition_language = self.recognition_language
@@ -412,12 +416,9 @@ class AzureTranscriber(BaseTranscriber):
         logger.info(f"Session stop event received: {evt} | run_id - {self.run_id}")
         self.connection_live = False
         self.end_time = time.time()
-        if self.meta_info is not None and self.start_time is not None:
-            self.meta_info["transcriber_duration"] = self.end_time - self.start_time
-        meta = dict(self.meta_info or {})
-        if self.connection_error:
-            meta["connection_error"] = self.connection_error
-        await self.transcriber_output_queue.put(create_ws_data_packet("transcriber_connection_closed", meta))
+        await self.transcriber_output_queue.put(
+            create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+        )
 
     async def toggle_connection(self):
         self.connection_on = False
