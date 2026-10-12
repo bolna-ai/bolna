@@ -98,6 +98,7 @@ class GraphAgent(BaseAgent):
         self._silence_repeats = 0
         self._event_triggered_generation = False
         self._active_node_first_response_delivered = True
+        self._end_node_closed = False
         self._hold_until_first_delivery = not self.config.get("turn_based_conversation", False)
         self._last_deterministic_eval = None
         self._frozen_time_vars: Optional[Dict[str, Any]] = None
@@ -751,6 +752,7 @@ class GraphAgent(BaseAgent):
                 self.current_node_entry_index = 0  # caller should set to len(history)
                 self._silence_repeats = 0
                 self._active_node_first_response_delivered = False
+                self._end_node_closed = False
 
                 if self.current_node_id not in self.node_history or self.node_history[-1] != self.current_node_id:
                     self.node_history.append(self.current_node_id)
@@ -985,6 +987,7 @@ class GraphAgent(BaseAgent):
         self.current_node_entry_index = entry_index
         self._silence_repeats = 0
         self._active_node_first_response_delivered = False
+        self._end_node_closed = False
         if not self.node_history or self.node_history[-1] != self.current_node_id:
             self.node_history.append(self.current_node_id)
 
@@ -1450,9 +1453,12 @@ class GraphAgent(BaseAgent):
         return any(msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids_for_fn for msg in node_history)
 
     def _ends_call(self, node: Optional[dict]) -> bool:
+        # Only the first reply of a visit closes; once a barge-in keeps the call up, the node converses
+        # normally and the model ends the call through the end_call tool when the caller is done.
         return bool(
             node
             and node.get("function_call") == END_CALL_FUNCTION_PREFIX
+            and not self._end_node_closed
             and self.llm
             and getattr(self.llm, "trigger_function_call", False)
         )
@@ -1494,6 +1500,8 @@ class GraphAgent(BaseAgent):
             reason=reason,
             interruptible_hangup=True,
         )
+        # Set before yielding: the task manager does not resume this generator after an end_call chunk.
+        self._end_node_closed = True
         yield LLMStreamChunk(data=payload, latency=latency, is_function_call=True)
 
     def _prompt_context(self) -> Optional[dict]:

@@ -75,6 +75,28 @@ async def test_a_node_that_does_not_end_the_call_is_untouched():
     assert not any(c.is_function_call for c in out)
 
 
+async def test_after_a_barge_in_kept_the_call_up_the_end_node_converses_normally():
+    agent = _agent()
+    await _reply(agent, BYE, _text(CLOSING, end=True))  # first reply closes; a barge-in then cancelled the hangup
+
+    out = await _reply(agent, BYE, _text("Sure, go ahead.", end=True))
+    messages = await agent._build_messages([{"role": "user", "content": "Wait, one more question"}])
+
+    assert not any(c.is_function_call for c in out)
+    assert messages[-1]["role"] == "user"
+    assert agent._tools_for_node(BYE) is None  # end_call offered again, for the model to use once the caller is done
+
+
+async def test_reentering_the_end_node_closes_again():
+    agent = _agent()
+    await _reply(agent, BYE, _text(CLOSING, end=True))
+
+    agent._advance_to_node("bye", entry_index=4)
+    out = await _reply(agent, BYE, _text(CLOSING, end=True))
+
+    assert out[-1].is_function_call
+
+
 async def test_only_an_end_node_is_told_its_reply_is_the_last_turn():
     history = [{"role": "user", "content": "Tomorrow works"}]
 
