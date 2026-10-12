@@ -5,6 +5,7 @@ import re
 import time
 from dotenv import load_dotenv
 import json
+import math
 
 from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
@@ -21,7 +22,7 @@ from bolna.helpers.utils import (
     select_message_by_language,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
-from bolna.enums import ChatRole, EdgeConditionType, LLMProvider, NodeType, ToolScope
+from bolna.enums import ChatRole, EdgeConditionType, ExpressionOperator, LLMProvider, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -979,6 +980,28 @@ class GraphAgent(BaseAgent):
         self._active_node_first_response_delivered = False
         if not self.node_history or self.node_history[-1] != self.current_node_id:
             self.node_history.append(self.current_node_id)
+
+    def silence_exit_threshold(self) -> int:
+        """[silence] re-prompts the current node needs before one of its _silence_repeats expression
+        edges can fire (0 if it has none), so the task manager's re-prompt cap never cuts that exit off."""
+        node = self.get_node_by_id(self.current_node_id) or {}
+        needed = 0
+        for edge in node.get("edges", []):
+            if edge.get("condition_type") != EdgeConditionType.EXPRESSION:
+                continue
+            for condition in (edge.get("expression") or {}).get("conditions", []):
+                if condition.get("variable") != "_silence_repeats":
+                    continue
+                try:
+                    value = float(condition.get("value"))
+                except (TypeError, ValueError):
+                    continue
+                operator = condition.get("operator")
+                if operator in (ExpressionOperator.GTE, ExpressionOperator.EQ):
+                    needed = max(needed, math.ceil(value))
+                elif operator == ExpressionOperator.GT:
+                    needed = max(needed, math.floor(value) + 1)
+        return needed
 
     def mark_first_response_delivered(self) -> None:
         """Unblock routing once the active node's first customer-facing TTS turn is delivered."""
