@@ -273,19 +273,13 @@ TRANSFERING_CALL_FILLER = {
     "fr": "D'accord, je transfère l'appel. Un instant, s'il vous plaît.",
 }
 
-# Shown to the model only, to resume the call when a trunk transfer never connects.
-TRANSFER_FAILED_RESUME_MESSAGE = (
-    "[transfer failed] The transfer to the human agent did not connect ({cause}). Tell the caller and continue."
-)
-# Answers a transfer_call re-emitted before the caller speaks again, so a failed transfer is not redialled in a loop.
-TRANSFER_RETRY_DECLINED_MESSAGE = "The transfer just failed. Do not retry it now."
 # Longer than the backend's 15 s dial attempt plus its DB work; shorter than LLM_GENERATION_TIMEOUT_S,
 # which the POST runs inside.
 TRANSFER_WEBHOOK_TIMEOUT_S = 25.0
 # Used when the transfer tool sets no ring_timeout; the max is the longest ring the backend accepts.
 TRUNK_TRANSFER_RING_TIMEOUT_S = 30
 TRUNK_TRANSFER_MAX_RING_TIMEOUT_S = 120
-# How long past the ring timeout to wait for the fork's transfer_failed before resuming anyway.
+# How long past the ring timeout to wait for the fork's transfer_failed before ending the call anyway.
 TRANSFER_DEADLINE_MARGIN_S = 15.0
 
 DEFAULT_USER_ONLINE_MESSAGE = "Hey, are you still there?"

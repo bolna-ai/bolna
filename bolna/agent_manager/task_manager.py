@@ -46,8 +46,6 @@ from bolna.constants import (
     REGEN_SETTLE_EXCLUDED_TRANSCRIBERS,
     NON_EVIDENCE_MARK_TYPES,
     SWITCH_LANGUAGE_TOOL_DEFINITION,
-    TRANSFER_FAILED_RESUME_MESSAGE,
-    TRANSFER_RETRY_DECLINED_MESSAGE,
     TRANSFER_WEBHOOK_TIMEOUT_S,
     TRUNK_TRANSFER_RING_TIMEOUT_S,
     TRUNK_TRANSFER_MAX_RING_TIMEOUT_S,
@@ -507,14 +505,9 @@ class TaskManager(BaseManager):
         self._hangup_cancelled = False
         self._end_call_tool_call_id = None
         self._end_call_hangup_task = None
-        self._transfer_tool_call_id = ""
-        self._transfer_posting = False
-        self._transfer_early_failure = None
         self._transfer_connected = False
-        self._transfer_failed_at: float | None = None
-        self._transfer_retry_declined = False
+        self._transfer_failed = False
         self._transfer_deadline: asyncio.TimerHandle | None = None
-        self._transfer_tasks: set[asyncio.Task] = set()
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
         self._turn_eos_forwarded = False
@@ -3595,28 +3588,6 @@ class TaskManager(BaseManager):
                 self.execute_function_call_task = None
                 return
 
-            if self._transfer_retry_blocked:
-                # Until the caller speaks again, a retry is the model's own idea and would redial in a loop.
-                logger.info(f"transfer_call re-emitted right after a failed transfer for run_id={self.run_id}")
-                # Cleared on entry, but no call is handed off here, so "are you still there" stays on.
-                self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
-                self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
-                self.conversation_history.append_tool_result(
-                    resp.get("tool_call_id", ""),
-                    json.dumps({"status": "failed", "message": TRANSFER_RETRY_DECLINED_MESSAGE}),
-                )
-                # One follow-up so the caller is not left in silence; a further re-emission gets none.
-                if not self._transfer_retry_declined:
-                    self._transfer_retry_declined = True
-                    await self.__do_llm_generation(
-                        self.conversation_history.get_copy(),
-                        self._spawn_followup_meta_info(meta_info),
-                        next_step,
-                        should_bypass_synth=meta_info.get("bypass_synth", False),
-                        should_trigger_function_call=True,
-                    )
-                return
-
             if self.has_transfer:
                 logger.info(f"transfer_call already initiated for run_id={self.run_id}; ignoring duplicate trigger")
                 duplicate_tool_result = json.dumps(
@@ -3663,16 +3634,7 @@ class TaskManager(BaseManager):
                     meta_info,
                     tool_conf.get("pre_call_webhook_param"),
                 )
-            failure = await self._execute_transfer_call_webhook(called_fun, url, param, resp, meta_info)
-            if failure is not None:
-                # The rewritten tool result carries the failure; this follow-up tells the caller.
-                await self.__do_llm_generation(
-                    self.conversation_history.get_copy(),
-                    self._spawn_followup_meta_info(meta_info),
-                    next_step,
-                    should_bypass_synth=meta_info.get("bypass_synth", False),
-                    should_trigger_function_call=True,
-                )
+            await self._execute_transfer_call_webhook(called_fun, url, param, resp, meta_info)
             return
 
         # switch_language tool handler (injected in BOTH flows): waits for in-flight
@@ -4868,18 +4830,21 @@ class TaskManager(BaseManager):
         return (self.transfer_call_params or {}).get("provider") == TelephonyProvider.TRUNK.value
 
     def _transfer_refusal(self, status: int, body: str) -> str | None:
-        """Reason when /process_transfer refused the transfer, None when it was accepted or is unknown."""
+        """Reason when /process_transfer refused a trunk transfer, None when it was accepted or is unknown."""
+        # A carrier settles its own transfers; only a trunk transfer is settled here.
+        if not self._is_trunk_call():
+            return None
         try:
             parsed = json.loads(body)
         except (TypeError, ValueError):
             parsed = None
         parsed = parsed if isinstance(parsed, dict) else {}
         refused = parsed.get("success") is False
-        # A 5xx may have dialled before failing; only the trunk backend flags one that did not (success: false).
-        if parsed.get("unsettled") is True or (status >= 500 and not (refused and self._is_trunk_call())):
+        # A 5xx may have dialled before failing, unless the backend flags that it did not (success: false).
+        if parsed.get("unsettled") is True or (status >= 500 and not refused):
             return None
-        # A trunk 4xx dialled nothing, and keeping it would hold the caller in silence until the deadline.
-        if refused or (400 <= status < 500 and self._is_trunk_call()):
+        # A 4xx dialled nothing, and keeping it would hold the caller in silence until the deadline.
+        if refused or 400 <= status < 500:
             return str(parsed.get("message") or parsed.get("detail") or f"HTTP {status}")
         return None
 
@@ -4892,43 +4857,15 @@ class TaskManager(BaseManager):
         # The backend rings for any value in this range, so what is posted is what it rings.
         return min(max(ring_timeout, 1), TRUNK_TRANSFER_MAX_RING_TIMEOUT_S)
 
-    def _fail_transfer(self, reason: str) -> None:
-        """Clear the transfer and correct its pre-recorded success so the model knows it failed."""
-        self.has_transfer = False
-        self._cancel_transfer_deadline()
-        self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
-        # The ring was not silence: restart the watchdog clocks, as a language switch does.
-        now = time.time()
-        self.last_transmitted_timestamp = self.time_since_last_spoken_human_word = now
-        self._transfer_failed_at, self._transfer_retry_declined = now, False
-        self.conversation_history.replace_tool_result(
-            self._transfer_tool_call_id, json.dumps({"status": "failed", "message": reason})
-        )
-
-    async def _execute_transfer_call_webhook(self, called_fun, url, param, resp, meta_info) -> str | None:
-        """POST the transfer and settle it: the failure reason when known by then, else None.
-
-        This turn owns the outcome while the POST is in flight, so a fork transfer_failed that beats
-        the backend's answer is only recorded and the caller is resumed once, by this turn.
-        """
-        self._transfer_tool_call_id = resp.get("tool_call_id", "")
+    async def _execute_transfer_call_webhook(self, called_fun, url, param, resp, meta_info) -> None:
+        """POST the transfer: a refused trunk transfer ends the call, any other gets a deadline."""
         ring_timeout = self._transfer_ring_timeout(param) if self._is_trunk_call() else None
-        self._transfer_posting, self._transfer_early_failure, self._transfer_connected = True, None, False
-        try:
-            refusal = await self._post_transfer_webhook(called_fun, url, param, resp, meta_info, ring_timeout)
-        finally:
-            self._transfer_posting = False
-        failure = refusal if refusal is not None else self._transfer_early_failure
-        if failure is not None and self._transfer_connected:
-            logger.info(f"transfer failed ({failure}) after the bridge for run_id={self.run_id}; ignoring")
-            failure = None
-        elif failure is not None:
-            logger.warning(f"transfer failed ({failure}) for run_id={self.run_id}; resuming conversation")
-            self._fail_transfer(failure)
-        elif ring_timeout is not None and self.has_transfer and not self._transfer_connected:
+        refusal = await self._post_transfer_webhook(called_fun, url, param, resp, meta_info, ring_timeout)
+        if refusal is not None:
+            self.on_transfer_failed(refusal)
+        elif ring_timeout is not None and self._transfer_pending and not self._transfer_connected:
             # Accepted or unknown: bound the wait for the fork's transfer_failed.
             self._arm_transfer_deadline(ring_timeout + TRANSFER_DEADLINE_MARGIN_S)
-        return failure
 
     async def _post_transfer_webhook(self, called_fun, url, param, resp, meta_info, ring_timeout) -> str | None:
         """POST the transfer payload to the telephony webhook and record transfer_start/end.
@@ -5254,9 +5191,7 @@ class TaskManager(BaseManager):
                 await self._process_conversation_task(message, sequence, meta_info)
             else:
                 logger.error("unsupported task type: {}".format(self.task_config["task_type"]))
-            # A turn started meanwhile (e.g. a transfer resume) owns llm_task now; keep it cancellable.
-            if self.llm_task is asyncio.current_task():
-                self.llm_task = None
+            self.llm_task = None
         except BolnaComponentError as e:
             self.response_in_pipeline = False
             self._synthesis_awaiting_first_audio = False
@@ -8213,10 +8148,10 @@ class TaskManager(BaseManager):
     @property
     def _transfer_pending(self) -> bool:
         """A trunk transfer is ringing with the fork still attached, so the caller hears ringback."""
-        return self.has_transfer and self._is_trunk_call()
+        return self.has_transfer and self._is_trunk_call() and not self._transfer_failed
 
     def on_transfer_failed(self, cause: str) -> None:
-        """The trunk target never connected: record the failure and resume with one turn."""
+        """The trunk transfer did not connect: the fork, a refused POST or the deadline reports it."""
         if self.conversation_ended or not self._transfer_pending:
             logger.info(f"transfer_failed ({cause}) with no transfer pending for run_id={self.run_id}; ignoring")
             return
@@ -8226,32 +8161,27 @@ class TaskManager(BaseManager):
         if self._transfer_connected:
             logger.info(f"transfer_failed ({cause}) after the bridge for run_id={self.run_id}; ignoring")
             return
-        if self._transfer_posting:
-            # The transfer's own turn resumes the caller once its POST returns.
-            self._transfer_early_failure = cause
-            return
-        logger.info(f"transfer_failed ({cause}) for run_id={self.run_id}; resuming conversation")
-        self._fail_transfer(cause)
-        message = TRANSFER_FAILED_RESUME_MESSAGE.format(cause=cause)
-        if self.__is_s2s():
-            self._track_transfer_task(self.tools["s2s"].trigger_response(instructions=message))
-            return
-        self._track_transfer_task(self._inject_and_run_llm(message))
+        self._end_after_failed_transfer(cause)
+
+    def _end_after_failed_transfer(self, reason: str) -> None:
+        """End the call with no further turn, as a failed carrier transfer does."""
+        self._cancel_transfer_deadline()
+        # Lifts the pending gate, which would otherwise refuse this hangup.
+        self._transfer_failed = True
+        logger.info(f"transfer failed ({reason}) for run_id={self.run_id}; ending the call")
+        # Or process_call_hangup speaks the configured goodbye.
+        self.call_hangup_message_config = None
+        # Detached like end_call's, since the fork callback and the deadline cannot await it.
+        self._end_call_hangup_task = asyncio.create_task(self.process_call_hangup())
+        self._end_call_hangup_task.add_done_callback(self.__log_detached_hangup_exception)
 
     def on_transfer_connected(self) -> None:
         """Bridged and the fork closes next: drop the deadline, and stop the POST's turn arming one."""
         self._transfer_connected = True
         self._cancel_transfer_deadline()
 
-    @property
-    def _transfer_retry_blocked(self) -> bool:
-        """A transfer failed and the caller has not spoken since, so a retry would be the model's alone."""
-        return (
-            self._transfer_failed_at is not None and self.time_since_last_spoken_human_word <= self._transfer_failed_at
-        )
-
     def _arm_transfer_deadline(self, delay: float) -> None:
-        """Resume once if the fork never reports how the transfer ended."""
+        """End the call if the fork never reports how the transfer ended."""
         self._cancel_transfer_deadline()
         self._transfer_deadline = asyncio.get_running_loop().call_later(
             delay, self.on_transfer_failed, "transfer status unknown"
@@ -8261,20 +8191,6 @@ class TaskManager(BaseManager):
         if self._transfer_deadline is not None:
             self._transfer_deadline.cancel()
             self._transfer_deadline = None
-
-    def _track_transfer_task(self, coro) -> asyncio.Task:
-        task = asyncio.create_task(coro)
-        self._transfer_tasks.add(task)
-        task.add_done_callback(self._on_transfer_task_done)
-        return task
-
-    def _on_transfer_task_done(self, task: asyncio.Task) -> None:
-        self._transfer_tasks.discard(task)
-        if task.cancelled():
-            return
-        exception = task.exception()
-        if exception is not None:
-            logger.error(f"Detached transfer task failed | error={type(exception).__name__}: {exception}")
 
     def _should_stall_hangup(self, audio_playing, time_since_last_spoken_ai_word, time_since_user_last_spoke):
         """Hang up when the call has made no forward progress at all: no audio playing and both
@@ -8964,13 +8880,11 @@ class TaskManager(BaseManager):
                     self.conversation_history.append_assistant(event.content)
 
             elif isinstance(event, s2s_events.InputTranscript):
-                if event.content:
-                    # Final or not, this is the caller speaking; Gemini can flush it after a FunctionCall.
-                    self.time_since_last_spoken_human_word = time.time()
                 if event.is_final and event.content:
                     logger.info(f"S2S caller: {event.content[:200]}")
                     self.user_spoke = True
                     self.conversation_history.append_user(event.content)
+                    self.time_since_last_spoken_human_word = time.time()
                     # Cleared here rather than in the output loop: the prompt's audio is not
                     # distinguishable from any other turn, but the caller answering is.
                     self.asked_if_user_is_still_there = False
@@ -9198,9 +9112,7 @@ class TaskManager(BaseManager):
                 }
             )
         elif tool_name.startswith("transfer_call"):
-            if self._transfer_retry_blocked:
-                result = json.dumps({"status": "failed", "message": TRANSFER_RETRY_DECLINED_MESSAGE})
-            elif self.has_transfer:
+            if self.has_transfer:
                 result = json.dumps({"status": "success", "message": "Transfer already in progress; wait silently."})
             else:
                 self.has_transfer = True
@@ -9208,13 +9120,10 @@ class TaskManager(BaseManager):
                 # param is the configured tool body, which is where call_transfer_number
                 # lives; the model's own arguments go in as the response, same as the llm
                 # path. Passing the arguments as both leaves the webhook no destination.
-                failure = await self._execute_transfer_call_webhook(
+                await self._execute_transfer_call_webhook(
                     tool_name, params.get("url"), params.get("param"), args, meta_info
                 )
-                if failure is not None:
-                    result = json.dumps({"status": "failed", "message": failure})
-                else:
-                    result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
+                result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
         elif tool_name == WEB_SEARCH_FUNCTION_NAME and self.web_search_config is not None:
             search_task = asyncio.create_task(self._run_web_search(args.get("query", ""), meta_info, event.call_id))
             try:
@@ -9482,7 +9391,7 @@ class TaskManager(BaseManager):
 
         finally:
             self._component_error = None
-            # Before any await below, or the deadline could start a resume during teardown.
+            # Before any await below, or the deadline could start a hangup during teardown.
             self._cancel_transfer_deadline()
 
             # Cancel llm_task first and await it so that any transfer_end appended
@@ -9501,8 +9410,6 @@ class TaskManager(BaseManager):
             )
             tasks_to_cancel.append(process_task_cancellation(self._lid_idle_watcher_task, "lid_idle_watcher_task"))
             tasks_to_cancel.append(process_task_cancellation(self.regen_settle_task, "regen_settle_task"))
-            for task in list(self._transfer_tasks):
-                tasks_to_cancel.append(process_task_cancellation(task, "transfer_task"))
             # Sync cancel BEFORE clearing, so an in-flight render can't repopulate the
             if self.handoff_prewarm_task is not None:
                 self.handoff_prewarm_task.cancel()
