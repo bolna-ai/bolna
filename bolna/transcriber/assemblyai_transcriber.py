@@ -574,6 +574,7 @@ class AssemblyAITranscriber(BaseTranscriber):
                     audio_duration = msg.get("audio_duration_seconds", 0)
                     session_duration = msg.get("session_duration_seconds", 0)
                     logger.info(f"Audio duration: {audio_duration}s, Session duration: {session_duration}s")
+                    self.meta_info = {**(self.meta_info or {}), "transcriber_duration": audio_duration}
                     yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
                     return
 

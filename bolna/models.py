@@ -297,6 +297,7 @@ SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.KALPA.value: KalpaConfig,
     SynthesizerProvider.GEMINI.value: GeminiConfig,
     SynthesizerProvider.SONIOX.value: SonioxConfig,
+    SynthesizerProvider.CUSTOM.value: OpenAIConfig,
 }
 
 
