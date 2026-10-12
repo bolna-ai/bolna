@@ -90,6 +90,7 @@ EXPECTED_FIELDS = {
         "audio_quality": False,
         "chunk_length_schedule": False,
     },
+    "custom": {"voice": True, "model": True, "speed": False},
 }
 
 

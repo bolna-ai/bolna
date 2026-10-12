@@ -62,6 +62,17 @@ def elevenlabs_synthesizer(**kwargs):
     return cls(**kwargs)
 
 
+def custom_synthesizer(**kwargs):
+    """A customer's own TTS on the OpenAI synthesizer, at the endpoint the platform injects per call."""
+    # Handed over as `endpoint` so an OpenAI leg in the same multilingual pool never picks up this URL.
+    endpoint = kwargs.pop("synthesizer_base_url", None)
+    if not endpoint:
+        raise ValueError("custom TTS needs synthesizer_base_url")
+    # An endpoint without auth still needs a key for the SDK; an explicit one keeps it off OPENAI_API_KEY.
+    kwargs["synthesizer_key"] = kwargs.get("synthesizer_key") or "none"
+    return OPENAISynthesizer(endpoint=endpoint, **kwargs)
+
+
 SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.POLLY.value: PollySynthesizer,
     SynthesizerProvider.ELEVENLABS.value: elevenlabs_synthesizer,
@@ -77,6 +88,7 @@ SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.KALPA.value: KalpaSynthesizer,
     SynthesizerProvider.GEMINI.value: GeminiSynthesizer,
     SynthesizerProvider.SONIOX.value: SonioxSynthesizer,
+    SynthesizerProvider.CUSTOM.value: custom_synthesizer,
 }
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
