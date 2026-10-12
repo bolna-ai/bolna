@@ -244,6 +244,9 @@ class _History:
     def append_assistant(self, content, **kwargs):
         self.messages.append({"role": "assistant", "content": content, **kwargs})
 
+    def fill_tool_call_placeholder(self, _turn_id, _content, **_kwargs):
+        return None
+
 
 def _spawning_manager(pending_user_input, followup_turn_id):
     tm = _Stub()

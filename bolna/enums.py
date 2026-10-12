@@ -65,6 +65,8 @@ class SynthesizerProvider(str, Enum):
     KALPA = "kalpa"
     GEMINI = "gemini"
     SONIOX = "soniox"
+    # A customer's own TTS server, over the OpenAI speech API.
+    CUSTOM = "custom"
 
     @classmethod
     def all_values(cls):

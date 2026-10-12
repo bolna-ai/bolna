@@ -35,7 +35,6 @@ def _ignore_tm(im, *, end_call_in_progress):
     tm.hangup_triggered = False
     tm._end_call_in_progress = end_call_in_progress
     tm.has_transfer = False
-    tm.transcriber_duration = 0
     tm._log_transcriber_connection_error = AsyncMock()
     tm.process_transcriber_request = AsyncMock(return_value=0)
     tm.stream = True
