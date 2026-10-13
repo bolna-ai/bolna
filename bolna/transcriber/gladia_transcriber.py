@@ -745,9 +745,11 @@ class GladiaTranscriber(BaseTranscriber):
 
         except (ValueError, ConnectionError) as e:
             logger.error(f"Connection error in transcribe: {e}")
+            self.connection_error = str(e)
             await self.toggle_connection()
         except Exception as e:
             logger.error(f"Unexpected error in transcribe: {e}")
+            self.connection_error = str(e)
             await self.toggle_connection()
         finally:
             if gladia_ws is not None:

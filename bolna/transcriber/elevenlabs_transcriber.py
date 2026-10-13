@@ -545,10 +545,10 @@ class ElevenLabsTranscriber(BaseTranscriber):
                     error_msg = msg.get("error", "Unknown error")
                     logger.warning(f"ElevenLabs input error: {error_msg}")
 
-                elif msg_type == "unaccepted_terms":
-                    error_msg = msg.get("error", "Terms not accepted")
-                    logger.error(f"ElevenLabs terms not accepted: {error_msg}")
-                    logger.error("Please accept terms at https://elevenlabs.io/app/product-terms")
+                elif msg_type in ("unaccepted_terms", "auth_error", "quota_exceeded"):
+                    error_msg = msg.get("error", msg_type)
+                    logger.error(f"ElevenLabs rejected the stream: {msg_type}: {error_msg}")
+                    self.connection_error = f"ElevenLabs {msg_type}: {error_msg}"
                     break
 
                 elif msg_type == "error":
@@ -641,9 +641,11 @@ class ElevenLabsTranscriber(BaseTranscriber):
 
         except (ValueError, ConnectionError) as e:
             logger.error(f"Connection error in transcribe: {e}")
+            self.connection_error = str(e)
             await self.toggle_connection()
         except Exception as e:
             logger.error(f"Unexpected error in transcribe: {e}")
+            self.connection_error = str(e)
             await self.toggle_connection()
         finally:
             if elevenlabs_ws is not None:
