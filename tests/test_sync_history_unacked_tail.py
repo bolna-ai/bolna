@@ -29,6 +29,10 @@ class _InputStub:
     def get_current_mark_started_time(self):
         return 0.0
 
+    def reset_response_heard_by_user(self):
+        self.last_heard_turn_id = None
+        self.last_heard_response_uid = None
+
 
 def _make_tm(prefix=PREFIX, tail=TAIL):
     tm = TaskManager.__new__(TaskManager)
@@ -107,6 +111,32 @@ async def test_barge_in_credits_played_share_of_unacked_chunk():
     marks.clear_data()  # what the output handler does on barge-in before the sync
     await tm.sync_history(marks.fetch_cleared_mark_event_data().items(), clear_ts)
     assert _assistant_content(history) == PREFIX + "rupees two thousand five hundred fifty seven padega abhi ye"
+
+
+async def _barge_in_with_credited_tail():
+    tm, history, marks = _make_tm()
+    clear_ts = marks.get_last_ack_ts_for_turn(8) + 6.97
+    marks.clear_data()
+    await tm.sync_history(marks.fetch_cleared_mark_event_data().items(), clear_ts)
+    assert _assistant_content(history).startswith(PREFIX + "rupees")
+    tm.tools["input"].reset_response_heard_by_user()  # as the cleanup does after each sync
+    return tm, history, marks, clear_ts
+
+
+async def test_later_cleanup_with_nothing_pending_keeps_the_credited_tail():
+    tm, history, marks, clear_ts = await _barge_in_with_credited_tail()
+    credited = _assistant_content(history)
+    marks.clear_data()  # caller speaks again before the next reply sends audio
+    await tm.sync_history(marks.fetch_cleared_mark_event_data().items(), clear_ts + 3)
+    assert _assistant_content(history) == credited
+
+
+async def test_cleanup_that_skipped_the_clear_does_not_replay_the_last_snapshot():
+    tm, history, marks, clear_ts = await _barge_in_with_credited_tail()
+    credited = _assistant_content(history)
+    # Closed socket: handle_interruption returns before clear_data.
+    await tm.sync_history(marks.fetch_cleared_mark_event_data().items(), clear_ts + 60)
+    assert _assistant_content(history) == credited
 
 
 async def test_chunk_sent_after_last_ack_counts_from_its_send():
