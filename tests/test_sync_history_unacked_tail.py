@@ -117,6 +117,28 @@ async def test_chunk_sent_after_last_ack_counts_from_its_send():
     assert _assistant_content(history) == PREFIX + "rupees"  # 1s of the 9.6s tail, not 4s
 
 
+async def test_later_chunk_sent_after_a_playback_gap_counts_from_its_send():
+    first, second = "rupees two thousand five hundred ", "fifty seven padega abhi ye deal limited time ke liye hai"
+    tm, history, marks = _make_tm(tail=first)
+    last_ack_ts = marks.get_last_ack_ts_for_turn(8)
+    marks.mark_event_meta_data["m2"]["duration"] = 2.0
+    marks.update_data(
+        "m3",
+        {
+            "type": "",
+            "turn_id": 8,
+            "response_uid": "r8",
+            "sequence_id": 8,
+            "duration": 8.0,
+            "text_synthesized": second,
+            "sent_ts": last_ack_ts + 5,  # TTS stall: m2 ended 3s before m3 was sent
+        },
+    )
+    marks.clear_data()
+    await tm.sync_history(marks.fetch_cleared_mark_event_data().items(), last_ack_ts + 6)
+    assert _assistant_content(history) == PREFIX + first + "fifty"  # 1s of m3, not 4s
+
+
 async def test_acked_text_without_ack_time_gets_no_tail_credit():
     tm, history, marks = _make_tm()
     tm.mark_event_meta_data = MarkEventMetaData()  # ACK times unknown, heard text still reported
