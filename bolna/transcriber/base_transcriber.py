@@ -3,6 +3,7 @@ import time
 import uuid
 from typing import Callable
 from dotenv import load_dotenv
+from websockets.frames import OK_CLOSE_CODES
 from bolna.helpers.logger_config import configure_logger
 
 load_dotenv()
@@ -52,9 +53,9 @@ class BaseTranscriber:
         return self.closed_connections_billed_s + self._connection_billed_s()
 
     def record_server_close(self, error, provider: str) -> None:
-        """Keep a close the provider sent with any code but 1000/1001 as the connection error, unless one is set."""
+        """Keep a close the provider started with an error code as the connection error, unless one is set."""
         frame = getattr(error, "rcvd", None)
-        if frame is None or frame.code in (1000, 1001) or self.connection_error:
+        if frame is None or frame.code in OK_CLOSE_CODES or error.rcvd_then_sent is False or self.connection_error:
             return
         self.connection_error = f"{provider} closed the connection ({frame.code}): {frame.reason}"
 
