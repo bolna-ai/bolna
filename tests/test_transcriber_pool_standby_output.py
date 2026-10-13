@@ -7,6 +7,8 @@ standby keepalive feeds it silence; reaching the call, they read as barge-ins on
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 import bolna.agent_manager.task_manager as tmmod
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.helpers.utils import create_ws_data_packet
@@ -19,6 +21,7 @@ class FakeTranscriber:
         self.cleanup = AsyncMock()
         self.input_queue = asyncio.Queue()
         self.transcriber_output_queue = output_queue if output_queue is not None else asyncio.Queue()
+        self.discard_open_turn = AsyncMock()
 
     def is_connected(self):
         return True
@@ -106,13 +109,38 @@ async def test_switched_away_transcriber_cannot_barge_in_after_a_mid_sentence_sw
     await pool.cleanup()
 
 
-async def test_standby_connection_close_still_reaches_the_call():
-    # The listener needs every close: it ignores a standby's and reconnects or ends on the active's.
+async def test_standby_connection_close_is_dropped():
+    # During a transfer the listener ends the call on any close, so a standby's must not reach it.
     pool, transcribers, call_queue = await started_pool()
     await transcribers["hi"].emit("transcriber_connection_closed")
     await let_forwarders_run()
 
+    assert drain(call_queue) == []
+    await pool.cleanup()
+
+
+async def test_active_connection_close_reaches_the_call():
+    pool, transcribers, call_queue = await started_pool()
+    await transcribers["en"].emit("transcriber_connection_closed")
+    await let_forwarders_run()
+
     assert drain(call_queue) == ["transcriber_connection_closed"]
+    await pool.cleanup()
+
+
+async def test_switch_closes_the_old_transcribers_turn_before_the_hand_off():
+    # The English leg is mid-sentence (turn 7 open); closing that turn must happen before the
+    # turn-id hand-off, or Bengali inherits an open turn and never starts one of its own.
+    pool, transcribers, call_queue = await started_pool(active="en")
+    transcribers["en"].current_turn_id = 7
+    transcribers["bn"].current_turn_id = None
+    transcribers["en"].discard_open_turn.side_effect = lambda: setattr(transcribers["en"], "current_turn_id", None)
+
+    await pool.switch("bn")
+
+    transcribers["en"].discard_open_turn.assert_awaited_once()
+    transcribers["bn"].discard_open_turn.assert_not_awaited()
+    assert transcribers["bn"].current_turn_id is None
     await pool.cleanup()
 
 
@@ -135,15 +163,15 @@ async def test_transcriber_writing_to_the_call_queue_gets_no_forwarder():
     await pool.cleanup()
 
 
-async def test_cleanup_stops_the_forwarders_after_the_transcribers():
+async def test_cleanup_stops_the_forwarders_even_when_a_transcriber_cleanup_fails():
     pool, transcribers, call_queue = await started_pool()
     assert len(pool.output_forwarder_tasks) == 3
+    transcribers["bn"].cleanup.side_effect = RuntimeError("socket already gone")
 
-    await pool.cleanup()
+    with pytest.raises(RuntimeError):
+        await pool.cleanup()
 
     assert all(task.done() for task in pool.output_forwarder_tasks)
-    for transcriber in transcribers.values():
-        transcriber.cleanup.assert_awaited_once()
 
 
 def test_setup_gives_each_pool_leg_its_own_output_queue(monkeypatch):

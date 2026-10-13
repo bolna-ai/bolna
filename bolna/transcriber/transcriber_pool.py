@@ -4,6 +4,7 @@ import time
 from typing import Awaitable, Callable, Optional
 
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.utils import process_task_cancellation
 from bolna.lid import LIDProvider
 
 logger = configure_logger(__name__)
@@ -263,17 +264,18 @@ class TranscriberPool:
         """Pass one transcriber's events to the call only while it is the active one.
 
         A transcriber switched away from mid-sentence still holds that sentence's undecoded audio,
-        and every keepalive silence frame advances it — it keeps re-emitting interims of words the
-        caller already finished, which the call took as barge-ins on its own replies. Connection
-        closes pass from every transcriber: the listener tells a standby close from an active one.
+        and every keepalive silence frame advances it — it kept re-emitting interims of words the
+        caller already finished, which the call took as barge-ins on its own replies. A standby's
+        connection close is dropped too: while a transfer or goodbye is in progress the listener
+        ends the call on any close, and nothing needs one (switch() reconnects a dropped standby).
         """
         try:
             while True:
                 packet = await leg_queue.get()
-                data = packet.get("data") if isinstance(packet, dict) else None
-                if label == self.active_label or data == "transcriber_connection_closed":
+                if label == self.active_label:
                     self.output_queue.put_nowait(packet)
                     continue
+                data = packet.get("data") if isinstance(packet, dict) else None
                 kind = data.get("type") if isinstance(data, dict) else data
                 logger.info(f"TranscriberPool: dropped standby '{label}' output ({kind}), active='{self.active_label}'")
         except asyncio.CancelledError:
@@ -607,10 +609,17 @@ class TranscriberPool:
                 await target.run()
                 self.reconnect_count += 1
 
+            # Close the old leg's turn before the hand-off: a sentence it was cut off in must not
+            # survive to prefix the caller's words on a later switch back, and its open turn id must
+            # not pass to the target, which would then never start a turn and drop the caller's next one.
+            old_transcriber = self.transcribers[old]
+            discard_open_turn = getattr(old_transcriber, "discard_open_turn", None)
+            if discard_open_turn is not None:
+                await discard_open_turn()
+
             # Carry turn_counter forward so the incoming transcriber continues
             # the turn sequence rather than restarting from 0. The next speech
             # event on the new transcriber will increment the counter normally.
-            old_transcriber = self.transcribers[old]
             inherited_turn_counter = getattr(old_transcriber, "turn_counter", 0)
             if hasattr(target, "turn_counter"):
                 target.turn_counter = inherited_turn_counter
@@ -693,6 +702,9 @@ class TranscriberPool:
                 except asyncio.CancelledError:
                     pass
                 logger.info(f"TranscriberPool: {task_name} task cancelled")
+        # The listener has exited by now, so nothing reads what a forwarder would still pass on.
+        for task in self.output_forwarder_tasks:
+            await process_task_cancellation(task, "transcriber output forwarder")
 
         # Stop LID tap
         if self._lid is not None:
@@ -706,14 +718,5 @@ class TranscriberPool:
         for label, transcriber in self.transcribers.items():
             logger.info(f"TranscriberPool: cleaning up '{label}'")
             await transcriber.cleanup()
-
-        # After the transcribers, so a close they emit while shutting down still reaches the call.
-        for task in self.output_forwarder_tasks:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
 
         logger.info("TranscriberPool: cleanup complete")
