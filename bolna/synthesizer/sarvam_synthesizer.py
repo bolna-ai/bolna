@@ -26,6 +26,8 @@ logger = configure_logger(__name__)
 
 
 class SarvamSynthesizer(StreamSynthesizer):
+    settles_lost_turns = True  # receiver() ends a turn lost with its socket
+
     def __init__(
         self,
         voice_id,
