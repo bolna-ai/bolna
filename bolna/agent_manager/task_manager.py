@@ -2536,14 +2536,26 @@ class TaskManager(BaseManager):
         ]
 
     def _unacked_playback_start(self, pending_chunks, turn_id, has_acked_text):
-        """When the first unacked chunk began playing; None if ACKed audio precedes it at an unknown time."""
+        """Earliest instant unacked audio could play; None if ACKed audio precedes it at an unknown time."""
         last_ack_ts = self.mark_event_meta_data.get_last_ack_ts_for_turn(turn_id)
-        first_sent_ts = pending_chunks[0]["sent_ts"]
         if last_ack_ts:
-            return max(last_ack_ts, first_sent_ts)
+            return last_ack_ts
         if has_acked_text:
             return None
-        return first_sent_ts or self.tools["input"].get_current_mark_started_time()
+        return pending_chunks[0]["sent_ts"] or self.tools["input"].get_current_mark_started_time()
+
+    @staticmethod
+    def _unacked_audio_played(pending_chunks, playback_start, until):
+        """Seconds of pending audio played by until; a chunk plays once the previous one ends and it was sent."""
+        played = 0.0
+        previous_end = playback_start
+        for chunk in pending_chunks:
+            chunk_start = max(previous_end, chunk["sent_ts"])
+            if chunk_start >= until:
+                break
+            played += min(chunk["duration"], until - chunk_start)
+            previous_end = chunk_start + chunk["duration"]
+        return played
 
     def _join_heard_tail(self, response_heard, tail_text, turn_id, first_pending_text):
         """Append the credited tail, with a space only where the chunk boundary falls between words."""
@@ -2600,7 +2612,7 @@ class TaskManager(BaseManager):
             if pending_chunks:
                 played_from = self._unacked_playback_start(pending_chunks, target_turn_id, bool(response_heard))
                 if played_from is not None:
-                    played_for = max(0.0, interruption_processed_at - played_from)
+                    played_for = self._unacked_audio_played(pending_chunks, played_from, interruption_processed_at)
                     tail_text = self.estimate_played_text_for_time(pending_chunks, played_for)
                     if tail_text:
                         logger.info(
