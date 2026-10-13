@@ -81,20 +81,27 @@ class ElevenlabsBase(StreamSynthesizer):
 
     @staticmethod
     def _pronunciation_locators(locators):
-        """Plain-dict locators, held to the same limits as ElevenLabsConfig for direct package use."""
-        locators = [locator.model_dump() if hasattr(locator, "model_dump") else locator for locator in locators or []]
-        if len(locators) > ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES:
-            raise ValueError(
-                f"ElevenLabs accepts at most {ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES} pronunciation dictionaries"
+        """Plain-dict locators within ElevenLabsConfig's limits.
+
+        Every language's voice is built at call start, so an invalid locator is dropped rather than failing the call."""
+        valid = []
+        for locator in locators or []:
+            locator = locator.model_dump() if hasattr(locator, "model_dump") else locator
+            if isinstance(locator, dict) and locator.get("pronunciation_dictionary_id") and locator.get("version_id"):
+                valid.append(
+                    {
+                        "pronunciation_dictionary_id": locator["pronunciation_dictionary_id"],
+                        "version_id": locator["version_id"],
+                    }
+                )
+            else:
+                logger.warning(f"Dropping ElevenLabs pronunciation dictionary without both IDs: {locator}")
+        if len(valid) > ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES:
+            logger.warning(
+                f"ElevenLabs accepts at most {ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES} pronunciation dictionaries; "
+                f"dropping {valid[ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES:]}"
             )
-        if not all(locator.get("pronunciation_dictionary_id") and locator.get("version_id") for locator in locators):
-            raise ValueError(
-                "ElevenLabs pronunciation dictionaries need both pronunciation_dictionary_id and version_id"
-            )
-        return [
-            {"pronunciation_dictionary_id": locator["pronunciation_dictionary_id"], "version_id": locator["version_id"]}
-            for locator in locators
-        ]
+        return valid[:ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES]
 
     def _get_audio_format(self):
         return "mulaw" if self.wire_format == "ulaw_8000" else "wav"

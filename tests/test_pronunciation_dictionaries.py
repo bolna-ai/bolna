@@ -13,9 +13,9 @@ from bolna.helpers.utils import (
     pronunciation_rules_digest,
     static_node_audio_key,
 )
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
-from bolna.models import ElevenLabsConfig, Synthesizer
+from bolna.models import CartesiaConfig, ElevenLabsConfig, PronunciationRules, Synthesizer, tts_provider_config_error
 from bolna.providers import elevenlabs_synthesizer as build_elevenlabs_synthesizer
 from bolna.synthesizer import cartesia_synthesizer, elevenlabs_synthesizer
 from bolna.synthesizer.cartesia_synthesizer import CartesiaSynthesizer
@@ -144,8 +144,29 @@ def test_elevenlabs_dictionaries_need_both_ids(locator):
         ElevenLabsConfig(
             voice="George", voice_id="voice-id", model="eleven_turbo_v2_5", pronunciation_dictionary_locators=[locator]
         )
-    with pytest.raises(ValueError):
-        _elevenlabs(pronunciation_dictionary_locators=[locator])
+    assert "Each ElevenLabs pronunciation dictionary needs both" in tts_provider_config_error(
+        "elevenlabs", {"model": "eleven_turbo_v2_5", "pronunciation_dictionary_locators": [locator]}
+    )
+
+
+def test_save_check_limits_elevenlabs_to_three_dictionaries():
+    config = {"model": "eleven_turbo_v2_5", "pronunciation_dictionary_locators": [LOCATOR] * 4}
+    assert tts_provider_config_error("elevenlabs", config) == "ElevenLabs accepts at most 3 pronunciation dictionaries"
+    assert (
+        tts_provider_config_error("elevenlabs", {**config, "pronunciation_dictionary_locators": [LOCATOR] * 3}) is None
+    )
+    assert (
+        tts_provider_config_error("cartesia", {"model": "sonic-3", "pronunciation_dictionary_locators": [{}]}) is None
+    )
+
+
+def test_invalid_locators_are_dropped_so_the_call_still_speaks():
+    # Every language's voice is built at call start; raising here would fail the whole call.
+    synth = _elevenlabs(pronunciation_dictionary_locators=[{"pronunciation_dictionary_id": "bad"}, LOCATOR])
+    assert synth.pronunciation_dictionary_locators == [LOCATOR]
+    extra = {"pronunciation_dictionary_id": "dict-4", "version_id": "ver-4"}
+    synth = _elevenlabs(pronunciation_dictionary_locators=[LOCATOR] * 3 + [extra])
+    assert synth.pronunciation_dictionary_locators == [LOCATOR] * 3
 
 
 @pytest.mark.parametrize(
@@ -351,6 +372,16 @@ def test_invalid_pronunciation_rules_are_rejected(rules):
         Synthesizer(**ELEVENLABS_SYNTH, pronunciation_rules=rules)
 
 
+def test_word_list_type_holds_its_limits_on_its_own():
+    # The backend declares per-language lists with this type, so both sides share one rule.
+    adapter = TypeAdapter(PronunciationRules)
+    assert adapter.validate_python([{"word": " Bolna ", "say_as": "Bol-na"}])[0].word == "Bolna"
+    with pytest.raises(ValidationError, match="listed more than once"):
+        adapter.validate_python([{"word": "Bolna", "say_as": "a"}, {"word": "BOLNA", "say_as": "b"}])
+    with pytest.raises(ValidationError):
+        adapter.validate_python([{"word": f"w{i}", "say_as": "x"} for i in range(101)])
+
+
 def test_rules_digest_follows_the_rules():
     assert pronunciation_rules_digest(None) == pronunciation_rules_digest([]) == ""
     digest = pronunciation_rules_digest(RULES)
@@ -371,6 +402,17 @@ def test_pronunciation_key_carries_the_rules_only_with_a_dictionary():
     assert pronunciation_dictionary_key("cartesia", config, RULES).startswith("pdict_1#")
     assert pronunciation_dictionary_key("cartesia", config, None) == "pdict_1"
     assert pronunciation_dictionary_key("cartesia", {"model": "sonic-3"}, RULES) == ""
+
+
+def test_customer_cartesia_dictionary_keys_on_its_contents():
+    # Cartesia edits a dictionary in place, so the same ID must not keep serving clips rendered before the edit.
+    config = {"model": "sonic-3", "pronunciation_dict_id": "pdict_1", "pronunciation_dict_fingerprint": "f1"}
+    assert pronunciation_dictionary_key("cartesia", config) == "pdict_1@f1"
+    edited = {**config, "pronunciation_dict_fingerprint": "f2"}
+    assert pronunciation_dictionary_key("cartesia", config) != pronunciation_dictionary_key("cartesia", edited)
+    assert pronunciation_dictionary_key("cartesia", {"model": "sonic-3", "pronunciation_dict_fingerprint": "f1"}) == ""
+    saved = CartesiaConfig(voice="S", voice_id="v", language="en", **config).model_dump()
+    assert saved["pronunciation_dict_fingerprint"] == "f1"
 
 
 def test_bolna_copies_share_one_key_across_regions():

@@ -443,6 +443,8 @@ def pronunciation_dictionary_key(provider, provider_config, pronunciation_rules=
         )
     elif provider == SynthesizerProvider.CARTESIA.value and cartesia_supports_pronunciation_dict(config.get("model")):
         key = config.get("pronunciation_dict_id") or ""
+        if key and config.get("pronunciation_dict_fingerprint"):
+            key = f"{key}@{config['pronunciation_dict_fingerprint']}"
     # A dictionary edited in place keeps its ID, so the rules join the key to stop old clips matching.
     digest = pronunciation_rules_digest(pronunciation_rules) if key else ""
     if on_platform_key and digest:

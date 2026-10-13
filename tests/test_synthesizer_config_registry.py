@@ -47,6 +47,7 @@ EXPECTED_FIELDS = {
         "speed": False,
         "volume": False,
         "pronunciation_dict_id": False,
+        "pronunciation_dict_fingerprint": False,
     },
     "smallest": {"voice": True, "voice_id": True, "model": True, "language": True, "speed": False},
     "sarvam": {

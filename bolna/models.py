@@ -2,6 +2,7 @@ import json
 import annotated_types
 from typing import Annotated, Any, Literal, Optional, List, Union, Dict, Callable
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Discriminator,
@@ -153,6 +154,19 @@ def tts_render_settings(provider: str, provider_config: Optional[dict], exclude=
     return ",".join(settings)
 
 
+def _pronunciation_locators_error(locators) -> Optional[str]:
+    if locators is None:
+        return None
+    if not isinstance(locators, list):
+        return "ElevenLabs pronunciation_dictionary_locators must be a list"
+    if len(locators) > ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES:
+        return f"ElevenLabs accepts at most {ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES} pronunciation dictionaries"
+    for locator in locators:
+        if not (isinstance(locator, dict) and locator.get("pronunciation_dictionary_id") and locator.get("version_id")):
+            return "Each ElevenLabs pronunciation dictionary needs both pronunciation_dictionary_id and version_id"
+    return None
+
+
 def tts_provider_config_error(provider: str, provider_config: Optional[dict]) -> Optional[str]:
     """Why a provider_config value is outside bolna's range for its model, or None when every value fits.
 
@@ -160,6 +174,10 @@ def tts_provider_config_error(provider: str, provider_config: Optional[dict]) ->
     config model would reject for missing fields. Building the config model enforces the same ranges."""
     if not isinstance(provider_config, dict):
         return None
+    if provider == SynthesizerProvider.ELEVENLABS.value:
+        locators_error = _pronunciation_locators_error(provider_config.get("pronunciation_dictionary_locators"))
+        if locators_error:
+            return locators_error
     model = provider_config.get("model")
     for key, value in provider_config.items():
         bounds = tts_control_range(provider, key, model)
@@ -237,6 +255,8 @@ class CartesiaConfig(StandardVoiceConfig):
     volume: Optional[float] = Field(default=1.0, ge=CARTESIA_VOLUME_MIN, le=CARTESIA_VOLUME_MAX)
     # Sent on sonic-3 and newer only.
     pronunciation_dict_id: Optional[str] = None
+    # Set on save from the customer's dictionary contents: Cartesia edits keep the ID, so cached clips key on this.
+    pronunciation_dict_fingerprint: Optional[str] = None
 
 
 class RimeConfig(StandardVoiceConfig):
@@ -388,6 +408,22 @@ class PronunciationRule(BaseModel):
     say_as: str = Field(min_length=1, max_length=PRONUNCIATION_RULE_SAY_AS_MAX_LENGTH)
 
 
+def unique_pronunciation_words(rules):
+    seen = set()
+    for rule in rules or []:
+        word = rule.word.casefold()
+        if word in seen:
+            raise ValueError(f"Pronunciation rule for '{rule.word}' is listed more than once.")
+        seen.add(word)
+    return rules
+
+
+# One voice's word list, wherever it is declared, so every list follows the same limits.
+PronunciationRules = Annotated[
+    List[PronunciationRule], Field(max_length=PRONUNCIATION_RULES_MAX), AfterValidator(unique_pronunciation_words)
+]
+
+
 class Synthesizer(BaseModel):
     provider: str
     # Derived from the registry so a provider registered there is always accepted here.
@@ -397,17 +433,7 @@ class Synthesizer(BaseModel):
     audio_format: Optional[str] = "pcm"
     caching: Optional[bool] = True
     # Word -> say-as pairs to build a provider dictionary from; synthesis applies dictionaries by ID only.
-    pronunciation_rules: Optional[List[PronunciationRule]] = Field(default=None, max_length=PRONUNCIATION_RULES_MAX)
-
-    @field_validator("pronunciation_rules")
-    def validate_unique_pronunciation_words(cls, rules):
-        seen = set()
-        for rule in rules or []:
-            word = rule.word.casefold()
-            if word in seen:
-                raise ValueError(f"Pronunciation rule for '{rule.word}' is listed more than once.")
-            seen.add(word)
-        return rules
+    pronunciation_rules: Optional[PronunciationRules] = None
 
     @model_validator(mode="before")
     def preprocess(cls, values):
