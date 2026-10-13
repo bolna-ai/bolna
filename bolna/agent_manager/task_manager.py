@@ -2518,7 +2518,9 @@ class TaskManager(BaseManager):
                 char_count = int(len(chunk["text"]) * proportion)
                 partial_text = chunk["text"][:char_count]
                 if partial_text and char_count < len(chunk["text"]):
-                    partial_text = self._trim_partial_to_complete_words(partial_text)
+                    words = self._trim_partial_to_complete_words(partial_text)
+                    boundary_space = partial_text[:1] if played_text and words and partial_text[:1].isspace() else ""
+                    partial_text = boundary_space + words
                 if partial_text:
                     played_text.append(partial_text)
             cumulative_duration += chunk_duration
@@ -2588,6 +2590,9 @@ class TaskManager(BaseManager):
                 f"sync_history: target_turn_id={target_turn_id} target_response_uid={target_response_uid} marks={len(mark_events_data)} "
                 f"mark_ids={[mid for mid, _ in mark_events_data]}"
             )
+            if not mark_events_data and not target_from_evidence:
+                logger.info("sync_history: nothing pending and no ack since the last sync; nothing to trim")
+                return
             input_handler = self.tools["input"]
             response_heard = input_handler.get_response_heard_for_response(target_response_uid)
             if not response_heard:
