@@ -609,9 +609,8 @@ class TranscriberPool:
                 await target.run()
                 self.reconnect_count += 1
 
-            # Close the old leg's turn before the hand-off: a sentence it was cut off in must not
-            # survive to prefix the caller's words on a later switch back, and its open turn id must
-            # not pass to the target, which would then never start a turn and drop the caller's next one.
+            # Close the old leg's turn: a sentence it was cut off in must not survive to prefix the
+            # caller's words on a later switch back.
             old_transcriber = self.transcribers[old]
             discard_open_turn = getattr(old_transcriber, "discard_open_turn", None)
             if discard_open_turn is not None:
@@ -620,11 +619,11 @@ class TranscriberPool:
             # Carry turn_counter forward so the incoming transcriber continues
             # the turn sequence rather than restarting from 0. The next speech
             # event on the new transcriber will increment the counter normally.
+            # Not current_turn_id: a target handed an open turn never starts its own, and drops the
+            # caller's next utterance (the endpoint finds it already sent and emits only speech_ended).
             inherited_turn_counter = getattr(old_transcriber, "turn_counter", 0)
             if hasattr(target, "turn_counter"):
                 target.turn_counter = inherited_turn_counter
-            if hasattr(target, "current_turn_id") and getattr(old_transcriber, "current_turn_id", None) is not None:
-                target.current_turn_id = old_transcriber.current_turn_id
 
             self.active_label = label
             logger.info(f"TranscriberPool: switched {old} -> {label} (inherited turn_counter={inherited_turn_counter})")

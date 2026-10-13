@@ -128,18 +128,26 @@ async def test_active_connection_close_reaches_the_call():
     await pool.cleanup()
 
 
-async def test_switch_closes_the_old_transcribers_turn_before_the_hand_off():
-    # The English leg is mid-sentence (turn 7 open); closing that turn must happen before the
-    # turn-id hand-off, or Bengali inherits an open turn and never starts one of its own.
+async def test_switch_closes_the_old_transcribers_turn():
     pool, transcribers, call_queue = await started_pool(active="en")
-    transcribers["en"].current_turn_id = 7
-    transcribers["bn"].current_turn_id = None
-    transcribers["en"].discard_open_turn.side_effect = lambda: setattr(transcribers["en"], "current_turn_id", None)
 
     await pool.switch("bn")
 
     transcribers["en"].discard_open_turn.assert_awaited_once()
     transcribers["bn"].discard_open_turn.assert_not_awaited()
+    await pool.cleanup()
+
+
+async def test_switch_hands_over_the_turn_counter_but_not_an_open_turn_id():
+    # An old leg with no override keeps its turn open through discard_open_turn; the target must
+    # still start a turn of its own, or it drops the caller's next utterance.
+    pool, transcribers, call_queue = await started_pool(active="en")
+    transcribers["en"].turn_counter, transcribers["en"].current_turn_id = 7, 7
+    transcribers["bn"].turn_counter, transcribers["bn"].current_turn_id = 3, None
+
+    await pool.switch("bn")
+
+    assert transcribers["bn"].turn_counter == 7
     assert transcribers["bn"].current_turn_id is None
     await pool.cleanup()
 

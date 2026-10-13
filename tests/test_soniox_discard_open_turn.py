@@ -1,8 +1,8 @@
 """A Soniox leg switched away from mid-sentence must close that turn, not carry it.
 
-Left open, the sentence survives the switch: it is prefixed to the caller's next utterance when the
-call switches back, and its open turn id handed to the incoming leg makes that leg drop the caller's
-first utterance.
+Left open, the sentence survives the switch and is prefixed to the caller's next utterance when the
+call switches back. Separately, the incoming leg must never inherit any leg's open turn id, or it skips
+starting its own turn and drops the caller's first utterance.
 """
 
 import asyncio
@@ -10,6 +10,7 @@ import json
 import time
 
 from bolna.constants import SONIOX_ENDPOINT_TOKEN, SONIOX_FINALIZE_TOKEN
+from bolna.transcriber.base_transcriber import BaseTranscriber
 from bolna.transcriber.soniox_transcriber import SonioxTranscriber
 from bolna.transcriber.transcriber_pool import TranscriberPool
 
@@ -88,6 +89,26 @@ async def test_switching_back_mid_sentence_keeps_the_callers_first_utterance():
     await hear(english, tokens(final("apni ki "), pending("jokay")))
     await pool.switch("bn")
     events = await hear(bengali, tokens(final("dekhaben?")), tokens(final(SONIOX_ENDPOINT_TOKEN)))
+
+    assert events == [
+        "speech_started",
+        {"type": "interim_transcript_received", "content": "dekhaben?"},
+        {"type": "transcript", "content": "dekhaben?"},
+    ]
+
+
+async def test_switch_from_a_leg_without_an_override_keeps_the_callers_first_utterance():
+    # Deepgram, Sarvam and the rest keep the base no-op, so their open turn survives the switch.
+    plain = BaseTranscriber()
+    plain.is_connected = lambda: True
+    soniox = soniox_leg()
+    pool = TranscriberPool({"bn": soniox, "en": plain}, asyncio.Queue(), asyncio.Queue(), "bn", {})
+
+    await hear(soniox, tokens(final("hello")), tokens(final(SONIOX_ENDPOINT_TOKEN)))
+    await pool.switch("en")
+    plain.turn_counter, plain.current_turn_id = 2, 2
+    await pool.switch("bn")
+    events = await hear(soniox, tokens(final("dekhaben?")), tokens(final(SONIOX_ENDPOINT_TOKEN)))
 
     assert events == [
         "speech_started",
