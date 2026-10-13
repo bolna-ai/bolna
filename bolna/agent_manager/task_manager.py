@@ -7664,8 +7664,7 @@ class TaskManager(BaseManager):
                     meta_info["text"], self.__static_audio_identity(meta_info.get("detected_language"))
                 )
             if self.turn_based_conversation or self.task_config["tools_config"]["output"]["provider"] == "default":
-                # Static-node clips are pre-generated as mp3; fetch that
-                # format explicitly rather than the output format, which may differ (e.g. wav).
+                # Static-node clips are pre-generated as mp3; fetch that format, not the output format (e.g. wav).
                 audio_format = "mp3" if static_node_audio else self.task_config["tools_config"]["output"]["format"]
                 try:
                     audio_chunk = await get_raw_audio_bytes(
