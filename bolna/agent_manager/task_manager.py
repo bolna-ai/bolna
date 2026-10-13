@@ -3046,11 +3046,12 @@ class TaskManager(BaseManager):
                 ):
                     break
 
-            # Cached clips are a single mark that is always the final chunk, so this shortcut
-            # would skip waiting for the whole message rather than just its tail.
+            # Skip only a streaming synth's audio-less end-of-stream mark. An HTTP or cached clip is one
+            # final mark holding the whole reply; static clips stay listed since web mp3 marks report 0s.
             if (
                 first_item.get("text_synthesized")
                 and first_item.get("is_final_chunk") is True
+                and not first_item.get("duration")
                 and first_item.get("type") not in CACHED_SINGLE_MARK_CATEGORIES
             ):
                 break

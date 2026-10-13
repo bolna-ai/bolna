@@ -121,8 +121,8 @@ def _wait_tm(mark_data):
 
 
 async def test_a_streamed_final_chunk_still_shortcuts_the_hangup_drain():
-    # Everything before the tail has ACKed; not waiting on it is the intended latency win.
-    tm = _wait_tm({"type": "", "text_synthesized": "tail", "is_final_chunk": True, "duration": 8.0})
+    # A streaming synth's final mark is its end-of-stream marker, which carries no audio.
+    tm = _wait_tm({"type": "", "text_synthesized": "tail", "is_final_chunk": True, "duration": 0})
     await asyncio.wait_for(tm.wait_for_current_message(), timeout=1.0)
 
 
