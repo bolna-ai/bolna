@@ -395,12 +395,9 @@ def get_md5_hash(text):
     return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
-def static_node_audio_key(text, provider=None, voice=None, voice_id=None, model=None, render_settings=""):
-    """S3 filename stem for a static-node clip, bound to the voice and slider settings it was rendered with."""
-    identity = "|".join(str(part or "") for part in (provider, voice, voice_id, model))
-    if render_settings:
-        identity = f"{identity}|{render_settings}"
-    return get_md5_hash(f"{identity}|{text}")
+def static_node_audio_key(text, audio_identity):
+    """S3 filename stem for a static-node clip of `text` rendered in the voice `audio_identity` names."""
+    return get_md5_hash(f"{audio_identity}|{text}")
 
 
 def is_valid_md5(hash_string):
@@ -1115,7 +1112,7 @@ def get_date_time_from_timezone(timezone):
 
 
 def select_message_by_language(message_config: Union[str, dict], detected_language: Optional[str] = None) -> str:
-    """Select message by detected language, fallback to 'en'."""
+    """Select message by detected language, fallback to 'en', then to the first language in sorted order."""
     if isinstance(message_config, str):
         return message_config
 
@@ -1128,7 +1125,9 @@ def select_message_by_language(message_config: Union[str, dict], detected_langua
         if en_value and en_value.strip():
             return en_value
 
-        return next((v for v in message_config.values() if v and v.strip()), "")
+        # Sorted so a saved config and the same config read back from storage pick the same text.
+        fallbacks = (message_config[language] for language in sorted(message_config))
+        return next((v for v in fallbacks if v and v.strip()), "")
     return ""
 
 
