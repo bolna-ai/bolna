@@ -37,8 +37,8 @@ def pixa():
 class ClosingSocket:
     """Yields the given messages, then ends the way websockets does when the server closes it."""
 
-    def __init__(self, close, messages=()):
-        self.close, self.messages = close, list(messages)
+    def __init__(self, close, messages=(), closed_by_us=False):
+        self.close, self.messages, self.closed_by_us = close, list(messages), closed_by_us
 
     def __aiter__(self):
         return self
@@ -46,9 +46,12 @@ class ClosingSocket:
     async def __anext__(self):
         if self.messages:
             return self.messages.pop(0)
-        if self.close is not None and self.close.code in (1000, 1001):
+        if self.close is not None and self.close.code in (1000, 1001, 1005):
             raise StopAsyncIteration
-        raise ConnectionClosedError(self.close, None)
+        if self.close is None:
+            raise ConnectionClosedError(None, None)
+        reply = Close(1000, "") if self.closed_by_us else self.close
+        raise ConnectionClosedError(self.close, reply, not self.closed_by_us)
 
 
 async def receive(transcriber, socket):
@@ -66,7 +69,11 @@ async def test_a_rejecting_close_becomes_the_connection_error(make):
 
 
 @pytest.mark.parametrize("make", [sarvam, openai, pixa])
-@pytest.mark.parametrize("close", [Close(1000, ""), Close(1001, "going away"), None], ids=["1000", "1001", "no frame"])
+@pytest.mark.parametrize(
+    "close",
+    [Close(1000, ""), Close(1001, "going away"), Close(1005, ""), None],
+    ids=["1000", "1001", "1005", "no frame"],
+)
 async def test_a_normal_close_or_a_socket_that_just_died_is_not_an_error(make, close):
     transcriber = make()
 
@@ -74,6 +81,15 @@ async def test_a_normal_close_or_a_socket_that_just_died_is_not_an_error(make, c
 
     assert transcriber.connection_error is None
     assert "connection_error" not in transcriber.closing_meta()
+
+
+@pytest.mark.parametrize("make", [sarvam, openai, pixa])
+async def test_the_reply_to_a_close_we_started_is_not_an_error(make):
+    transcriber = make()
+
+    await receive(transcriber, ClosingSocket(Close(1011, "keepalive ping timeout"), closed_by_us=True))
+
+    assert transcriber.connection_error is None
 
 
 async def test_an_error_message_sent_before_the_close_is_kept():
