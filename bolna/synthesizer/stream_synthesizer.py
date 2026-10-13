@@ -331,11 +331,31 @@ class StreamSynthesizer(BaseSynthesizer):
     # monitor_connection() — shared reconnect loop
     # ------------------------------------------------------------------
 
+    def server_rejection(self, ws):
+        """The reason the provider gave for closing `ws` with any code but 1000/1001, or None."""
+        frame = getattr(getattr(ws, "protocol", None), "close_rcvd", None)
+        if frame is None or frame.code in (1000, 1001):
+            return None
+        return f"{self.provider_name} closed the connection ({frame.code}): {frame.reason}"
+
     async def monitor_connection(self):
         consecutive_failures = 0
+        # A provider that keeps closing fresh sockets with an error code is rejecting the call.
+        consecutive_rejections = 0
+        rejected_ws = None
 
         while consecutive_failures < MAX_CONNECTION_FAILURES:
             if not self._is_ws_connected():
+                rejection = self.server_rejection(self.websocket)
+                if rejection is None:
+                    consecutive_rejections = 0
+                elif self.websocket is not rejected_ws:
+                    rejected_ws = self.websocket
+                    consecutive_rejections += 1
+                    logger.warning(rejection)
+                    if consecutive_rejections >= MAX_CONNECTION_FAILURES:
+                        self.connection_error = self.connection_error or rejection
+                        break
                 logger.info(f"Re-establishing {self.provider_name} connection...")
                 result = await self.establish_connection()
                 if result is None:

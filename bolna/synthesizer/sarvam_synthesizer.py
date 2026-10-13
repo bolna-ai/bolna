@@ -10,6 +10,7 @@ import aiohttp
 import websockets
 from websockets.exceptions import InvalidHandshake
 
+from .base_synthesizer import raise_if_rejected
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
@@ -23,6 +24,11 @@ from bolna.constants import (
 )
 
 logger = configure_logger(__name__)
+
+# Sarvam closes a socket left idle too long; monitor_connection redials it.
+SARVAM_IDLE_TIMEOUT = 408
+# One sentence Sarvam cannot speak (e.g. no character in the voice's language); only that turn ends.
+SARVAM_TEXT_REJECTED = (400, 422)
 
 
 class SarvamSynthesizer(StreamSynthesizer):
@@ -196,6 +202,13 @@ class SarvamSynthesizer(StreamSynthesizer):
 
                 if data.get("type") == "error":
                     logger.error(f"Sarvam TTS error response: {data}")
+                    code = data.get("data", {}).get("code")
+                    if code == SARVAM_IDLE_TIMEOUT:
+                        continue
+                    if code in SARVAM_TEXT_REJECTED:
+                        self.last_text_sent = False
+                        yield b"\x00"
+                        continue
                     self.connection_error = json.dumps(data)
                     return
 
@@ -294,7 +307,9 @@ class SarvamSynthesizer(StreamSynthesizer):
                     if data and isinstance(data.get("audios", []), list) and data["audios"]:
                         return data["audios"][0]
                 else:
-                    logger.error(f"Error: {response.status} - {await response.text()}")
+                    detail = await response.text()
+                    logger.error(f"Error: {response.status} - {detail}")
+                    raise_if_rejected("Sarvam", response.status, detail)
 
     async def synthesize(self, text):
         return await self._generate_http(text)

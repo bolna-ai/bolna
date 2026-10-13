@@ -8,11 +8,15 @@ import azure.cognitiveservices.speech as speechsdk
 from azure.cognitiveservices.speech import CancellationErrorCode
 
 from .base_synthesizer import BaseSynthesizer
+from bolna.exceptions import SynthesizerError
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
 logger = configure_logger(__name__)
+
+# Cancellations that fail every turn for the rest of the call.
+REJECTED_CANCELLATIONS = (CancellationErrorCode.AuthenticationFailure, CancellationErrorCode.Forbidden)
 load_dotenv()
 
 
@@ -172,6 +176,7 @@ class AzureSynthesizer(BaseSynthesizer):
 
                 chunk_queue = asyncio.Queue()
                 done_event = asyncio.Event()
+                rejections = []
                 start_time = time.perf_counter()
 
                 try:
@@ -195,6 +200,8 @@ class AzureSynthesizer(BaseSynthesizer):
                     logger.error(f"Azure TTS canceled: {cancellation.reason} - voice {self.voice}")
                     if cancellation.reason == speechsdk.CancellationReason.Error:
                         self._log_cancellation_error(cancellation)
+                        if cancellation.error_code in REJECTED_CANCELLATIONS:
+                            rejections.append(f"Azure TTS {cancellation.error_code}: {cancellation.error_details}")
                     asyncio.run_coroutine_threadsafe(_set_done(), self.loop)
 
                 async def _set_done():
@@ -256,6 +263,9 @@ class AzureSynthesizer(BaseSynthesizer):
 
                     except asyncio.TimeoutError:
                         continue
+
+                if rejections:
+                    raise SynthesizerError(rejections[0], provider="azure")
 
                 if self.caching and full_audio:
                     logger.info(f"Caching audio for text: {text}")

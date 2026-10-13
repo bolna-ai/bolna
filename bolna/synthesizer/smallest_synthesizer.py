@@ -7,6 +7,7 @@ import time
 import aiohttp
 import websockets
 
+from .base_synthesizer import raise_if_rejected
 from .stream_synthesizer import StreamSynthesizer
 from bolna.constants import SMALLEST_TTS_SPEED_MAX, SMALLEST_TTS_SPEED_MIN
 from bolna.helpers.logger_config import configure_logger
@@ -197,7 +198,9 @@ class SmallestSynthesizer(StreamSynthesizer):
                 if response.status == 200:
                     return await response.read()
                 else:
-                    logger.error(f"Error: {response.status} - {await response.text()}")
+                    detail = await response.text()
+                    logger.error(f"Error: {response.status} - {detail}")
+                    raise_if_rejected("Smallest", response.status, detail)
                     return None
 
     async def synthesize(self, text):

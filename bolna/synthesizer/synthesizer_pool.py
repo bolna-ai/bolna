@@ -116,6 +116,7 @@ class SynthesizerPool:
             logger.info(f"SynthesizerPool: _run_generate cancelled for '{label}'")
         except Exception as e:
             logger.error(f"SynthesizerPool: error in _run_generate for '{label}': {e}", exc_info=True)
+            self._output_queue.put_nowait(e)
 
     async def generate(self):
         """Async generator that yields audio packets from the active synthesizer.
@@ -128,6 +129,8 @@ class SynthesizerPool:
             if message is _SWITCH_SENTINEL:
                 logger.info("SynthesizerPool: generate() received SWITCH_SENTINEL, returning")
                 return
+            if isinstance(message, Exception):
+                raise message
             yield message
 
     # ------------------------------------------------------------------
