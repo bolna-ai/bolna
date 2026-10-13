@@ -523,6 +523,7 @@ class OpenAITranscriber(BaseTranscriber):
                     traceback.print_exc()
 
         except ConnectionClosedError as e:
+            self.record_server_close(e, "OpenAI")
             logger.error(f"OpenAI WebSocket closed during receiver: {e}")
         except Exception:
             traceback.print_exc()
