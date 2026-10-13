@@ -51,6 +51,13 @@ class BaseTranscriber:
         this at teardown because after a hangup it stops reading closing packets after the first."""
         return self.closed_connections_billed_s + self._connection_billed_s()
 
+    def record_server_close(self, error, provider: str) -> None:
+        """Keep a close the provider sent with any code but 1000/1001 as the connection error, unless one is set."""
+        frame = getattr(error, "rcvd", None)
+        if frame is None or frame.code in (1000, 1001) or self.connection_error:
+            return
+        self.connection_error = f"{provider} closed the connection ({frame.code}): {frame.reason}"
+
     def closing_meta(self) -> dict:
         """Meta for the connection's transcriber_connection_closed packet. Closes the billing window, so
         a second packet for the same connection reports 0 and the call total counts it once."""

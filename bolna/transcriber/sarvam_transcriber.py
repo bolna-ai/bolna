@@ -495,9 +495,9 @@ class SarvamTranscriber(BaseTranscriber):
                 except Exception:
                     logger.error(f"Sarvam receiver error handling message: {traceback.format_exc()}")
         except ConnectionClosed as e:
-            # Logged, not treated as an error: a socket dying abnormally is also what a
-            # normal hangup looks like from here, and only the error message above tells
-            # the two apart.
+            # Sarvam rejects some streams with only a close frame, no error message (e.g. credits
+            # exhausted). A socket that just dies sends no frame and stays a plain end.
+            self.record_server_close(e, "Sarvam")
             logger.info(f"Sarvam websocket closed: code={e.code} reason={e.reason!r}")
         except Exception:
             logger.error(f"Sarvam receiver error: {traceback.format_exc()}")
