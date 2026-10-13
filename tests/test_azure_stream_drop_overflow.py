@@ -108,6 +108,29 @@ async def test_a_stream_that_drops_before_any_output_is_reissued_on_the_overflow
     assert [e["error_type"] for e in meta_info["_non_fatal_errors"]] == ["stream_dropped_before_output"]
 
 
+def stream_error(error_type):
+    return f"data: {json.dumps({'error': {'message': 'The server had an error.', 'type': error_type}})}\n\n".encode()
+
+
+async def test_a_server_error_inside_the_stream_before_any_output_is_reissued():
+    pool = Backend(Body([ROLE, stream_error("server_error")]))
+    overflow = Backend(Body(HEALTHY))
+
+    chunks = await run_turn(azure_llm(pool, overflow))
+
+    assert words(chunks) == REPLY.split()
+    assert chunks[-1].overflowed is True
+
+
+async def test_any_other_error_inside_the_stream_is_not_reissued():
+    pool = Backend(Body([ROLE, stream_error("invalid_request_error")]))
+    overflow = Backend(Body(HEALTHY))
+
+    with pytest.raises(openai.APIError):
+        await run_turn(azure_llm(pool, overflow))
+    assert overflow.requests == []
+
+
 async def test_a_stream_that_drops_after_output_is_not_reissued():
     """Part of the reply may already be spoken, so a second answer would repeat it."""
     pool = Backend(Body([ROLE, sse({"content": "Sure, I can help"})], then=drop))

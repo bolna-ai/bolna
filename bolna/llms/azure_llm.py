@@ -43,7 +43,10 @@ def should_overflow(error) -> bool:
     """Whether another backend is worth trying: saturation, a server fault, or no connection."""
     if isinstance(error, (APIConnectionError, httpx.TransportError)):
         return True
-    return isinstance(error, APIStatusError) and (error.status_code == 429 or error.status_code >= 500)
+    if isinstance(error, APIStatusError):
+        return error.status_code == 429 or error.status_code >= 500
+    # A fault reported inside an already-open stream has no status code, only its error type.
+    return isinstance(error, APIError) and error.type == "server_error"
 
 
 def has_output(chunk) -> bool:
