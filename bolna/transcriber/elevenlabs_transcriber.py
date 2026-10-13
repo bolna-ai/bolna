@@ -614,6 +614,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
                 elevenlabs_ws = await self.elevenlabs_connect()
             except (ValueError, ConnectionError) as e:
                 logger.error(f"Failed to establish ElevenLabs connection: {e}")
+                self.connection_error = str(e)
                 await self.toggle_connection()
                 return
 
