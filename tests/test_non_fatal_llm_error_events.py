@@ -234,6 +234,7 @@ async def test_openai_chat_stream_stashes_the_finish_reason():
 async def test_azure_chat_stream_stashes_the_finish_reason():
     llm = stub_chat_llm()
     llm._create_completion = AsyncMock(return_value=(stream_of([chat_chunk(), chat_chunk("length")]), False))
+    llm._overflow_on_early_drop = AzureLLM._overflow_on_early_drop.__get__(llm)
     meta_info = {"sequence_id": 4}
     await drain(AzureLLM._generate_stream_chat(llm, [{"role": "user", "content": "hi"}], meta_info=meta_info))
     assert meta_info["llm_finish_reason"] == "length"
