@@ -24,7 +24,7 @@ from bolna.helpers.utils import (
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
 from bolna.enums import ChatRole, EdgeConditionType, ExpressionOperator, LLMProvider, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
-from bolna.llms import OpenAiLLM, LiteLLM
+from bolna.llms import AzureLLM, OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 from bolna.constants import (
@@ -135,8 +135,8 @@ class GraphAgent(BaseAgent):
         self._active_conversation_llm = self.llm
         self._prewarm_conversation_overrides()
 
-        # Hangup/voicemail run on OpenAiLLM, so a conversation on a non-OpenAI provider lends no
-        # usable key and these fall back to the platform OpenAI key.
+        # Hangup runs on OpenAiLLM, so a conversation on a non-OpenAI provider lends no usable key and it falls
+        # back to the platform OpenAI key. Voicemail always runs on the platform Azure OpenAI deployment.
         aux_provider = self.config.get("aux_provider") or self.config.get("provider") or "openai"
         aux_model = (self.config.get("aux_model") or self.llm_model or "").split("/", 1)[-1]
         llm_kwargs = {}
@@ -154,7 +154,10 @@ class GraphAgent(BaseAgent):
         self.conversation_completion_llm = OpenAiLLM(
             model=os.getenv("CHECK_FOR_COMPLETION_LLM", aux_model or "gpt-4o-mini"), **llm_kwargs
         )
-        self.voicemail_llm = OpenAiLLM(model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"), **llm_kwargs)
+        self.voicemail_llm = AzureLLM(
+            model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"),
+            base_url=os.getenv("AZURE_OPENAI_BASE_URL") or os.getenv("AZURE_OPENAI_ENDPOINT"),
+        )
 
     def _initialize_llm(self):
         """Initialize LLM with api_tools support (same pattern as KnowledgeBaseAgent)."""
