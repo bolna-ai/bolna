@@ -6,6 +6,7 @@ import audioop
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
 
 from bolna.models import Synthesizer
@@ -359,10 +360,44 @@ def test_receiver_survives_an_unexpected_or_malformed_control_frame():
 
 def test_telephony_chunks_are_resampled_to_8k_and_mulaw_encoded():
     s = _synth(use_mulaw=True)
-    out = s._process_audio_chunk(_pcm(1.0))
-    # 24k 16-bit in -> 8k 8-bit out: one sixth of the bytes, and decodable as mu-law.
-    assert len(out) == 8000
-    assert len(audioop.ulaw2lin(out, 2)) == 16000
+    first = s._process_audio_chunk(_pcm(1.0))
+    second = s._process_audio_chunk(_pcm(1.0))
+    # 24k 16-bit in -> 8k 8-bit out, decodable as mu-law. The stream holds back the few samples
+    # the filter still needs, and the next frame releases them: two seconds in, two seconds out.
+    assert 7980 <= len(first) < 8000
+    assert len(first) + len(second) == 16000 - (8000 - len(first))
+    assert len(audioop.ulaw2lin(first, 2)) == 2 * len(first)
+
+
+def _speech_like(seconds, rate=MAYA_NATIVE_SAMPLE_RATE):
+    t = np.arange(int(seconds * rate)) / rate
+    return (6000 * np.sin(2 * np.pi * 220 * t) + 2500 * np.sin(2 * np.pi * 1500 * t)).astype(np.int16)
+
+
+def test_ws_frames_join_without_a_seam():
+    """Each WS frame used to resample alone, which clicked at every frame edge (~85 ms on
+    calls). Frame by frame must now equal converting the whole utterance in one pass."""
+    s = _synth(use_mulaw=False, sampling_rate="8000")
+    pcm = _speech_like(1.0)
+    frames = [pcm[i : i + 2048] for i in range(0, len(pcm), 2048)]
+    streamed = np.frombuffer(b"".join(s._process_audio_chunk(f.tobytes()) or b"" for f in frames), np.int16)
+    whole = np.frombuffer(s.convert_whole_clip(pcm.tobytes()), np.int16)
+    assert len(whole) - len(streamed) <= 12  # only the held-back tail
+    assert np.abs(streamed.astype(int) - whole[: len(streamed)].astype(int)).max() <= 1
+
+
+def test_http_audio_still_converts_the_whole_clip_in_one_pass():
+    s = _synth(use_mulaw=True)
+    assert len(s._process_http_audio(_pcm(1.0))) == 8000  # nothing held back
+    assert s.stream_resampler.next_output == 0  # the WS stream was not touched
+
+
+def test_interruption_drops_the_held_back_tail():
+    s = _synth(use_mulaw=True)
+    s._process_audio_chunk(_pcm(0.5))
+    assert len(s.stream_resampler.history) > 0
+    asyncio.run(s.handle_interruption())
+    assert len(s.stream_resampler.history) == 0 and s.stream_resampler.next_output == 0
 
 
 def test_web_chunks_pass_through_untouched_at_native_rate():

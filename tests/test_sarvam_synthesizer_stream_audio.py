@@ -4,6 +4,9 @@ raw PCM that only resamples if the model's source rate is known."""
 import struct
 from unittest.mock import MagicMock
 
+import asyncio
+
+import numpy as np
 import pytest
 
 from bolna.synthesizer.sarvam_synthesizer import SarvamSynthesizer
@@ -63,3 +66,50 @@ def test_a_header_rate_that_contradicts_the_model_wins(model):
     synth = _synth(model)
     synth._process_audio_data(_wav_header(rate=24000))
     assert synth.original_sampling_rate == 24000
+
+
+def _speech_like(samples, rate=NATIVE_RATE):
+    t = np.arange(samples) / rate
+    return (6000 * np.sin(2 * np.pi * 220 * t) + 2500 * np.sin(2 * np.pi * 1500 * t)).astype(np.int16)
+
+
+@pytest.mark.parametrize("model", STREAMING_MODELS)
+def test_ws_chunks_join_without_a_seam(model):
+    """Each WS chunk used to resample alone, which clicked at every chunk edge. Chunk by
+    chunk must now equal converting the whole utterance in one pass."""
+    synth = _synth(model)
+    synth._process_audio_chunk(_wav_header())
+    pcm = _speech_like(NATIVE_RATE)
+    chunks = [pcm[i : i + 1881] for i in range(0, len(pcm), 1881)]
+    streamed = np.frombuffer(b"".join(synth._process_audio_chunk(c.tobytes()) or b"" for c in chunks), np.int16)
+    whole = np.frombuffer(synth._process_audio_data(pcm.tobytes()), np.int16)
+    assert len(whole) - len(streamed) <= 12  # only the held-back tail
+    assert np.abs(streamed.astype(int) - whole[: len(streamed)].astype(int)).max() <= 1
+
+
+@pytest.mark.parametrize("model", STREAMING_MODELS)
+def test_a_new_header_rate_rebuilds_the_stream(model):
+    synth = _synth(model)
+    synth._process_audio_chunk(_wav_header(rate=NATIVE_RATE))
+    synth._process_audio_chunk(_pcm(2000))
+    synth._process_audio_chunk(_wav_header(rate=24000))
+    synth._process_audio_chunk(_pcm(2400))
+    assert synth.stream_resampler_rate == 24000 and synth.stream_resampler.down == 3
+
+
+@pytest.mark.parametrize("model", STREAMING_MODELS)
+def test_interruption_drops_the_held_back_tail(model):
+    synth = _synth(model)
+    synth._process_audio_chunk(_wav_header())
+    synth._process_audio_chunk(_pcm(4000))
+    assert len(synth.stream_resampler.history) > 0
+    asyncio.run(synth.handle_interruption())
+    assert len(synth.stream_resampler.history) == 0 and synth.stream_resampler.next_output == 0
+
+
+def test_http_audio_converts_in_one_pass_outside_the_ws_stream():
+    synth = _synth("bulbul:v3")
+    synth._process_audio_data(_wav_header())
+    out = synth._process_http_audio(_pcm(NATIVE_RATE))
+    assert len(out) == pytest.approx(TELEPHONY_RATE * 2, rel=0.01)
+    assert synth.stream_resampler is None
