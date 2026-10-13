@@ -15,6 +15,7 @@ import aiohttp
 import websockets
 from websockets.exceptions import InvalidHandshake
 
+from .base_synthesizer import raise_if_rejected
 from .stream_synthesizer import StreamSynthesizer
 from bolna.constants import MAYA_TTS_SUPPORTED_LANGUAGES, MAYA_TTS_SUPPORTED_VOICES
 from bolna.helpers.logger_config import configure_logger
@@ -398,9 +399,9 @@ class MayaSynthesizer(StreamSynthesizer):
                 request_id = response.headers.get("x-request-id")
                 if response.status == 200:
                     return await response.read()
-                logger.error(
-                    f"Maya TTS HTTP error: {response.status} request_id={request_id} - {await response.text()}"
-                )
+                detail = await response.text()
+                logger.error(f"Maya TTS HTTP error: {response.status} request_id={request_id} - {detail}")
+                raise_if_rejected("Maya", response.status, detail)
                 return None
 
     async def synthesize_telephony_clip(self, text):

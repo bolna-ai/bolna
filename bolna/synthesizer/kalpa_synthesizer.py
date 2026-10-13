@@ -42,6 +42,7 @@ import aiohttp
 import websockets
 from websockets.exceptions import InvalidHandshake
 
+from .base_synthesizer import raise_if_rejected
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
@@ -1189,9 +1190,9 @@ class KalpaSynthesizer(StreamSynthesizer):
                             logger.error(f"Kalpa TTS HTTP response was not JSON (request_id={request_id}): {e}")
                             return None
                         break
-                    logger.error(
-                        f"Kalpa TTS HTTP error: {response.status} request_id={request_id} - {await response.text()}"
-                    )
+                    detail = await response.text()
+                    logger.error(f"Kalpa TTS HTTP error: {response.status} request_id={request_id} - {detail}")
+                    raise_if_rejected("Kalpa", response.status, detail)
                     if response.status not in HTTP_RETRY_STATUSES or attempt == HTTP_RETRIES:
                         return None
                     delay = _retry_delay(response.headers.get("Retry-After"), attempt)

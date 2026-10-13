@@ -10,7 +10,9 @@ import aiohttp
 import websockets
 from dotenv import load_dotenv
 
+from .base_synthesizer import REJECTED_STATUSES, raise_if_rejected
 from .stream_synthesizer import StreamSynthesizer
+from bolna.exceptions import SynthesizerError
 from bolna.constants import DEEPGRAM_AURA_2_SPEED_MAX, DEEPGRAM_AURA_2_SPEED_MIN
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
@@ -230,14 +232,10 @@ class DeepgramSynthesizer(StreamSynthesizer):
         except asyncio.TimeoutError:
             logger.error("Timeout while connecting to Deepgram TTS WebSocket")
             return None
-        except websockets.exceptions.InvalidStatusCode as e:
-            if e.status_code == 401:
-                logger.error("Deepgram authentication failed: Invalid API key")
-            elif e.status_code == 403:
-                logger.error("Deepgram authentication failed: Access forbidden")
-            else:
-                logger.error(f"Deepgram WebSocket connection failed with status {e.status_code}: {e}")
-            self.connection_error = str(e)
+        except websockets.exceptions.InvalidStatus as e:
+            logger.error(f"Deepgram TTS WebSocket rejected with status {e.response.status_code}: {e}")
+            if e.response.status_code in REJECTED_STATUSES:
+                self.connection_error = str(e)
             return None
         except Exception as e:
             logger.error(f"Failed to connect to Deepgram TTS WebSocket: {e}")
@@ -295,9 +293,12 @@ class DeepgramSynthesizer(StreamSynthesizer):
                 async with session.post(url, headers=headers, json={"text": text}) as response:
                     if response.status == 200:
                         return await response.read()
-                    else:
-                        logger.info(f"Deepgram request status {response.status}")
-                        return b"\x00"
+                    detail = await response.text()
+                    logger.error(f"Deepgram request status {response.status}: {detail}")
+                    raise_if_rejected("Deepgram", response.status, detail)
+                    return None
+        except SynthesizerError:
+            raise
         except Exception as e:
             logger.error(f"Deepgram HTTP error: {e}")
 
