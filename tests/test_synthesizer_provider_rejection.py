@@ -37,35 +37,54 @@ def instant_sleep(monkeypatch):
 
 
 class Socket:
-    """A socket already closed with `close` (None: no close frame), or still open."""
+    """Open for `open_ticks` checks, then closed by the server with `close` (None: no close frame)."""
 
-    def __init__(self, close):
-        self.protocol = SimpleNamespace(close_rcvd=None if close is OPEN else close)
-        self.state = websockets.protocol.State.OPEN if close is OPEN else websockets.protocol.State.CLOSED
+    def __init__(self, close, open_ticks=0, closed_by_us=False):
+        self.close, self.open_ticks = close, open_ticks
+        self.protocol = SimpleNamespace(
+            close_rcvd=None if close is OPEN else close, close_rcvd_then_sent=False if closed_by_us else True
+        )
+
+    @property
+    def state(self):
+        if self.close is OPEN or self.open_ticks > 0:
+            self.open_ticks -= 1
+            return websockets.protocol.State.OPEN
+        return websockets.protocol.State.CLOSED
 
 
 class Redialling(StreamSynthesizer):
-    """Each dial returns the next socket in `closes`."""
+    """Each dial returns the next socket in `sockets`."""
 
-    def __init__(self, closes):
+    def __init__(self, sockets):
         super().__init__(provider_name="elevenlabs")
-        self.closes = list(closes)
+        self.sockets = list(sockets)
 
     async def establish_connection(self):
-        return Socket(self.closes.pop(0)) if self.closes else None
+        return self.sockets.pop(0) if self.sockets else None
 
 
 async def test_a_provider_closing_every_socket_with_an_error_ends_the_call(instant_sleep):
-    synth = Redialling([INVALID_KEY] * 5)
+    synth = Redialling([Socket(INVALID_KEY) for _ in range(5)])
 
     await asyncio.wait_for(synth.monitor_connection(), timeout=1)
 
     assert synth.connection_error == "elevenlabs closed the connection (1008): API key is invalid."
-    assert len(synth.closes) == 2, "the monitor kept redialling after giving up"
+    assert len(synth.sockets) == 2, "the monitor kept redialling after giving up"
 
 
-async def test_a_passing_error_close_between_healthy_sockets_keeps_the_call(instant_sleep):
-    synth = Redialling([Close(1011, "internal error"), None, Close(1011, "internal error"), Close(1000, ""), OPEN])
+@pytest.mark.parametrize(
+    "sockets",
+    [
+        [Socket(Close(1011, "internal error")), Socket(None), Socket(Close(1011, "internal error")), Socket(OPEN)],
+        [Socket(Close(1008, "idle timeout"), open_ticks=1) for _ in range(4)] + [Socket(OPEN)],
+        [Socket(Close(1011, ""), closed_by_us=True) for _ in range(4)] + [Socket(OPEN)],
+        [Socket(Close(1005, "")) for _ in range(4)] + [Socket(OPEN)],
+    ],
+    ids=["error close between healthy sockets", "idle closes of sockets that served", "our own close", "empty close"],
+)
+async def test_closes_that_are_not_a_rejection_keep_the_call(instant_sleep, sockets):
+    synth = Redialling(sockets)
 
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(synth.monitor_connection(), timeout=0.05)
@@ -74,19 +93,27 @@ async def test_a_passing_error_close_between_healthy_sockets_keeps_the_call(inst
 
 
 class FailingSynth:
+    """Its first receiver ends on a dropped socket; the next one finds the rejection."""
+
     connection_time = 0
+    conversation_ended = False
+    calls = 0
 
     async def generate(self):
-        raise SynthesizerError("Cartesia rejected the request (402): out of credits")
-        yield  # pragma: no cover
+        self.calls += 1
+        if self.calls > 1:
+            raise SynthesizerError("Cartesia rejected the request (402): out of credits")
+        yield {"meta_info": {}, "data": b"\x00"}
 
 
 async def test_a_pool_passes_the_active_synthesizers_failure_to_the_call():
     pool = SynthesizerPool({"en": FailingSynth()}, "en", {})
     pool._gen_task = asyncio.create_task(pool._run_generate("en"))
 
+    stream = pool.generate()
+    await asyncio.wait_for(anext(stream), timeout=1)
     with pytest.raises(SynthesizerError, match="out of credits"):
-        await asyncio.wait_for(anext(pool.generate()), timeout=1)
+        await asyncio.wait_for(anext(stream), timeout=1)
 
 
 @pytest.mark.parametrize("status", [401, 402, 403, 404])
@@ -138,24 +165,21 @@ def sarvam_error(code, message):
     return {"type": "error", "data": {"message": message, "code": code}}
 
 
-async def test_sarvam_closing_an_idle_socket_keeps_the_call():
+@pytest.mark.parametrize(
+    "code, message",
+    [
+        (408, "Websocket was left open without any messages for too long."),
+        (400, "Text must contain at least one character from the allowed languages."),
+        (422, "400: Text must contain at least one character from the allowed languages."),
+    ],
+)
+async def test_sarvam_idle_or_unspeakable_text_keeps_the_call(code, message):
     synth = sarvam()
+    audio_after = {"type": "audio", "data": {"audio": "AAAA"}}
 
-    chunks = await received(synth, [sarvam_error(408, "Websocket was left open without any messages for too long.")])
+    chunks = await received(synth, [sarvam_error(code, message), audio_after])
 
-    assert chunks == []
-    assert synth.connection_error is None
-
-
-@pytest.mark.parametrize("code", [400, 422])
-async def test_sarvam_refusing_one_sentence_ends_only_that_turn(code):
-    synth = sarvam()
-
-    chunks = await received(
-        synth, [sarvam_error(code, "Text must contain at least one character from the allowed languages.")]
-    )
-
-    assert chunks == [b"\x00"]
+    assert chunks == [b"\x00\x00\x00"]
     assert synth.connection_error is None
 
 
