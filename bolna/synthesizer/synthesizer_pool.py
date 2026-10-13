@@ -1,10 +1,18 @@
 import asyncio
+from bolna.constants import SYNTHESIZER_POOL_REENTRY_DELAY_S
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 
 # Sentinel pushed into _output_queue to unblock generate() on switch
 _SWITCH_SENTINEL = object()
+
+
+class _GenerateFailure:
+    """Carries a synth's generate() exception through _output_queue so generate() can re-raise it."""
+
+    def __init__(self, error):
+        self.error = error
 
 
 class SynthesizerPool:
@@ -107,27 +115,40 @@ class SynthesizerPool:
         logger.info(f"SynthesizerPool: generate task started for active='{self.active_label}'")
 
     async def _run_generate(self, label):
-        """Iterate synth.generate() and forward results into the shared _output_queue."""
+        """Iterate synth.generate() and forward results into the shared _output_queue.
+
+        Does for the active synth what __listen_synthesizer's while-loop does for a lone one:
+        a generate() that returns (most receivers stop on a websocket close) is re-entered, or
+        nothing would read the redialled socket and the agent would be mute for the rest of the call.
+        An exception is forwarded so generate() re-raises it and the call ends instead.
+        """
+        synth = self.synthesizers[label]
         try:
-            synth = self.synthesizers[label]
-            async for message in synth.generate():
-                self._output_queue.put_nowait(message)
+            while not getattr(synth, "conversation_ended", False):
+                async for message in synth.generate():
+                    self._output_queue.put_nowait(message)
+                logger.info(f"SynthesizerPool: generate() for '{label}' returned, re-entering")
+                await asyncio.sleep(SYNTHESIZER_POOL_REENTRY_DELAY_S)
         except asyncio.CancelledError:
             logger.info(f"SynthesizerPool: _run_generate cancelled for '{label}'")
         except Exception as e:
             logger.error(f"SynthesizerPool: error in _run_generate for '{label}': {e}", exc_info=True)
+            self._output_queue.put_nowait(_GenerateFailure(e))
 
     async def generate(self):
         """Async generator that yields audio packets from the active synthesizer.
 
         Returns (stops iteration) when a _SWITCH_SENTINEL is encountered,
         which signals __listen_synthesizer to re-enter via the outer while loop.
+        Raises the active synth's error, so __listen_synthesizer ends the call.
         """
         while True:
             message = await self._output_queue.get()
             if message is _SWITCH_SENTINEL:
                 logger.info("SynthesizerPool: generate() received SWITCH_SENTINEL, returning")
                 return
+            if isinstance(message, _GenerateFailure):
+                raise message.error
             yield message
 
     # ------------------------------------------------------------------
