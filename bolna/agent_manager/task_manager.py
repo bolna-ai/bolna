@@ -339,13 +339,9 @@ def trailing_utterance_text(segments, gap_seconds=4.0):
     return " ".join(reversed(tail)).strip()
 
 
-def streams_pipeline(synthesizer_config, turn_based_conversation, enforce_streaming):
-    """Live calls always stream; the synthesizer's `stream` flag only applies to turn-based chats."""
-    if synthesizer_config is None:
-        return False
-    if not turn_based_conversation:
-        return True
-    return bool(synthesizer_config.get("stream")) and enforce_streaming
+def streams_pipeline(turn_based_conversation, enforce_streaming):
+    """Live calls always stream; turn-based chats stream only when enforced."""
+    return enforce_streaming or not turn_based_conversation
 
 
 class TaskManager(BaseManager):
@@ -648,8 +644,8 @@ class TaskManager(BaseManager):
         # Tasks
         self.extracted_data = None
         self.summarized_data = None
-        self.stream = streams_pipeline(
-            self.task_config["tools_config"]["synthesizer"], self.turn_based_conversation, self.enforce_streaming
+        self.stream = self.task_config["tools_config"]["synthesizer"] is not None and streams_pipeline(
+            self.turn_based_conversation, self.enforce_streaming
         )
 
         self.is_local = False
@@ -1838,7 +1834,7 @@ class TaskManager(BaseManager):
                         elif provider in (WEB_BASED_CALL_PROVIDER, TelephonyProvider.FREESWITCH.value):
                             cfg["encoding"] = "linear16"
                             cfg["sampling_rate"] = 16000
-                        cfg["stream"] = self.enforce_streaming or not self.turn_based_conversation
+                        cfg["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
 
                         if "provider" in cfg:
                             cls = SUPPORTED_TRANSCRIBER_PROVIDERS.get(cfg["provider"])
@@ -1923,8 +1919,9 @@ class TaskManager(BaseManager):
                     transcriber_config["model"] in SUPPORTED_TRANSCRIBER_MODELS.keys()
                     or transcriber_config["provider"] in SUPPORTED_TRANSCRIBER_PROVIDERS.keys()
                 ):
-                    # Live calls only work with a streaming transcriber; turn-based chats stream when enforced.
-                    transcriber_config["stream"] = self.enforce_streaming or not self.turn_based_conversation
+                    transcriber_config["stream"] = streams_pipeline(
+                        self.turn_based_conversation, self.enforce_streaming
+                    )
                     logger.info(
                         f"transcriber stream={transcriber_config['stream']} enforce_streaming={self.enforce_streaming}"
                     )
