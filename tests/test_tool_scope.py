@@ -91,7 +91,7 @@ def test_node_scoped_tool_with_empty_nodes_is_visible_nowhere():
     assert _names(agent._tools_for_node(agent.get_node_by_id("n1"))) == ["g"]
 
 
-def test_end_call_node_scoped_absent_on_intermediate_present_and_forced_on_terminal():
+def test_end_call_node_scoped_absent_on_intermediate_and_not_forced_on_terminal():
     """The production bug: NODE-scoped end_call must be unreachable on an intermediate node."""
     nodes = [
         {"id": "escalation", "node_type": "llm", "prompt": "p", "edges": []},
@@ -106,9 +106,9 @@ def test_end_call_node_scoped_absent_on_intermediate_present_and_forced_on_termi
     assert _names(agent._tools_for_node(agent.get_node_by_id("escalation"))) == ["transfer"]
     # Terminal node: end_call is visible (nothing filtered -> None fallback to self.tools).
     assert agent._tools_for_node(agent.get_node_by_id("goodbye")) is None
-    # And it is forced there, with the forced tool guaranteed present in the per-call list.
+    # But not callable on the closing turn: the node speaks first and the call ends after the reply.
     agent.current_node_id = "goodbye"
-    assert agent._get_tool_choice_for_node(history=[]) == {"type": "function", "function": {"name": "end_call"}}
+    assert agent._get_tool_choice_for_node(history=[]) == "none"
     # Execution invariant: api_params keeps end_call regardless of node (so the call can run).
     assert "end_call" in agent.llm.api_params
 
