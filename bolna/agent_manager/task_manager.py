@@ -48,6 +48,7 @@ from bolna.constants import (
     SWITCH_LANGUAGE_TOOL_DEFINITION,
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
+    HANGUP_AFTER_REPLY,
     WEB_SEARCH_FUNCTION_NAME,
     WEB_SEARCH_TOOL_DEFINITION,
     RESPONSES_API_MODEL_PREFIXES,
@@ -869,15 +870,7 @@ class TaskManager(BaseManager):
                     and self.use_llm_to_determine_hangup
                     and cancellation_prompt
                 )
-                end_call_nodes = []
-                if self.__is_graph_agent():
-                    llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {}) or {}
-                    end_call_nodes = [
-                        n.get("id")
-                        for n in (llm_config.get("nodes") or [])
-                        if n.get("function_call") == END_CALL_FUNCTION_PREFIX and n.get("id")
-                    ]
-                if self.end_call_primary and not end_call_nodes:
+                if self.end_call_primary:
                     self.kwargs["api_tools"] = _inject_end_call_tool(
                         self.kwargs.get("api_tools"),
                         scope=ToolScope.GLOBAL,
@@ -885,16 +878,22 @@ class TaskManager(BaseManager):
                         description=end_call_description,
                     )
                     logger.info("end_call tool active as primary hangup")
-                elif end_call_nodes:
-                    # a node opting in via function_call="end_call" needs the tool regardless of the hangup toggle;
-                    # in primary mode too, so a graph with end nodes hangs up through them rather than from any node
-                    self.kwargs["api_tools"] = _inject_end_call_tool(
-                        self.kwargs.get("api_tools"),
-                        scope=ToolScope.NODE,
-                        nodes=end_call_nodes,
-                        description=end_call_description,
-                    )
-                    logger.info(f"end_call tool injected node-scoped on nodes={end_call_nodes}")
+                elif self.__is_graph_agent():
+                    # a node opting in via function_call="end_call" needs the tool regardless of the hangup toggle
+                    llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {}) or {}
+                    end_call_nodes = [
+                        n.get("id")
+                        for n in (llm_config.get("nodes") or [])
+                        if n.get("function_call") == END_CALL_FUNCTION_PREFIX and n.get("id")
+                    ]
+                    if end_call_nodes:
+                        self.kwargs["api_tools"] = _inject_end_call_tool(
+                            self.kwargs.get("api_tools"),
+                            scope=ToolScope.NODE,
+                            nodes=end_call_nodes,
+                            description=end_call_description,
+                        )
+                        logger.info(f"end_call tool injected node-scoped on nodes={end_call_nodes}")
 
                 # Voicemail detection (time-based)
                 output_tool_available = (
@@ -3447,8 +3446,7 @@ class TaskManager(BaseManager):
             self._end_call_in_progress = True
             self._hangup_cancelled = False
             self._end_call_tool_call_id = resp.get("tool_call_id", "")
-            # A graph end node's closing stays interruptible so a caller with a follow-up is not cut off.
-            if self.interruptible_hangup_message or resp.get("interruptible_hangup"):
+            if self.interruptible_hangup_message:
                 self._hangup_interruptible_window = True
             reason = resp.get("reason", "")
 
@@ -3514,19 +3512,7 @@ class TaskManager(BaseManager):
                 logger.info("end_call: hangup was cancelled by a barge-in, not arming the teardown")
                 return
 
-            self.hangup_detail = HangupReason.END_CALL_TOOL
-            self.call_hangup_message_config = None
-            # Detached, not awaited: this call site runs inside __do_llm_generation's own
-            # LLM_GENERATION_TIMEOUT_S window (the end_call tool is handled here, mid-generation).
-            # process_call_hangup's teardown (goodbye playout wait, hangup-chunk wait,
-            # stop_handler) can legitimately take longer than that and must not be cancelled
-            # mid-way - same failure mode as BOLNA-2563, reached via the end_call tool instead
-            # of the hangup-decision check. Held on self, not _usage_tasks, so a reference
-            # survives (see _usage_tasks' own comment) without an unrelated cleanup sweep
-            # ever cancelling this specific task. Done callback so a raised exception doesn't
-            # just vanish with the task (mirrors _s2s_on_task_done, same reasoning).
-            self._end_call_hangup_task = asyncio.create_task(self.process_call_hangup())
-            self._end_call_hangup_task.add_done_callback(self.__log_detached_hangup_exception)
+            self.__arm_end_call_teardown()
             return
 
         if called_fun.startswith("transfer_call"):
@@ -4561,6 +4547,9 @@ class TaskManager(BaseManager):
             if rag_latency.get("sequence_id") not in existing_seq_ids:
                 self.rag_latencies["turn_latencies"].append(rag_latency)
 
+        if meta_info.pop(HANGUP_AFTER_REPLY, False):
+            await self.__hang_up_after_reply()
+
     def _append_eager_llm_stub(self, meta_info):
         """Record an LLM turn's start immediately (sequence_id/turn_id/asr_turn_id/llm_start_ms)
         so a hung/cancelled/interrupted turn still appears in progression. __do_llm_generation
@@ -4740,9 +4729,45 @@ class TaskManager(BaseManager):
         # The call did not end, so the tool result claiming it did must not survive the cancel.
         self.conversation_history.drop_tool_call(self._end_call_tool_call_id)
         self._end_call_tool_call_id = None
+        # A Responses chain still holds the closing turn's context; the next turn must resend full history.
+        self._invalidate_response_chain()
         # Cleared on entry to __execute_function_call, whose end_call branch never restores it.
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
         logger.info("Interruptible hangup: barge-in cancelled pending hangup, resuming conversation")
+
+    async def __hang_up_after_reply(self):
+        """End the call once a graph end node's closing reply has played, as end_call does after its goodbye."""
+        self.check_if_user_online = False
+        self._end_call_in_progress = True
+        self._hangup_cancelled = False
+        if self.interruptible_hangup_message:
+            self._hangup_interruptible_window = True
+        try:
+            self._enter_hangup_state()
+            await self.wait_for_current_message()
+        finally:
+            self._hangup_interruptible_window = False
+
+        if self._hangup_cancelled:
+            logger.info("end node: hangup was cancelled by a barge-in, not arming the teardown")
+            return
+        logger.info("end node: closing reply delivered, ending the call")
+        self.__arm_end_call_teardown()
+
+    def __arm_end_call_teardown(self):
+        self.hangup_detail = HangupReason.END_CALL_TOOL
+        self.call_hangup_message_config = None
+        # Detached, not awaited: this call site runs inside __do_llm_generation's own
+        # LLM_GENERATION_TIMEOUT_S window (the end_call tool is handled here, mid-generation).
+        # process_call_hangup's teardown (goodbye playout wait, hangup-chunk wait,
+        # stop_handler) can legitimately take longer than that and must not be cancelled
+        # mid-way - same failure mode as BOLNA-2563, reached via the end_call tool instead
+        # of the hangup-decision check. Held on self, not _usage_tasks, so a reference
+        # survives (see _usage_tasks' own comment) without an unrelated cleanup sweep
+        # ever cancelling this specific task. Done callback so a raised exception doesn't
+        # just vanish with the task (mirrors _s2s_on_task_done, same reasoning).
+        self._end_call_hangup_task = asyncio.create_task(self.process_call_hangup())
+        self._end_call_hangup_task.add_done_callback(self.__log_detached_hangup_exception)
 
     def __log_detached_hangup_exception(self, task: asyncio.Task) -> None:
         """A bare create_task with no done callback drops the exception along with the task, so

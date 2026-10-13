@@ -104,10 +104,11 @@ def test_end_call_node_scoped_absent_on_intermediate_and_not_forced_on_terminal(
     )
     # Intermediate node: end_call is NOT offered -> the model cannot end the call here.
     assert _names(agent._tools_for_node(agent.get_node_by_id("escalation"))) == ["transfer"]
-    # Terminal node: neither offered nor forced; the agent appends end_call after the node's reply.
-    assert _names(agent._tools_for_node(agent.get_node_by_id("goodbye"))) == ["transfer"]
+    # Terminal node: end_call is visible (nothing filtered -> None fallback to self.tools).
+    assert agent._tools_for_node(agent.get_node_by_id("goodbye")) is None
+    # But not callable on the closing turn: the node speaks first and the call ends after the reply.
     agent.current_node_id = "goodbye"
-    assert agent._get_tool_choice_for_node(history=[]) is None
+    assert agent._get_tool_choice_for_node(history=[]) == "none"
     # Execution invariant: api_params keeps end_call regardless of node (so the call can run).
     assert "end_call" in agent.llm.api_params
 

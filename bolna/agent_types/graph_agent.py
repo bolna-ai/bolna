@@ -3,7 +3,6 @@ from collections import OrderedDict
 import os
 import re
 import time
-import uuid
 from dotenv import load_dotenv
 import json
 import math
@@ -24,12 +23,13 @@ from bolna.helpers.utils import (
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
 from bolna.enums import ChatRole, EdgeConditionType, ExpressionOperator, LLMProvider, NodeType, ToolScope
-from bolna.llms.types import FunctionCallPayload, LLMStreamChunk, LatencyData
+from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 from bolna.constants import (
     END_CALL_FUNCTION_PREFIX,
+    HANGUP_AFTER_REPLY,
     LANGUAGE_NAMES,
     RESPONSES_API_MODEL_PREFIXES,
     canonical_model,
@@ -1363,9 +1363,12 @@ class GraphAgent(BaseAgent):
             return None
 
         fn = current_node.get("function_call")
-        # Forcing end_call hangs up before the node speaks; _stream_node_reply appends it after the reply.
-        if not fn or fn == END_CALL_FUNCTION_PREFIX:
+        if not fn:
             return None
+        # Forcing end_call hangs up before the node speaks; the closing turn speaks and then hangs up instead,
+        # and "none" keeps end_call offered (an empty tools list breaks Anthropic) without letting the model end first.
+        if fn == END_CALL_FUNCTION_PREFIX:
+            return "none" if self._ends_call(current_node) else None
 
         missing = self._missing_forced_function_vars(current_node, fn)
         if missing:
@@ -1408,8 +1411,6 @@ class GraphAgent(BaseAgent):
         for tool in full:
             name = tool.get("function", {}).get("name")
             params = api_params.get(name, {}) or {}
-            if name == END_CALL_FUNCTION_PREFIX and self._ends_call(node):
-                continue  # appended after the reply; offering it lets the model end before speaking
             if name == forced:
                 subset.append(tool)  # must stay visible so the forced tool_choice is valid
             elif params.get("scope") == ToolScope.NODE.value:
@@ -1464,45 +1465,29 @@ class GraphAgent(BaseAgent):
         )
 
     async def _stream_node_reply(self, node_llm, node, messages, meta_info, synthesize, tool_choice, tools):
-        """Stream the node's reply; on an end_call node, follow it with end_call carrying that reply,
-        so the task manager plays it and hangs up afterwards (interruptibly)."""
+        """Stream the node's reply; on an end_call node's closing turn, flag it so the task manager
+        hangs up once the reply has played."""
         ends_call = self._ends_call(node)
-        spoken, latency = [], None
+        if ends_call:
+            # A chained Responses request does not resend the system prompt, which carries the closing instruction.
+            node_llm.invalidate_response_chain()
+        spoke = False
         async for chunk in node_llm.generate_stream(
             messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=tools
         ):
             if ends_call and isinstance(chunk, LLMStreamChunk):
                 if chunk.is_function_call:
-                    ends_call = False  # another tool ran first; the follow-up turn on this node ends the call
+                    ends_call = False  # another tool ran first; the follow-up turn on this node closes
+                    if str(getattr(chunk.data, "called_fun", "")).startswith(END_CALL_FUNCTION_PREFIX):
+                        # The model ended the call itself (Gemini ignores tool_choice); never close a second time.
+                        self._end_node_closed = True
                 elif isinstance(chunk.data, str) and chunk.data.strip():
-                    spoken.append(chunk.data.strip())
-                latency = chunk.latency or latency
+                    spoke = True
             yield chunk
-        if not ends_call:
-            return
-
-        reason = f"end node '{node.get('id')}' reached"
-        call_id = f"call_{uuid.uuid4().hex[:24]}"
-        arguments = json.dumps({"reason": reason})
-        payload = FunctionCallPayload(
-            meta_info=meta_info or {},
-            called_fun=END_CALL_FUNCTION_PREFIX,
-            model_response=[
-                {
-                    "index": 0,
-                    "id": call_id,
-                    "type": "function",
-                    "function": {"name": END_CALL_FUNCTION_PREFIX, "arguments": arguments},
-                }
-            ],
-            tool_call_id=call_id,
-            textual_response=" ".join(spoken) or None,
-            reason=reason,
-            interruptible_hangup=True,
-        )
-        # Set before yielding: the task manager does not resume this generator after an end_call chunk.
-        self._end_node_closed = True
-        yield LLMStreamChunk(data=payload, latency=latency, is_function_call=True)
+        # An empty reply leaves the node open, so its next turn closes instead of hanging up in silence.
+        if ends_call and spoke and meta_info is not None:
+            meta_info[HANGUP_AFTER_REPLY] = True
+            self._end_node_closed = True
 
     def _prompt_context(self) -> Optional[dict]:
         """Context for prompt substitution with time frozen at call start.
@@ -1535,6 +1520,10 @@ class GraphAgent(BaseAgent):
         prompt_context = self._prompt_context()
         if prompt_context:
             node_prompt = update_prompt_with_context(node_prompt, prompt_context)
+        # The call ends after this reply, so a question here would be cut off by the hangup. Part of the
+        # system prompt, not its own message: Gemini keeps only the last system message.
+        if self._ends_call(current_node):
+            node_prompt = f"{node_prompt}\n\n{_END_NODE_INSTRUCTION}"
 
         if self.agent_information:
             agent_info = self.agent_information
@@ -1591,9 +1580,6 @@ class GraphAgent(BaseAgent):
         messages = [{"role": "system", "content": prompt}] + conversation
         if rag_message:
             messages.append(rag_message)
-        # end_call follows this reply, so a question here would be left unanswered by a hangup.
-        if self._ends_call(current_node):
-            messages.append({"role": "system", "content": _END_NODE_INSTRUCTION})
         return messages
 
     def _static_message_chunk(self, current_node: Optional[dict]) -> Optional[dict]:
@@ -1681,7 +1667,7 @@ class GraphAgent(BaseAgent):
                 )
                 yield {"messages": messages}
                 tool_choice = self._get_tool_choice_for_node(history=message)
-                forced_name = tool_choice["function"]["name"] if tool_choice else None
+                forced_name = tool_choice["function"]["name"] if isinstance(tool_choice, dict) else None
                 node_tools = self._tools_for_node(current_node, forced_name)
                 node_llm = self._conversation_llm_for(current_node)
                 async for chunk in self._stream_node_reply(
@@ -1783,7 +1769,7 @@ class GraphAgent(BaseAgent):
             messages = await self._build_messages(message, meta_info=meta_info)
             yield {"messages": messages}
             tool_choice = self._get_tool_choice_for_node(history=message)
-            forced_name = tool_choice["function"]["name"] if tool_choice else None
+            forced_name = tool_choice["function"]["name"] if isinstance(tool_choice, dict) else None
             node_tools = self._tools_for_node(current_node, forced_name)
             node_llm = self._conversation_llm_for(current_node)
             async for chunk in self._stream_node_reply(

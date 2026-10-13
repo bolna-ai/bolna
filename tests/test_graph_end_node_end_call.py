@@ -4,11 +4,13 @@ Forcing end_call as the node's tool_choice committed the hangup before anything 
 goodbye was a free-form follow-up and the caller could not reply.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.agent_types.graph_agent import GraphAgent
-from bolna.constants import END_CALL_FUNCTION_PREFIX, END_CALL_TOOL_DEFINITION
+from bolna.constants import END_CALL_TOOL_DEFINITION, HANGUP_AFTER_REPLY
+from bolna.enums import HangupReason
 from bolna.llms.types import FunctionCallPayload, LatencyData, LLMStreamChunk
 
 CLOSING = "Thanks for confirming. Have a great day!"
@@ -26,7 +28,7 @@ def _agent(current_node_id="bye"):
     agent.llm = MagicMock(
         trigger_function_call=True,
         tools=[END_CALL_TOOL_DEFINITION],
-        api_params={"end_call": {"scope": "node", "nodes": ["bye"]}},
+        api_params={"end_call": {"scope": "global"}},
     )
     return agent
 
@@ -47,44 +49,82 @@ def _text(data, end=False):
     return LLMStreamChunk(data=data, end_of_stream=end, latency=LatencyData(sequence_id=3))
 
 
-async def _reply(agent, node, *chunks):
-    stream = agent._stream_node_reply(_node_llm(*chunks), node, [], {}, True, None, None)
-    return [chunk async for chunk in stream]
+def _tool_call(name):
+    return LLMStreamChunk(data=FunctionCallPayload(called_fun=name), is_function_call=True)
 
 
-async def test_the_reply_streams_first_and_end_call_follows_carrying_it():
-    out = await _reply(_agent(), BYE, _text("Thanks for confirming."), _text("Have a great day!", end=True))
-
-    assert [c.data for c in out[:2]] == ["Thanks for confirming.", "Have a great day!"]
-    payload = out[-1].data
-    assert out[-1].is_function_call and isinstance(payload, FunctionCallPayload)
-    assert payload.called_fun == END_CALL_FUNCTION_PREFIX
-    assert payload.textual_response == CLOSING
-    assert payload.interruptible_hangup is True
-    assert payload.model_response[0]["id"] == payload.tool_call_id
+async def _reply(agent, node, *chunks, node_llm=None):
+    meta_info = {}
+    node_llm = node_llm or _node_llm(*chunks)
+    out = [c async for c in agent._stream_node_reply(node_llm, node, [], meta_info, True, None, None)]
+    return out, meta_info
 
 
-async def test_no_end_call_is_appended_when_the_model_runs_another_tool():
-    other_tool = LLMStreamChunk(data=FunctionCallPayload(called_fun="fetch_order"), is_function_call=True)
-    out = await _reply(_agent(), BYE, _text("One moment please."), other_tool)
-    assert [c.data.called_fun for c in out if c.is_function_call] == ["fetch_order"]
+async def test_the_closing_reply_streams_untouched_and_flags_the_hangup():
+    agent = _agent()
+    out, meta_info = await _reply(agent, BYE, _text("Thanks for confirming."), _text("Have a great day!", end=True))
+
+    assert [c.data for c in out] == ["Thanks for confirming.", "Have a great day!"]
+    assert not any(c.is_function_call for c in out)  # no tool call the provider never issued
+    assert meta_info[HANGUP_AFTER_REPLY] is True
+
+
+async def test_the_closing_turn_resets_a_response_chain():
+    node_llm = _node_llm(_text(CLOSING, end=True))
+    await _reply(_agent(), BYE, node_llm=node_llm)
+    node_llm.invalidate_response_chain.assert_called_once()
+
+
+async def test_an_empty_reply_leaves_the_node_open_to_close_next_turn():
+    agent = _agent()
+    _, meta_info = await _reply(agent, BYE, _text("", end=True))
+    assert HANGUP_AFTER_REPLY not in meta_info
+    _, meta_info = await _reply(agent, BYE, _text(CLOSING, end=True))
+    assert meta_info[HANGUP_AFTER_REPLY] is True
+
+
+async def test_another_tool_first_defers_the_hangup_to_the_follow_up_turn():
+    agent = _agent()
+    _, meta_info = await _reply(agent, BYE, _tool_call("fetch_order"))
+    assert HANGUP_AFTER_REPLY not in meta_info
+    _, meta_info = await _reply(agent, BYE, _text(CLOSING, end=True))
+    assert meta_info[HANGUP_AFTER_REPLY] is True
+
+
+async def test_a_model_issued_end_call_is_not_followed_by_a_second_hangup():
+    agent = _agent()
+    await _reply(agent, BYE, _tool_call("end_call"))
+    _, meta_info = await _reply(agent, BYE, _text("Goodbye!", end=True))  # the end_call follow-up turn
+    assert HANGUP_AFTER_REPLY not in meta_info
 
 
 async def test_a_node_that_does_not_end_the_call_is_untouched():
-    out = await _reply(_agent("ask"), ASK, _text("When would suit you?", end=True))
-    assert not any(c.is_function_call for c in out)
+    node_llm = _node_llm(_text("When would suit you?", end=True))
+    _, meta_info = await _reply(_agent("ask"), ASK, node_llm=node_llm)
+    assert HANGUP_AFTER_REPLY not in meta_info
+    node_llm.invalidate_response_chain.assert_not_called()
+
+
+async def test_the_closing_turn_keeps_end_call_offered_but_not_callable():
+    agent = _agent()
+    messages = await agent._build_messages([{"role": "user", "content": "Tomorrow works"}])
+
+    assert [m["role"] for m in messages] == ["system", "user"]  # one system message (Gemini keeps only the last)
+    assert "call ends" in messages[0]["content"]
+    assert agent._get_tool_choice_for_node(history=[]) == "none"
+    assert agent._tools_for_node(BYE) is None  # end_call stays in the list; an empty list breaks Anthropic
 
 
 async def test_after_a_barge_in_kept_the_call_up_the_end_node_converses_normally():
     agent = _agent()
-    await _reply(agent, BYE, _text(CLOSING, end=True))  # first reply closes; a barge-in then cancelled the hangup
+    await _reply(agent, BYE, _text(CLOSING, end=True))  # closing turn; a barge-in then cancelled the hangup
 
-    out = await _reply(agent, BYE, _text("Sure, go ahead.", end=True))
+    _, meta_info = await _reply(agent, BYE, _text("Sure, go ahead.", end=True))
     messages = await agent._build_messages([{"role": "user", "content": "Wait, one more question"}])
 
-    assert not any(c.is_function_call for c in out)
-    assert messages[-1]["role"] == "user"
-    assert agent._tools_for_node(BYE) is None  # end_call offered again, for the model to use once the caller is done
+    assert HANGUP_AFTER_REPLY not in meta_info
+    assert "call ends" not in messages[0]["content"]
+    assert agent._get_tool_choice_for_node(history=[]) is None  # the model may end the call itself now
 
 
 async def test_reentering_the_end_node_closes_again():
@@ -92,102 +132,73 @@ async def test_reentering_the_end_node_closes_again():
     await _reply(agent, BYE, _text(CLOSING, end=True))
 
     agent._advance_to_node("bye", entry_index=4)
-    out = await _reply(agent, BYE, _text(CLOSING, end=True))
+    _, meta_info = await _reply(agent, BYE, _text(CLOSING, end=True))
 
-    assert out[-1].is_function_call
-
-
-async def test_only_an_end_node_is_told_its_reply_is_the_last_turn():
-    history = [{"role": "user", "content": "Tomorrow works"}]
-
-    end_node_messages = await _agent("bye")._build_messages(history)
-    other_node_messages = await _agent("ask")._build_messages(history)
-
-    assert end_node_messages[-1]["role"] == "system"
-    assert "call ends" in end_node_messages[-1]["content"]
-    assert other_node_messages[-1] == history[-1]
+    assert meta_info[HANGUP_AFTER_REPLY] is True
 
 
-async def test_generate_on_an_end_node_does_not_force_end_call_and_appends_it():
+async def test_generate_on_an_end_node_speaks_with_tool_choice_none_and_flags_the_hangup():
     agent = _agent()
     node_llm = _node_llm(_text(CLOSING, end=True))
     agent._base_url_validated = True
     agent._should_hold_for_first_delivery = MagicMock(return_value=False)
-    agent._build_messages = AsyncMock(return_value=[{"role": "user", "content": "Tomorrow works"}])
     agent.decide_next_node_with_functions = AsyncMock(return_value=(None, None, 0.0, None, None, None, None, None))
     agent._conversation_llm_for = MagicMock(return_value=node_llm)
+    meta_info = {}
 
-    out = [c async for c in agent.generate([{"role": "user", "content": "Tomorrow works"}], meta_info={})]
+    [c async for c in agent.generate([{"role": "user", "content": "Tomorrow works"}], meta_info=meta_info)]
 
-    assert node_llm.kwargs["tool_choice"] is None
-    assert node_llm.kwargs["tools"] == []
-    assert out[-1].is_function_call and out[-1].data.textual_response == CLOSING
+    assert node_llm.kwargs["tool_choice"] == "none"
+    assert meta_info[HANGUP_AFTER_REPLY] is True
 
 
-async def test_an_end_node_goodbye_is_interruptible_without_the_agent_flag():
+# ------------------------------------------------------------------ task manager
+
+
+def _hangup_tm(interruptible_flag):
     tm = TaskManager.__new__(TaskManager)
     tm.run_id = "run"
-    tm.conversation_history = MagicMock()
+    tm.check_if_user_online = True
     tm.hangup_decision_at = None
     tm.interruption_manager = MagicMock()
-    tm.interruptible_hangup_message = False
+    tm.interruptible_hangup_message = interruptible_flag
     tm._hangup_interruptible_window = False
     tm.process_call_hangup = AsyncMock()
-    window = {}
+    tm.window_during_reply = None
 
-    async def _goodbye_playing():
-        window["open"] = tm._hangup_interruptible_window
+    async def _reply_playing():
+        tm.window_during_reply = tm._hangup_interruptible_window
 
-    tm.wait_for_current_message = AsyncMock(side_effect=_goodbye_playing)
-    resp = {"model_response": [], "tool_call_id": "tc1", "textual_response": CLOSING, "interruptible_hangup": True}
-
-    await TaskManager._TaskManager__execute_function_call(
-        tm, None, None, None, None, None, None, {"turn_id": 1}, None, END_CALL_FUNCTION_PREFIX, **resp
-    )
-
-    assert window["open"] is True
-    assert tm._hangup_interruptible_window is False
+    tm.wait_for_current_message = AsyncMock(side_effect=_reply_playing)
+    return tm
 
 
-async def test_primary_mode_scopes_end_call_to_the_end_nodes_of_a_graph():
-    llm_config = {
-        "model": "gpt-4.1-mini",
-        "provider": "openai",
-        "max_tokens": 100,
-        "temperature": 0.2,
-        "agent_information": "t",
-        "current_node_id": "ask",
-        "nodes": [ASK, BYE],
-    }
-    task_config = {
-        "task_type": "conversation",
-        "toolchain": {"execution": "sequential", "pipelines": [["llm"]]},
-        "tools_config": {
-            "llm_agent": {"agent_type": "graph_agent", "agent_flow_type": "streaming", "llm_config": llm_config},
-            "synthesizer": {
-                "provider": "elevenlabs",
-                "provider_config": {
-                    "voice": "Nila",
-                    "voice_id": "test",
-                    "model": "eleven_turbo_v2_5",
-                    "synthesizer_key": "test-key",
-                },
-                "stream": True,
-                "buffer_size": 100,
-            },
-            "transcriber": {"provider": "deepgram", "model": "nova-3", "language": "hi", "stream": True},
-            "input": {"provider": "default"},
-            "output": {"provider": "default"},
-        },
-        "task_config": {
-            "hangup_after_LLMCall": True,
-            "call_cancellation_prompt": "End the call once the closing line is said.",
-            "end_call_tool_mode": "primary",
-        },
-    }
+async def test_the_hangup_waits_for_the_reply_then_tears_down():
+    tm = _hangup_tm(interruptible_flag=False)
+    await tm._TaskManager__hang_up_after_reply()
+    await asyncio.sleep(0)
 
-    tm = TaskManager("agent", 0, task_config, MagicMock())
+    tm.wait_for_current_message.assert_awaited_once()
+    assert tm.window_during_reply is False
+    assert tm.hangup_detail == HangupReason.END_CALL_TOOL
+    tm.process_call_hangup.assert_awaited_once()
 
-    assert tm.end_call_primary
-    params = tm.kwargs["api_tools"]["tools_params"]["end_call"]
-    assert params["scope"] == "node" and params["nodes"] == ["bye"]
+
+async def test_the_reply_is_interruptible_only_when_the_agent_allows_it():
+    tm = _hangup_tm(interruptible_flag=True)
+    await tm._TaskManager__hang_up_after_reply()
+    assert tm.window_during_reply is True
+    assert tm._hangup_interruptible_window is False  # closed again once the reply finished
+
+
+async def test_a_barge_in_during_the_reply_keeps_the_call_up():
+    tm = _hangup_tm(interruptible_flag=True)
+
+    async def _cancelled_while_playing():
+        tm._hangup_cancelled = True
+
+    tm.wait_for_current_message = AsyncMock(side_effect=_cancelled_while_playing)
+    await tm._TaskManager__hang_up_after_reply()
+    await asyncio.sleep(0)
+
+    tm.process_call_hangup.assert_not_awaited()
