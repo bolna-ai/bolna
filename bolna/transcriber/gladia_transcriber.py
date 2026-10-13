@@ -711,6 +711,7 @@ class GladiaTranscriber(BaseTranscriber):
                 gladia_ws = await self.gladia_connect()
             except (ValueError, ConnectionError) as e:
                 logger.error(f"Failed to establish Gladia connection: {e}")
+                self.connection_error = str(e)
                 await self.toggle_connection()
                 return
 

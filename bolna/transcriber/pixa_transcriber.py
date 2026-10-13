@@ -344,6 +344,7 @@ class PixaTranscriber(BaseTranscriber):
                     logger.error(f"Error processing Pixa message: {e}")
                     traceback.print_exc()
         except ConnectionClosed as e:
+            self.record_server_close(e, "Pixa")
             logger.info(f"Pixa WebSocket connection closed: {e}")
         except Exception as e:
             logger.error(f"Error in Pixa receiver: {e}")
@@ -516,6 +517,7 @@ class PixaTranscriber(BaseTranscriber):
                 pixa_ws = await self.pixa_connect()
             except (ValueError, ConnectionError) as e:
                 logger.error(f"Failed to connect to Pixa: {e}")
+                self.connection_error = str(e)
                 await self.toggle_connection()
                 return
 
