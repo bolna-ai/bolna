@@ -5,10 +5,11 @@ import json
 from unittest.mock import AsyncMock
 
 import pytest
-from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
+from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
 from bolna.transcriber.assemblyai_transcriber import AssemblyAITranscriber
+from bolna.transcriber.deepgram_transcriber import DeepgramTranscriber
 from bolna.transcriber.elevenlabs_transcriber import ElevenLabsTranscriber
 from bolna.transcriber.gladia_transcriber import GladiaTranscriber
 from bolna.transcriber.openai_transcriber import OpenAITranscriber
@@ -34,7 +35,7 @@ def pixa():
 
 
 class ClosingSocket:
-    """Yields the given messages, then ends the way the server closed it."""
+    """Yields the given messages, then ends the way websockets does when the server closes it."""
 
     def __init__(self, close, messages=()):
         self.close, self.messages = close, list(messages)
@@ -46,7 +47,7 @@ class ClosingSocket:
         if self.messages:
             return self.messages.pop(0)
         if self.close is not None and self.close.code in (1000, 1001):
-            raise ConnectionClosedOK(self.close, None)
+            raise StopAsyncIteration
         raise ConnectionClosedError(self.close, None)
 
 
@@ -82,6 +83,25 @@ async def test_an_error_message_sent_before_the_close_is_kept():
     await receive(transcriber, ClosingSocket(Close(1003, CREDITS), [rejection]))
 
     assert transcriber.connection_error == "sample_rate not supported"
+
+
+@pytest.mark.parametrize("message_type", ["auth_error", "quota_exceeded", "unaccepted_terms"])
+async def test_an_elevenlabs_rejection_message_becomes_the_connection_error(message_type):
+    transcriber = ElevenLabsTranscriber("twilio", transcriber_key="test-key")
+    rejection = json.dumps({"message_type": message_type, "error": "Quota exceeded for this API key"})
+
+    await receive(transcriber, ClosingSocket(Close(1000, ""), [rejection]))
+
+    assert transcriber.connection_error == f"ElevenLabs {message_type}: Quota exceeded for this API key"
+
+
+async def test_a_deepgram_flux_error_becomes_the_connection_error():
+    transcriber = DeepgramTranscriber("twilio", model="flux-general-en", transcriber_key="test-key")
+    error = json.dumps({"type": "Error", "code": "INSUFFICIENT_PERMISSIONS", "description": "Project lacks access"})
+
+    [m async for m in transcriber.receiver_flux(ClosingSocket(Close(1000, ""), [error]))]
+
+    assert transcriber.connection_error == "Deepgram Flux INSUFFICIENT_PERMISSIONS: Project lacks access"
 
 
 @pytest.mark.parametrize(
