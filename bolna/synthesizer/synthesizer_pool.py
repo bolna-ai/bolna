@@ -110,8 +110,10 @@ class SynthesizerPool:
         """Iterate synth.generate() and forward results into the shared _output_queue."""
         try:
             synth = self.synthesizers[label]
-            async for message in synth.generate():
-                self._output_queue.put_nowait(message)
+            # Like __listen_synthesizer: a receiver that ends on a dropped socket is re-entered.
+            while not getattr(synth, "conversation_ended", False):
+                async for message in synth.generate():
+                    self._output_queue.put_nowait(message)
         except asyncio.CancelledError:
             logger.info(f"SynthesizerPool: _run_generate cancelled for '{label}'")
         except Exception as e:
