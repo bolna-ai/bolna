@@ -31,6 +31,7 @@ from bolna.constants import (
     DUPLICATE_RESPONSE_SIMILARITY,
     FILLER_DICT,
     DEFAULT_LANGUAGE_CODE,
+    DEFAULT_MAX_SILENCE_REPEATS,
     DEFAULT_TIMEZONE,
     LANGUAGE_NAMES,
     LANGUAGE_SWITCH_AUDIO_GAP_S,
@@ -627,7 +628,8 @@ class TaskManager(BaseManager):
         self.stream_sid = None
 
         # metering
-        self.transcriber_duration = 0
+        # Non-streaming transcription bills per result; streaming usage is read from the transcriber.
+        self.http_transcriber_duration = 0
         self.synthesizer_characters = 0
         self.ended_by_assistant = False
         # False until the caller's own words land in conversation history as a user turn.
@@ -905,6 +907,12 @@ class TaskManager(BaseManager):
                 self.time_since_last_spoken_human_word = 0
 
                 self.repeat_after_silence_seconds = None
+                # explicit None check: 0 is a valid value that turns re-prompts off
+                self.max_silence_repeats = self.conversation_config.get("max_silence_repeats")
+                if self.max_silence_repeats is None:
+                    self.max_silence_repeats = DEFAULT_MAX_SILENCE_REPEATS
+                self._silence_repeats_sent = 0
+                self._silence_period = None
 
                 # Handling accidental interruption
                 self.number_of_words_for_interruption = self.conversation_config.get(
@@ -4060,10 +4068,10 @@ class TaskManager(BaseManager):
                 if usage.get(key) is not None:
                     entry[key] = usage[key]
 
-            # Routing on azure shares the conversation LLM's pool, so its tokens meter against it.
+            # Only routing that followed the conversation onto its pool draws on that pool's capacity.
             overflowed = (routing_info.get("routing_usage") or {}).get("overflowed")
             cb = self.on_overflow if overflowed else self.on_turn_usage
-            if cb and routing_info.get("routing_provider") == "azure" and usage.get("input_tokens"):
+            if cb and self.kwargs.get("route_routing_to_conversation") and usage.get("input_tokens"):
                 await cb(usage.get("input_tokens"), usage.get("output_tokens"), usage.get("cached_tokens"))
         except Exception as e:
             # Observability only; it must never surface into the call or the teardown gather.
@@ -4252,12 +4260,12 @@ class TaskManager(BaseManager):
                             self._routing_tail_tasks.add(_tail_task)
                             _tail_task.add_done_callback(self._routing_tail_tasks.discard)
 
-                    # on_turn_usage meters the conversation LLM's backend; routing on azure means the routing
-                    # hop shares that backend, so its tokens draw on the same capacity.
+                    # on_turn_usage meters the conversation LLM's backend; only routing that followed the
+                    # conversation onto it draws on the same capacity.
                     _routing_cb = self.on_overflow if routing_usage.get("overflowed") else self.on_turn_usage
                     if (
                         _routing_cb
-                        and routing_info.get("routing_provider") == "azure"
+                        and self.kwargs.get("route_routing_to_conversation")
                         and routing_usage.get("input_tokens")
                     ):
                         _routing_task = asyncio.create_task(
@@ -5244,14 +5252,22 @@ class TaskManager(BaseManager):
         self._committed_assistant_sequences.add(sequence_id)
         self._last_spoken_assistant = (staged["turn_id"], staged["content"])
         self._last_spoken_user_input = staged.get("user_input")
-        self.conversation_history.append_assistant(
+        msg = self.conversation_history.fill_tool_call_placeholder(
+            staged["turn_id"],
             staged["content"],
-            turn_id=staged["turn_id"],
             response_uid=staged["response_uid"],
             message_category=staged.get("message_category"),
         )
+        if msg is None:
+            self.conversation_history.append_assistant(
+                staged["content"],
+                turn_id=staged["turn_id"],
+                response_uid=staged["response_uid"],
+                message_category=staged.get("message_category"),
+            )
+            msg = self.conversation_history.messages[-1]
         if staged["turn_id"] is not None:
-            self._turn_msg_map[staged["turn_id"]] = self.conversation_history.messages[-1]
+            self._turn_msg_map[staged["turn_id"]] = msg
         logger.info(
             "BOLNA_TRACE_TM commit_assistant_history seq=%s turn=%s response_uid=%s text_len=%s",
             sequence_id,
@@ -5616,11 +5632,6 @@ class TaskManager(BaseManager):
                 if self._should_ignore_transcriber_input():
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
-                        self.transcriber_duration += (
-                            message.get("meta_info", {}).get("transcriber_duration", 0)
-                            if message["meta_info"] is not None
-                            else 0
-                        )
                         await self._log_transcriber_connection_error(
                             (message.get("meta_info") or {}).get("connection_error")
                         )
@@ -5962,11 +5973,6 @@ class TaskManager(BaseManager):
                         temp_transcriber_message = ""
 
                     elif message["data"] == "transcriber_connection_closed":
-                        self.transcriber_duration += (
-                            message.get("meta_info", {}).get("transcriber_duration", 0)
-                            if message["meta_info"] is not None
-                            else 0
-                        )
                         # In a pool, a standby transcriber closing is expected (e.g. Deepgram
                         # inactivity timeout). But if the active transcriber closed, the call
                         # is over (e.g. user hung up via telephony stop event).
@@ -5992,11 +5998,6 @@ class TaskManager(BaseManager):
                 else:
                     logger.info(f"Processing http transcription for message {message}")
                     if message["data"] == "transcriber_connection_closed":
-                        self.transcriber_duration += (
-                            message.get("meta_info", {}).get("transcriber_duration", 0)
-                            if message["meta_info"] is not None
-                            else 0
-                        )
                         if isinstance(self.tools.get("transcriber"), TranscriberPool):
                             if self.tools["transcriber"].is_active_transcriber_alive():
                                 logger.info(f"TranscriberPool: standby transcriber closed, continuing")
@@ -6029,12 +6030,19 @@ class TaskManager(BaseManager):
             )
             raise TranscriberError(str(e), provider=provider, model=model) from e
 
+    def _transcriber_billed_duration(self):
+        """The call's ASR usage. Read from the transcriber, not the closing packets: after a hangup the
+        listener stops at the first one, which in a pool can be a standby that only got keepalives."""
+        transcriber = self.tools.get("transcriber")
+        streamed_s = transcriber.billed_audio_s() if transcriber is not None else 0
+        return round(self.http_transcriber_duration + streamed_s, 4)
+
     async def __process_http_transcription(self, message):
         meta_info = self.__get_updated_meta_info(message["meta_info"])
 
         sequence = message["meta_info"].get("sequence", 0)
         next_task = self._get_next_step(sequence, "transcriber")
-        self.transcriber_duration += (
+        self.http_transcriber_duration += (
             message["meta_info"]["transcriber_duration"] if "transcriber_duration" in message["meta_info"] else 0
         )
 
@@ -7905,13 +7913,15 @@ class TaskManager(BaseManager):
 
                     if status == "SEND":
                         # Audio approved - send it
-                        if sequence_id is not None:
-                            self._sent_audio_sequences.add(sequence_id)
-                        self._commit_staged_assistant_history(sequence_id)
                         self.tools["input"].update_is_audio_being_played(True, AudioPlaybackReason.AUDIO_SENT)
                         self.response_in_pipeline = False
                         self._synthesis_awaiting_first_audio = False
-                        await self.tools["output"].handle(message)
+                        sent = await self.tools["output"].handle(message)
+                        # A reply whose audio never went out (caller hung up) never played; keep it out of history.
+                        if sent:
+                            if sequence_id is not None:
+                                self._sent_audio_sequences.add(sequence_id)
+                            self._commit_staged_assistant_history(sequence_id)
                         # Track when agent audio first starts flowing for this sequence.
                         # Only fire on real audio bytes — BOS/EOS control packets are strings
                         # and fire before _synthesize() sets tts_start_ms, causing inversion.
@@ -8084,6 +8094,21 @@ class TaskManager(BaseManager):
             )
         return fires
 
+    def _silence_repeat_cap(self):
+        """[silence] re-prompts allowed in the current silence period. A period restarts when the user
+        speaks or the graph moves to another node, and the cap never drops below what the node's own
+        _silence_repeats exit edge needs, so that edge can still fire."""
+        if self.hang_conversation_after <= 0:
+            return math.inf  # no silence hangup to hand over to: a cap would leave the caller in dead air
+        llm_agent = self.tools.get("llm_agent")
+        # time_since_last_spoken_human_word holds the user's last-speech timestamp, so a change means they spoke
+        period = (self.time_since_last_spoken_human_word, getattr(llm_agent, "current_node_id", None))
+        if period != self._silence_period:
+            self._silence_period = period
+            self._silence_repeats_sent = 0
+        exit_at = llm_agent.silence_exit_threshold() if hasattr(llm_agent, "silence_exit_threshold") else 0
+        return max(self.max_silence_repeats, exit_at)
+
     def _pipeline_busy(self, audio_playing):
         """True while the agent is speaking or about to: response_in_pipeline can read False in the gap between a response's synth push and its first audio chunk, so _synthesis_awaiting_first_audio covers it."""
         return audio_playing or self.response_in_pipeline or self._synthesis_awaiting_first_audio
@@ -8194,13 +8219,20 @@ class TaskManager(BaseManager):
             if self._pipeline_busy(self.tools["input"].is_audio_being_played_to_user()):
                 continue
 
+            silence_repeat_cap = self._silence_repeat_cap() if self.repeat_after_silence_seconds else 0
             if (
                 self.repeat_after_silence_seconds
+                and self._silence_repeats_sent < silence_repeat_cap
                 and time_since_last_spoken_ai_word > self.repeat_after_silence_seconds
                 and time_since_user_last_spoke > self.repeat_after_silence_seconds
                 and not self.response_in_pipeline
                 and not has_pending_generation
             ):
+                self._silence_repeats_sent += 1
+                if self._silence_repeats_sent == silence_repeat_cap:
+                    logger.info(
+                        f"Silence re-prompt cap reached ({silence_repeat_cap}), the silence hangup can now fire"
+                    )
                 await self._inject_and_run_llm(
                     f"[silence] User was silent for {self.repeat_after_silence_seconds} seconds"
                 )
@@ -9352,7 +9384,7 @@ class TaskManager(BaseManager):
                     "language_switch_events": list(self.language_switch_events),
                     "call_sid": self.call_sid,
                     "stream_sid": self.stream_sid,
-                    "transcriber_duration": self.transcriber_duration,
+                    "transcriber_duration": self._transcriber_billed_duration(),
                     "synthesizer_characters": (
                         self.tools["synthesizer"].get_synthesized_characters() if _has_asr_tts else 0
                     ),

@@ -381,6 +381,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
                     }
 
                     await ws.send(json.dumps(message))
+                    self.count_audio_sent(len(audio_data), self.sampling_rate, mulaw=self.encoding == "mulaw")
                     # Track send time for latency calculation
                     self.last_audio_send_time = timestamp_ms()
                 except ConnectionClosedError as e:
@@ -606,6 +607,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
 
     async def transcribe(self):
         elevenlabs_ws = None
+        self.reset_billed_audio()
         try:
             start_time = timestamp_ms()
             try:
@@ -658,7 +660,6 @@ class ElevenLabsTranscriber(BaseTranscriber):
             if hasattr(self, "utterance_timeout_task") and self.utterance_timeout_task is not None:
                 self.utterance_timeout_task.cancel()
 
-            meta = dict(getattr(self, "meta_info", None) or {})
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )

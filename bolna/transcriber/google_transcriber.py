@@ -149,6 +149,7 @@ class GoogleTranscriber(BaseTranscriber):
         """
         Enhanced startup sequence matching Deepgram pattern.
         """
+        self.reset_billed_audio()
         try:
             # Connection validation
             await self.google_connect()
@@ -162,9 +163,9 @@ class GoogleTranscriber(BaseTranscriber):
             logger.exception(f"Error starting GoogleTranscriber: {e}")
             self.connection_error = str(e)
             await self.toggle_connection()
-            meta = (self.meta_info or {}).copy()
-            meta["connection_error"] = self.connection_error
-            await self.transcriber_output_queue.put(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.transcriber_output_queue.put(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )
 
     async def _transcribe_wrapper(self):
         """Wrapper to make gRPC streaming fit async pattern better"""
@@ -249,13 +250,19 @@ class GoogleTranscriber(BaseTranscriber):
                 return
             # ensure bytes
             if isinstance(chunk, bytes):
+                self._count_google_audio(chunk)
                 yield speech.StreamingRecognizeRequest(audio_content=chunk)
             else:
                 # try to coerce
                 try:
-                    yield speech.StreamingRecognizeRequest(audio_content=bytes(chunk))
+                    chunk = bytes(chunk)
+                    self._count_google_audio(chunk)
+                    yield speech.StreamingRecognizeRequest(audio_content=chunk)
                 except Exception:
                     logger.exception("Non-bytes chunk received in google audio generator; dropping")
+
+    def _count_google_audio(self, chunk: bytes) -> None:
+        self.count_audio_sent(len(chunk), int(self.sample_rate_hertz), mulaw="ULAW" in (self.encoding or "").upper())
 
     def _append_turn_latency(self, final_transcript=None):
         """
@@ -383,7 +390,7 @@ class GoogleTranscriber(BaseTranscriber):
                             self._enqueue_output(data, meta=self.meta_info)
 
                 # After streaming ends on Google side, send transcriber_connection_closed sentinel
-                closed_meta = (self.meta_info or {}).copy()
+                closed_meta = self.closing_meta()
                 if "transcriber_total_stream_duration" not in closed_meta and "transcriber_start_time" in closed_meta:
                     try:
                         closed_meta["transcriber_total_stream_duration"] = (
@@ -391,8 +398,6 @@ class GoogleTranscriber(BaseTranscriber):
                         )
                     except Exception:
                         pass
-                if self.connection_error:
-                    closed_meta["connection_error"] = self.connection_error
                 self._enqueue_output("transcriber_connection_closed", meta=closed_meta)
 
             except Exception as stream_error:
@@ -408,10 +413,9 @@ class GoogleTranscriber(BaseTranscriber):
 
                 # Send error to output
                 self.connection_error = str(stream_error)
-                err_meta = (self.meta_info or {}).copy()
+                err_meta = self.closing_meta()
                 err_meta["error"] = str(stream_error)
                 err_meta["error_type"] = "streaming_error"
-                err_meta["connection_error"] = self.connection_error
                 self._enqueue_output("transcriber_connection_closed", meta=err_meta)
                 return
 
@@ -419,10 +423,9 @@ class GoogleTranscriber(BaseTranscriber):
             # Configuration or setup error
             logger.exception(f"Google transcriber setup error: {e}")
             self.connection_error = str(e)
-            err_meta = (self.meta_info or {}).copy()
+            err_meta = self.closing_meta()
             err_meta["error"] = str(e)
             err_meta["error_type"] = "setup_error"
-            err_meta["connection_error"] = self.connection_error
             self._enqueue_output("transcriber_connection_closed", meta=err_meta)
         finally:
             self.connection_authenticated = False

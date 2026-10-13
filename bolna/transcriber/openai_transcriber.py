@@ -294,6 +294,7 @@ class OpenAITranscriber(BaseTranscriber):
                                 }
                             )
                         )
+                        self.count_audio_sent(len(silent_pcm), 24000)
                     continue
 
                 if not self.audio_submitted:
@@ -357,6 +358,7 @@ class OpenAITranscriber(BaseTranscriber):
                             }
                         )
                     )
+                    self.count_audio_sent(len(pcm_24k), 24000)
 
         except asyncio.CancelledError:
             logger.info("OpenAI sender_stream task cancelled")
@@ -597,6 +599,7 @@ class OpenAITranscriber(BaseTranscriber):
 
     async def transcribe(self):
         ws = None
+        self.reset_billed_audio()
         try:
             start_time = time.perf_counter()
             try:
@@ -604,9 +607,6 @@ class OpenAITranscriber(BaseTranscriber):
             except (ValueError, ConnectionError) as e:
                 self.connection_error = str(e)
                 await self.toggle_connection()
-                meta = dict(self.meta_info or {})
-                meta["connection_error"] = self.connection_error
-                await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
                 return
 
             if not self.connection_time:
@@ -651,7 +651,6 @@ class OpenAITranscriber(BaseTranscriber):
                 if task is not None:
                     task.cancel()
 
-            meta = dict(self.meta_info or {})
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )

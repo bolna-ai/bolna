@@ -432,6 +432,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         """
         if self._closed:
             return
+        sent = False
         try:
             audio_chunk = ws_data_packet.get("data")
             meta_info = ws_data_packet.get("meta_info") or {}
@@ -503,6 +504,8 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                     except Exception as e:
                         logger.debug(f"sip-trunk send_bytes stopped: {e}")
                         return
+                # XOFF-queued audio counts too: drain_local_queue sends it once Asterisk catches up.
+                sent = True
 
             # Ask Asterisk to echo the mark back once this chunk reaches the front of
             # its playout queue (same contract as Plivo/Twilio).
@@ -523,6 +526,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         except Exception as e:
             logger.error(f"sip-trunk output error: {e}")
             traceback.print_exc()
+        return sent
 
     async def send_hangup(self):
         await self._send_control("HANGUP")

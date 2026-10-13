@@ -502,6 +502,7 @@ class SmallestTranscriber(BaseTranscriber):
                         # Smallest AI expects raw binary audio chunks
                         if isinstance(audio_data, bytes):
                             await ws.send(audio_data)
+                            self.count_audio_sent(len(audio_data), self.sampling_rate, mulaw=self.encoding == "mulaw")
                         else:
                             # If string (possibly base64), send as-is
                             await ws.send(audio_data)
@@ -648,9 +649,8 @@ class SmallestTranscriber(BaseTranscriber):
 
                 # Check if this is the last message
                 if is_last:
+                    # transcribe() emits the single closing packet; a second one here was billed twice.
                     logger.info("Received is_last=true, session complete")
-                    self.meta_info["transcriber_duration"] = time.time() - (self.connection_start_time or time.time())
-                    yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
                     return
 
             except json.JSONDecodeError as e:
@@ -678,6 +678,7 @@ class SmallestTranscriber(BaseTranscriber):
     async def transcribe(self):
         """Main transcription method."""
         smallest_ws = None
+        self.reset_billed_audio()
         try:
             start_time = timestamp_ms()
 
@@ -740,8 +741,6 @@ class SmallestTranscriber(BaseTranscriber):
             if hasattr(self, "utterance_timeout_task") and self.utterance_timeout_task:
                 self.utterance_timeout_task.cancel()
 
-            # Send connection closed message
-            meta = dict(getattr(self, "meta_info", None) or {})
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )

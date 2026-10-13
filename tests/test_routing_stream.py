@@ -171,6 +171,7 @@ class _StubManager:
         self.run_id = "run-1"
         self.on_turn_usage = AsyncMock()
         self.on_overflow = AsyncMock()
+        self.kwargs = {}
         self._routing_tail_tasks = set()
 
     def spawn(self, tail, entry, routing_info=None):
@@ -310,12 +311,36 @@ async def test_an_overflowed_hop_meters_against_the_overflow_backend():
         "routing_usage": {"overflowed": True, "service_tier": "priority"},
     }
     manager = _StubManager()
+    manager.kwargs["route_routing_to_conversation"] = True
     with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
         manager.spawn(tail(), {}, routing_info)
         await manager._settle_routing_tails()
 
     manager.on_overflow.assert_awaited_once_with(1800, 40, None)
     manager.on_turn_usage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_azure_routing_on_its_own_deployment_does_not_meter_the_conversation_pool():
+    # Routing kept off the pool (no route_routing_to_conversation) must not inflate the pool's TPM window.
+    async def tail():
+        return {"reasoning": "r", "confidence": 1.0, "usage": {"input_tokens": 1800, "output_tokens": 40}}
+
+    routing_info = {
+        "previous_node": "dispatch",
+        "current_node": "billing",
+        "transitioned": True,
+        "routing_type": "llm",
+        "routing_provider": "azure",
+        "routing_usage": {},
+    }
+    manager = _StubManager()
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+        manager.spawn(tail(), {}, routing_info)
+        await manager._settle_routing_tails()
+
+    manager.on_turn_usage.assert_not_awaited()
+    manager.on_overflow.assert_not_awaited()
 
 
 @pytest.mark.asyncio
