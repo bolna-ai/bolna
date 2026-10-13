@@ -1,13 +1,10 @@
-"""A provisioned-pool stream that drops before any output is re-issued on the overflow target.
-
-Driven through the real OpenAI SDK over a mock transport, so the exception is the one httpx raises
-when the server closes a chunked response early.
-"""
+"""A provisioned-pool stream that drops before any output is re-issued on the overflow target."""
 
 import asyncio
 import json
 
 import httpx
+import openai
 import pytest
 from openai import AsyncOpenAI
 
@@ -15,6 +12,8 @@ from bolna.llms import AzureLLM
 
 DROP = "peer closed connection without sending complete message body (incomplete chunked read)"
 MSGS = [{"role": "user", "content": "hi"}]
+POOL_MODEL, OVERFLOW_MODEL = "gpt-4.1-mini", "gpt-4.1-mini-overflow"
+DROP_AFTER_S = 0.2
 
 
 def sse(delta=None, finish_reason=None, usage=None):
@@ -49,6 +48,7 @@ class Body(httpx.AsyncByteStream):
 
 
 async def drop():
+    await asyncio.sleep(DROP_AFTER_S)
     raise httpx.RemoteProtocolError(DROP)
 
 
@@ -76,15 +76,16 @@ class Backend:
 
 
 def azure_llm(pool, overflow=None):
-    llm = AzureLLM(model="gpt-4.1-mini", llm_key="k", base_url="https://x.openai.azure.com")
+    llm = AzureLLM(model=POOL_MODEL, llm_key="k", base_url="https://x.openai.azure.com")
     llm.async_client = pool.client()
     llm._overflow_client = overflow.client() if overflow else None
-    llm._overflow_model, llm._overflow_service_tier = "gpt-4.1-mini", "priority"
+    llm._overflow_model, llm._overflow_service_tier = OVERFLOW_MODEL, "priority"
     return llm
 
 
-async def run_turn(llm):
-    return [chunk async for chunk in llm.generate_stream(MSGS, meta_info={"sequence_id": 1})]
+async def run_turn(llm, meta_info=None):
+    meta_info = {"sequence_id": 1} if meta_info is None else meta_info
+    return [chunk async for chunk in llm.generate_stream(MSGS, meta_info=meta_info)]
 
 
 def words(chunks):
@@ -95,14 +96,16 @@ def words(chunks):
 async def test_a_stream_that_drops_before_any_output_is_reissued_on_the_overflow():
     pool = Backend(Body([ROLE], then=drop))
     overflow = Backend(Body(HEALTHY))
+    meta_info = {"sequence_id": 1}
 
-    chunks = await run_turn(azure_llm(pool, overflow))
+    chunks = await run_turn(azure_llm(pool, overflow), meta_info)
 
     assert words(chunks) == REPLY.split()
     assert chunks[-1].overflowed is True
-    assert chunks[-1].latency.first_token_latency_ms is not None
-    assert len(pool.requests) == 1
-    assert overflow.requests[0]["service_tier"] == "priority"
+    assert chunks[-1].latency.first_token_latency_ms >= DROP_AFTER_S * 1000, "measured from the original request"
+    assert [r["model"] for r in pool.requests] == [POOL_MODEL]
+    assert [(r["model"], r["service_tier"]) for r in overflow.requests] == [(OVERFLOW_MODEL, "priority")]
+    assert [e["error_type"] for e in meta_info["_non_fatal_errors"]] == ["stream_dropped_before_output"]
 
 
 async def test_a_stream_that_drops_after_output_is_not_reissued():
@@ -111,6 +114,18 @@ async def test_a_stream_that_drops_after_output_is_not_reissued():
     overflow = Backend(Body(HEALTHY))
 
     with pytest.raises(httpx.RemoteProtocolError):
+        await run_turn(azure_llm(pool, overflow))
+    assert overflow.requests == []
+
+
+async def test_an_error_that_is_not_a_dropped_connection_is_not_reissued():
+    async def boom():
+        raise RuntimeError("boom")
+
+    pool = Backend(Body([ROLE], then=boom))
+    overflow = Backend(Body(HEALTHY))
+
+    with pytest.raises(RuntimeError):
         await run_turn(azure_llm(pool, overflow))
     assert overflow.requests == []
 
@@ -124,6 +139,14 @@ async def test_a_turn_already_on_the_overflow_is_not_reissued_again():
     assert len(overflow.requests) == 1
 
 
+async def test_an_overflow_that_also_fails_ends_the_turn():
+    pool = Backend(Body([ROLE], then=drop))
+    overflow = Backend(429)
+
+    with pytest.raises(openai.RateLimitError):
+        await run_turn(azure_llm(pool, overflow))
+
+
 async def test_without_an_overflow_target_a_dropped_stream_still_raises():
     pool = Backend(Body([ROLE], then=drop))
 
@@ -134,21 +157,29 @@ async def test_without_an_overflow_target_a_dropped_stream_still_raises():
 async def test_a_healthy_stream_stays_on_the_pool():
     pool = Backend(Body(HEALTHY))
     overflow = Backend(Body(HEALTHY))
+    meta_info = {"sequence_id": 1}
 
-    chunks = await run_turn(azure_llm(pool, overflow))
+    chunks = await run_turn(azure_llm(pool, overflow), meta_info)
 
     assert words(chunks) == REPLY.split()
     assert chunks[-1].overflowed is False
     assert overflow.requests == []
+    assert "_non_fatal_errors" not in meta_info
 
 
 async def test_a_cancelled_turn_is_not_reissued():
     """Barge-in cancels the turn; that must never look like a dropped stream."""
-    pool = Backend(Body([ROLE], then=asyncio.Event().wait))
+    streaming = asyncio.Event()
+
+    async def hold_open():
+        streaming.set()
+        await asyncio.Event().wait()
+
+    pool = Backend(Body([ROLE], then=hold_open))
     overflow = Backend(Body(HEALTHY))
 
     turn = asyncio.create_task(run_turn(azure_llm(pool, overflow)))
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(streaming.wait(), timeout=5)
     turn.cancel()
     with pytest.raises(asyncio.CancelledError):
         await turn
