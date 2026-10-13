@@ -10,7 +10,7 @@ import aiohttp
 import websockets
 from websockets.exceptions import InvalidHandshake
 
-from .base_synthesizer import raise_if_rejected
+from .base_synthesizer import REJECTED_STATUSES, raise_if_rejected
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
@@ -25,10 +25,9 @@ from bolna.constants import (
 
 logger = configure_logger(__name__)
 
-# Sarvam closes a socket left idle too long; monitor_connection redials it.
-SARVAM_IDLE_TIMEOUT = 408
-# One sentence Sarvam cannot speak (e.g. no character in the voice's language); only that turn ends.
-SARVAM_TEXT_REJECTED = (400, 422)
+# Sarvam closes the socket after these (idle too long, a sentence it cannot speak); the close
+# settles any open turn and monitor_connection redials.
+SARVAM_RECOVERABLE_ERRORS = (400, 408, 422)
 
 
 class SarvamSynthesizer(StreamSynthesizer):
@@ -202,12 +201,7 @@ class SarvamSynthesizer(StreamSynthesizer):
 
                 if data.get("type") == "error":
                     logger.error(f"Sarvam TTS error response: {data}")
-                    code = data.get("data", {}).get("code")
-                    if code == SARVAM_IDLE_TIMEOUT:
-                        continue
-                    if code in SARVAM_TEXT_REJECTED:
-                        self.last_text_sent = False
-                        yield b"\x00"
+                    if data.get("data", {}).get("code") in SARVAM_RECOVERABLE_ERRORS:
                         continue
                     self.connection_error = json.dumps(data)
                     return
@@ -288,7 +282,8 @@ class SarvamSynthesizer(StreamSynthesizer):
                 logger.error(f"Sarvam TTS endpoint not found: {e}")
             else:
                 logger.error(f"Sarvam TTS handshake failed: {e}")
-            self.connection_error = str(e)
+            if getattr(getattr(e, "response", None), "status_code", None) in REJECTED_STATUSES:
+                self.connection_error = str(e)
             return None
         except Exception as e:
             logger.error(f"Failed to connect to Sarvam TTS: {e}")

@@ -21,6 +21,7 @@ import traceback
 from collections import deque
 
 import websockets
+from websockets.frames import OK_CLOSE_CODES
 
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
@@ -332,9 +333,10 @@ class StreamSynthesizer(BaseSynthesizer):
     # ------------------------------------------------------------------
 
     def server_rejection(self, ws):
-        """The reason the provider gave for closing `ws` with any code but 1000/1001, or None."""
-        frame = getattr(getattr(ws, "protocol", None), "close_rcvd", None)
-        if frame is None or frame.code in (1000, 1001):
+        """The reason the provider gave for closing `ws` with an error code, or None."""
+        protocol = getattr(ws, "protocol", None)
+        frame = getattr(protocol, "close_rcvd", None)
+        if frame is None or frame.code in OK_CLOSE_CODES or protocol.close_rcvd_then_sent is False:
             return None
         return f"{self.provider_name} closed the connection ({frame.code}): {frame.reason}"
 
@@ -371,6 +373,8 @@ class StreamSynthesizer(BaseSynthesizer):
                 else:
                     self.websocket = result
                     consecutive_failures = 0
+            else:
+                consecutive_rejections = 0
             await asyncio.sleep(1)
 
     # ------------------------------------------------------------------
