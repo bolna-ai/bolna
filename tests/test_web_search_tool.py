@@ -231,6 +231,7 @@ async def test_s2s_web_search_returns_result_to_model():
     tm.kwargs = {"api_tools": _inject_web_search_tool(None, tm.web_search_config)}
     tm._run_web_search = AsyncMock(return_value="Search results")
     tm._s2s_before_tool_request = AsyncMock()
+    tm._s2s_hangup_after_response = False
     tm._s2s_call_api_tool = AsyncMock()
     s2s = MagicMock()
     s2s.send_function_result = AsyncMock()

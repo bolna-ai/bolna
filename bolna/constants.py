@@ -1,6 +1,14 @@
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from bolna.enums import ReasoningEffort as RE, SynthesizerProvider, TelephonyProvider
+from typing import Optional
+from bolna.enums import (
+    GeminiToolBehavior,
+    GeminiToolScheduling,
+    ReasoningEffort as RE,
+    SynthesizerProvider,
+    TelephonyProvider,
+)
 
 PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
@@ -351,6 +359,7 @@ UNCOMPRESSED_AUDIO_FORMATS = ("pcm", "wav", "mulaw", "ulaw")
 AUDIO_STREAM_END_SENTINELS = (b"\x00", b"\x00\x00")
 
 END_CALL_FUNCTION_PREFIX = "end_call"
+TRANSFER_CALL_FUNCTION_PREFIX = "transfer_call"
 # meta_info flag a graph end node sets so the task manager hangs up once its reply has played.
 HANGUP_AFTER_REPLY = "hangup_after_reply"
 WEB_SEARCH_FUNCTION_NAME = "web_search"
@@ -574,6 +583,38 @@ def default_thinking_level(model: str) -> str:
     if not supported:
         return RE.LOW.value
     return supported[0].value
+
+
+@dataclass(frozen=True)
+class GeminiLiveCapabilities:
+    """What one Live API model accepts in its setup frame."""
+
+    language_code: bool = True
+    thinking_levels: tuple[RE, ...] = ()
+    # None omits the field: models before 3.8 support only blocking calls.
+    tool_behavior: Optional[GeminiToolBehavior] = None
+    tool_scheduling: Optional[GeminiToolScheduling] = None
+
+
+# 3.8 rejects a language code and runs tools async; results wait for the model to go idle
+# so a sentence it is mid-way through is not clipped.
+GEMINI_3_8_TOOL_CONFIG = {
+    "tool_behavior": GeminiToolBehavior.NON_BLOCKING,
+    "tool_scheduling": GeminiToolScheduling.WHEN_IDLE,
+}
+GEMINI_LIVE_MODEL_CAPABILITIES = {
+    "gemini-3.8-live": GeminiLiveCapabilities(language_code=False, **GEMINI_3_8_TOOL_CONFIG),
+    "gemini-3.8-live-extended-thinking": GeminiLiveCapabilities(
+        language_code=False, thinking_levels=(RE.LOW, RE.MEDIUM, RE.HIGH), **GEMINI_3_8_TOOL_CONFIG
+    ),
+}
+
+GEMINI_LIVE_DEFAULT_CAPABILITIES = GeminiLiveCapabilities()
+
+
+def gemini_live_capabilities(model: str) -> GeminiLiveCapabilities:
+    """Capabilities of one Live model; an unknown id keeps the pre-3.8 wire shape."""
+    return GEMINI_LIVE_MODEL_CAPABILITIES.get(model.rsplit("/", 1)[-1], GEMINI_LIVE_DEFAULT_CAPABILITIES)
 
 
 def canonical_model(name: str) -> str:
