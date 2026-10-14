@@ -152,17 +152,21 @@ async def get_all_agents():
 
         if not agent_keys:
             return {"agents": []}
-        agents_data = []
+        agents = []
+        failed_agent_ids = []
         for key in agent_keys:
             try:
                 data = await redis_client.get(key)
-                agents_data.append(data)
-            except Exception as e:
-                logger.error(f"An error occurred with key {key}: {e}")
+                if data:
+                    agents.append({"agent_id": key, "data": json.loads(data)})
+            except Exception as exc:
+                logger.error(f"An error occurred with key {key}: {exc}")
+                failed_agent_ids.append(key)
 
-        agents = [{"agent_id": key, "data": json.loads(data)} for key, data in zip(agent_keys, agents_data) if data]
-
-        return {"agents": agents}
+        response = {"agents": agents}
+        if failed_agent_ids:
+            response["failed_agent_ids"] = failed_agent_ids
+        return response
 
     except Exception as e:
         logger.error(f"Error fetching all agents: {e}", exc_info=True)
