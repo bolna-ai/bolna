@@ -453,7 +453,7 @@ class TestGeminiModelCapabilities:
 
     def test_thinking_level_reaches_generation_config(self):
         setup = make_gemini(model="gemini-3.8-live-extended-thinking", thinking_level="low")._build_setup()
-        assert setup["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "low"}
+        assert setup["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "LOW"}
 
     def test_thinking_config_absent_when_unset(self):
         assert "thinkingConfig" not in make_gemini()._build_setup()["generationConfig"]
@@ -499,17 +499,37 @@ class TestGeminiModelCapabilities:
         provider._ws = FakeWS()
         await provider.send_function_result("c1", "book", '{"ok":true}')
         await provider.commit_function_results()
-        assert provider._ws.sent[0]["toolResponse"]["functionResponses"][0]["response"] == {
-            "ok": True,
-            "scheduling": "WHEN_IDLE",
-        }
+        assert provider._ws.sent[0]["toolResponse"]["functionResponses"] == [
+            {"id": "c1", "name": "book", "response": {"ok": True}, "scheduling": "WHEN_IDLE"}
+        ]
+
+    @pytest.mark.parametrize("name", ["end_call", "transfer_call_sales"])
+    async def test_blocking_tool_result_on_an_async_model_carries_no_scheduling(self, name):
+        provider = make_gemini(model="gemini-3.8-live")
+        provider._ws = FakeWS()
+        await provider.send_function_result("c1", name, '{"ok":true}')
+        await provider.commit_function_results()
+        assert "scheduling" not in provider._ws.sent[0]["toolResponse"]["functionResponses"][0]
+
+    async def test_tool_payload_with_its_own_scheduling_key_reaches_the_model_unchanged(self):
+        provider = make_gemini(model="gemini-3.8-live")
+        provider._ws = FakeWS()
+        await provider.send_function_result("c1", "book", '{"scheduling":"tomorrow 3pm"}')
+        await provider.commit_function_results()
+        function_response = provider._ws.sent[0]["toolResponse"]["functionResponses"][0]
+        assert function_response["response"] == {"scheduling": "tomorrow 3pm"}
+        assert function_response["scheduling"] == "WHEN_IDLE"
 
     async def test_blocking_model_result_carries_no_scheduling(self):
         provider = make_gemini()
         provider._ws = FakeWS()
         await provider.send_function_result("c1", "book", '{"ok":true}')
         await provider.commit_function_results()
-        assert provider._ws.sent[0]["toolResponse"]["functionResponses"][0]["response"] == {"ok": True}
+        assert provider._ws.sent[0]["toolResponse"]["functionResponses"][0] == {
+            "id": "c1",
+            "name": "book",
+            "response": {"ok": True},
+        }
 
     def test_thinking_level_rejected_for_a_model_without_one(self):
         GeminiLiveConfig(model="gemini-3.8-live-extended-thinking", thinking_level="low")

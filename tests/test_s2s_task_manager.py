@@ -57,7 +57,7 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
     tm._s2s_welcome_sent = True
     tm._s2s_agent_speaking = False
     tm._s2s_turn_seq = 0
-    tm._s2s_usage_logged = s2s_events.S2SUsage()
+    tm.s2s_usage_logged = s2s_events.S2SUsage()
     tm._s2s_playout_until = 0.0
     tm.interruption_manager = MagicMock()
     tm.last_transmitted_timestamp = 0
@@ -881,6 +881,24 @@ class TestToolDispatch:
             await tm._s2s_execute_tool(s2s_events.FunctionCall(name="book", call_id="c1", arguments="{}"))
 
         assert api.await_args.kwargs["headers_data"] == {"Authorization": "Bearer tok"}
+
+    async def test_a_result_arriving_after_the_goodbye_is_armed_is_not_sent(self):
+        # On an async model a slow tool can finish after end_call; speaking it would replace the goodbye.
+        tm = make_tm(tools_params={"book": {"url": "https://api.example/book"}})
+        tm._start_api_call_detail = MagicMock(return_value={})
+        tm._finalize_api_call_detail = MagicMock()
+        tm._s2s_hangup_after_response = True
+        with (
+            patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+            patch(
+                "bolna.agent_manager.task_manager.trigger_api",
+                new=AsyncMock(return_value={"body": '{"ok":1}', "status_code": 200}),
+            ),
+        ):
+            await tm._s2s_execute_tool(s2s_events.FunctionCall(name="book", call_id="c1", arguments="{}"))
+
+        tm.tools["s2s"].send_function_result.assert_not_awaited()
+        tm.tools["s2s"].commit_function_results.assert_not_awaited()
 
     async def test_unconfigured_tool_reports_an_error_instead_of_raising(self):
         tm = make_tm(tools_params={})

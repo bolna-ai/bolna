@@ -34,7 +34,7 @@ GEMINI_LIVE_URL = (
 )
 
 
-_BLOCKING_TOOL_PREFIXES = (END_CALL_FUNCTION_PREFIX, TRANSFER_CALL_FUNCTION_PREFIX)
+BLOCKING_TOOL_PREFIXES = (END_CALL_FUNCTION_PREFIX, TRANSFER_CALL_FUNCTION_PREFIX)
 
 
 class GeminiLiveS2S(BaseS2SProvider):
@@ -131,7 +131,7 @@ class GeminiLiveS2S(BaseS2SProvider):
         if self.temperature is not None:
             generation_config["temperature"] = self.temperature
         if self.thinking_level:
-            generation_config["thinkingConfig"] = {"thinkingLevel": self.thinking_level}
+            generation_config["thinkingConfig"] = {"thinkingLevel": self.thinking_level.upper()}
 
         setup: dict = {
             "model": self.model if self.model.startswith("models/") else f"models/{self.model}",
@@ -171,7 +171,7 @@ class GeminiLiveS2S(BaseS2SProvider):
                 logger.warning(f"S2S: dropping malformed tool entry: {tool!r}")
                 continue
             declaration = {"name": spec["name"], "description": spec.get("description", "")}
-            behavior = self._tool_behavior(spec["name"])
+            behavior = self.tool_behavior(spec["name"])
             if behavior:
                 declaration["behavior"] = behavior.value
             parameters = spec.get("parameters")
@@ -182,15 +182,15 @@ class GeminiLiveS2S(BaseS2SProvider):
             declarations.append(declaration)
         return declarations
 
-    def _tool_behavior(self, name: str) -> Optional[GeminiToolBehavior]:
+    def tool_behavior(self, name: str) -> Optional[GeminiToolBehavior]:
         # Ending and transferring the call block. The goodbye has to be the next turn to
         # complete, and a transfer plays its hold message while the model stays quiet.
-        if self.capabilities.tool_behavior and name.startswith(_BLOCKING_TOOL_PREFIXES):
+        if self.capabilities.tool_behavior and name.startswith(BLOCKING_TOOL_PREFIXES):
             return GeminiToolBehavior.BLOCKING
         return self.capabilities.tool_behavior
 
     def speaks_during_tool_call(self, name: str) -> bool:
-        return self._tool_behavior(name) is GeminiToolBehavior.NON_BLOCKING
+        return self.tool_behavior(name) is GeminiToolBehavior.NON_BLOCKING
 
     async def send_audio(self, pcm_bytes: bytes) -> None:
         if self._reconnecting:
@@ -362,9 +362,11 @@ class GeminiLiveS2S(BaseS2SProvider):
                 payload = {"result": payload}
         except (ValueError, TypeError):
             payload = {"result": result}
-        if self.capabilities.tool_scheduling:
-            payload["scheduling"] = self.capabilities.tool_scheduling.value
-        self._pending_tool_results.append({"id": call_id, "name": name, "response": payload})
+        function_response = {"id": call_id, "name": name, "response": payload}
+        # Scheduling sits beside the response and only applies to a non-blocking call.
+        if self.capabilities.tool_scheduling and self.tool_behavior(name) is GeminiToolBehavior.NON_BLOCKING:
+            function_response["scheduling"] = self.capabilities.tool_scheduling.value
+        self._pending_tool_results.append(function_response)
 
     def _start_turn_clock(self) -> None:
         """Gemini can be prompted from several places; only the first one opens the turn."""

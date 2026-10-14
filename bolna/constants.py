@@ -2,7 +2,13 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
-from bolna.enums import GeminiToolBehavior, GeminiToolScheduling, ReasoningEffort as RE, SynthesizerProvider, TelephonyProvider
+from bolna.enums import (
+    GeminiToolBehavior,
+    GeminiToolScheduling,
+    ReasoningEffort as RE,
+    SynthesizerProvider,
+    TelephonyProvider,
+)
 
 PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
@@ -590,18 +596,16 @@ class GeminiLiveCapabilities:
     tool_scheduling: Optional[GeminiToolScheduling] = None
 
 
-# 3.8 picks its own language and rejects a language code, and only the extended-thinking
-# variant takes a thinking level. Both run tools async, Google's default for 3.8. A result
-# is spoken once the model is idle: interrupting would cut the sentence it is mid-way
-# through, and the caller would hear a clipped word the model then drops.
-_GEMINI_3_8_TOOLS = {
+# 3.8 rejects a language code and runs tools async; results wait for the model to go idle
+# so a sentence it is mid-way through is not clipped.
+GEMINI_3_8_TOOL_CONFIG = {
     "tool_behavior": GeminiToolBehavior.NON_BLOCKING,
     "tool_scheduling": GeminiToolScheduling.WHEN_IDLE,
 }
 GEMINI_LIVE_MODEL_CAPABILITIES = {
-    "gemini-3.8-live": GeminiLiveCapabilities(language_code=False, **_GEMINI_3_8_TOOLS),
+    "gemini-3.8-live": GeminiLiveCapabilities(language_code=False, **GEMINI_3_8_TOOL_CONFIG),
     "gemini-3.8-live-extended-thinking": GeminiLiveCapabilities(
-        language_code=False, thinking_levels=(RE.LOW, RE.MEDIUM, RE.HIGH), **_GEMINI_3_8_TOOLS
+        language_code=False, thinking_levels=(RE.LOW, RE.MEDIUM, RE.HIGH), **GEMINI_3_8_TOOL_CONFIG
     ),
 }
 

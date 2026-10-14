@@ -8557,7 +8557,7 @@ class TaskManager(BaseManager):
         self._s2s_started_at = time.time()
         self._s2s_agent_speaking = False
         self._s2s_turn_seq = 0
-        self._s2s_usage_logged = s2s_events.S2SUsage()
+        self.s2s_usage_logged = s2s_events.S2SUsage()
         self._s2s_playout_until = 0.0
 
         logger.info(f"S2S connecting | provider={self.s2s_provider_name} model={self.s2s_model}")
@@ -8638,9 +8638,9 @@ class TaskManager(BaseManager):
             await s2s.disconnect()
             # Usage the provider reported for a response that never completed, typically the
             # one the caller hung up during, is otherwise never billed.
-            unlogged = s2s.usage_total - self._s2s_usage_logged
+            unlogged = s2s.usage_total - self.s2s_usage_logged
             if unlogged.has_tokens:
-                self._s2s_log_usage("", unlogged)
+                self.log_s2s_usage("", unlogged)
         logger.info("S2S conversation completed")
 
     async def _hangup_after_goodbye(self, reason) -> None:
@@ -8875,10 +8875,10 @@ class TaskManager(BaseManager):
             except asyncio.QueueEmpty:
                 break
 
-    def _s2s_log_usage(self, transcript: str, usage: s2s_events.S2SUsage | None) -> None:
+    def log_s2s_usage(self, transcript: str, usage: s2s_events.S2SUsage | None) -> None:
         """Write one response's usage to the request log, which is what the call is billed from."""
         if usage is not None:
-            self._s2s_usage_logged = self._s2s_usage_logged + usage
+            self.s2s_usage_logged = self.s2s_usage_logged + usage
             if self.task_id == 0 and self.on_turn_usage:
                 self._s2s_track_task(
                     asyncio.create_task(
@@ -8911,7 +8911,7 @@ class TaskManager(BaseManager):
         self._s2s_turn_seq += 1
 
         if event.transcript or event.usage:
-            self._s2s_log_usage(event.transcript, event.usage)
+            self.log_s2s_usage(event.transcript, event.usage)
 
         # The end-of-stream sentinel makes the output handler emit its final mark, which is
         # how the hangup path learns the audio actually reached the caller.
@@ -9044,6 +9044,10 @@ class TaskManager(BaseManager):
             run_id=self.run_id,
             tool_name=tool_name,
         )
+        if self._s2s_hangup_after_response and not ends_call:
+            # The goodbye is already armed; a late async result would be spoken in its place.
+            logger.info(f"S2S tool result dropped, call is ending: {tool_name}")
+            return
         await s2s.send_function_result(event.call_id, event.name, result)
         await s2s.commit_function_results()
         if ends_call:
