@@ -46,6 +46,8 @@ def _make_llm_agent():
     agent.llm.set_interruption_hint = MagicMock()
     agent.llm.invalidate_response_chain = MagicMock()
     agent.llm.cancel_in_flight_response = MagicMock()
+    # No node override active, so the resolver hands back the agent's own client.
+    agent.current_conversation_llm = MagicMock(return_value=agent.llm)
     return agent
 
 
@@ -116,6 +118,7 @@ def _make_task_manager():
     tm.__process_output_loop = AsyncMock()
 
     tm.sync_history = AsyncMock()
+    tm._active_llm_client = TaskManager._active_llm_client.__get__(tm, TaskManager)
     tm._set_interruption_hint = TaskManager._set_interruption_hint.__get__(tm, TaskManager)
     tm._cancel_in_flight_llm_response = TaskManager._cancel_in_flight_llm_response.__get__(tm, TaskManager)
     tm._invalidate_response_chain = TaskManager._invalidate_response_chain.__get__(tm, TaskManager)
@@ -196,3 +199,39 @@ class TestCallSites:
 
         src = inspect.getsource(TaskManager._TaskManager__cleanup_downstream_tasks)
         assert "_cancel_in_flight_llm_response" in src
+
+
+class TestOverrideNodeRouting:
+    """A node LLM override means the turn is not served by llm_agent.llm, and a barge-in that
+    cancelled the agent client would leave the override holding an unconsumed response chain."""
+
+    def _tm_with_override(self):
+        tm = _make_task_manager()
+        override_llm = MagicMock()
+        tm.tools["llm_agent"].current_conversation_llm = MagicMock(return_value=override_llm)
+        return tm, override_llm
+
+    def test_interruption_hint_follows_the_override(self):
+        tm, override_llm = self._tm_with_override()
+        tm._set_interruption_hint("heard")
+        override_llm.set_interruption_hint.assert_called_once_with("heard")
+        tm.tools["llm_agent"].llm.set_interruption_hint.assert_not_called()
+
+    def test_cancel_in_flight_follows_the_override(self):
+        tm, override_llm = self._tm_with_override()
+        tm._cancel_in_flight_llm_response()
+        override_llm.cancel_in_flight_response.assert_called_once_with()
+        tm.tools["llm_agent"].llm.cancel_in_flight_response.assert_not_called()
+
+    def test_invalidate_chain_follows_the_override(self):
+        tm, override_llm = self._tm_with_override()
+        tm._invalidate_response_chain()
+        override_llm.invalidate_response_chain.assert_called_once_with()
+        tm.tools["llm_agent"].llm.invalidate_response_chain.assert_not_called()
+
+    def test_an_agent_without_the_resolver_still_uses_its_llm(self):
+        # Non-graph agents have no current_conversation_llm; the hooks must not break for them.
+        tm = _make_task_manager()
+        del tm.tools["llm_agent"].current_conversation_llm
+        tm._cancel_in_flight_llm_response()
+        tm.tools["llm_agent"].llm.cancel_in_flight_response.assert_called_once_with()

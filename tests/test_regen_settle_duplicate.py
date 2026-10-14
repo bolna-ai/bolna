@@ -6,11 +6,13 @@ with no interrupting user turn. The gate is on the *output*: the regen still run
 that carries a real continuation is answered normally; only a near-identical restatement is dropped.
 """
 
+import logging
+
 import pytest
 
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.constants import DUPLICATE_RESPONSE_SIMILARITY
-from bolna.helpers.utils import normalized_similarity
+from bolna.helpers.utils import normalized_similarity, restates_previous_text
 
 # The two replies from the incident: identical but for a leading "कृपया".
 SPOKEN = "आपने अपने car loan को लेकर कोई concern raise किया था। बताइए, आपको किस बारे में help चाहिए?"
@@ -110,3 +112,183 @@ def test_the_incident_pair_clears_the_threshold_and_distinct_answers_do_not():
 @pytest.mark.parametrize("first,second", [("", "text"), ("text", ""), (None, "text")])
 def test_similarity_is_zero_when_either_side_is_empty(first, second):
     assert normalized_similarity(first, second) == 0.0
+
+
+# A caller reading an ID out in digit groups got the same brush-off reply to each group. The replies
+# scored 1.00, so the gate suppressed the second — but the turns answered *different* user inputs, so
+# it discarded the only answer that input ever got, and its transcript line with it.
+
+BRUSH_OFF = "సరే, తర్వాత చెప్పండి."
+# A growing final: the user text the gate must still treat as a restatement.
+USER_FIRST_FINAL = "हेलो।"
+USER_GROWN_FINAL = "हेलो। हाँ, बताइए।"
+
+
+def _staged_with_user(content, turn_id, user_input, message_category=None):
+    entry = _staged(content, turn_id, message_category)
+    entry["user_input"] = user_input
+    return entry
+
+
+def _manager_with_user(staged=None, last_spoken=None, last_user=None, blocked=()):
+    tm = _manager(staged=staged, last_spoken=last_spoken, blocked=blocked)
+    tm._last_spoken_user_input = last_user
+    return tm
+
+
+def test_identical_reply_to_a_different_user_turn_is_spoken():
+    """Identical replies, disjoint user inputs — must NOT be suppressed."""
+    tm = _manager_with_user(
+        staged={5: _staged_with_user(BRUSH_OFF, turn_id=5, user_input="23124.")},
+        last_spoken=(4, BRUSH_OFF),
+        last_user="412415.",
+    )
+    assert _is_duplicate(tm, 5) is False
+
+
+def test_identical_reply_to_a_regrown_final_is_still_suppressed():
+    """The case the gate exists for: same utterance re-finalized, so the reply really is a repeat."""
+    tm = _manager_with_user(
+        staged={2: _staged_with_user(REGEN, turn_id=2, user_input=USER_GROWN_FINAL)},
+        last_spoken=(1, SPOKEN),
+        last_user=USER_FIRST_FINAL,
+    )
+    assert _is_duplicate(tm, 2) is True
+
+
+def test_a_rewritten_refinal_still_counts_as_a_restatement():
+    """Not every re-final grows; some only rewrite punctuation/casing."""
+    tm = _manager_with_user(
+        staged={2: _staged_with_user(REGEN, turn_id=2, user_input="Hello, yes tell me")},
+        last_spoken=(1, SPOKEN),
+        last_user="hello yes tell me.",
+    )
+    assert _is_duplicate(tm, 2) is True
+
+
+@pytest.mark.parametrize(
+    "staged_user,last_user",
+    [(None, "412415."), ("23124.", None), (None, None)],
+    ids=["current-unknown", "previous-unknown", "both-unknown"],
+)
+def test_unknown_user_input_preserves_the_original_behaviour(staged_user, last_user):
+    """No user text to compare (canned/injected turns) — must not reopen the regen incident."""
+    tm = _manager_with_user(
+        staged={2: _staged_with_user(REGEN, turn_id=2, user_input=staged_user)},
+        last_spoken=(1, SPOKEN),
+        last_user=last_user,
+    )
+    assert _is_duplicate(tm, 2) is True
+
+
+def test_the_incident_pair_is_only_separable_by_user_input():
+    """Pins WHY the old gate could not catch this: the replies are identical, so only the user
+    side carries the signal. Guards against anyone 'fixing' this by tuning the threshold."""
+    assert normalized_similarity(BRUSH_OFF, BRUSH_OFF) == 1.0
+    assert not restates_previous_text("412415.", "23124.", DUPLICATE_RESPONSE_SIMILARITY)
+    assert restates_previous_text(USER_FIRST_FINAL, USER_GROWN_FINAL, DUPLICATE_RESPONSE_SIMILARITY)
+
+
+@pytest.mark.parametrize(
+    "previous,current,expected",
+    [
+        ("hello", "hello there", True),  # growing final
+        ("Hello.", "hello.  yes", True),  # normalisation: case + whitespace
+        ("hello there", "hello", False),  # shrinking is not a re-final
+        ("412415.", "23124.", False),  # disjoint digit groups
+        ("", "hello", False),
+        ("hello", "", False),
+        (None, "hello", False),
+    ],
+)
+def test_restates_previous_text(previous, current, expected):
+    assert restates_previous_text(previous, current, DUPLICATE_RESPONSE_SIMILARITY) is expected
+
+
+def test_a_turn_staged_without_user_input_falls_back(caplog):
+    """When the user input is lost (e.g. a new utterance superseded a follow-up's parent), the
+    gate silently falls back. The log has to say so."""
+    tm = _manager_with_user(
+        staged={2: _staged_with_user(REGEN, turn_id=2, user_input=None)},
+        last_spoken=(1, SPOKEN),
+        last_user="hello",
+    )
+    with caplog.at_level(logging.INFO):
+        assert _is_duplicate(tm, 2) is True
+    assert "user_input_known=False" in caplog.text
+
+
+def test_an_evaluated_gate_says_so(caplog):
+    """The other outcome: both sides known, so the suppression is the new gate's decision."""
+    tm = _manager_with_user(
+        staged={2: _staged_with_user(REGEN, turn_id=2, user_input=USER_GROWN_FINAL)},
+        last_spoken=(1, SPOKEN),
+        last_user=USER_FIRST_FINAL,
+    )
+    with caplog.at_level(logging.INFO):
+        assert _is_duplicate(tm, 2) is True
+    assert "user_input_known=True" in caplog.text
+
+
+# The caller barges into the reply spoken after a tool call and the agent's answer restates it. The
+# follow-up turn had no user input, so the gate fell back and blocked that answer, leaving silence.
+TOOL_CALLER_ASK = "Can you tell me where my order is?"
+TOOL_BARGE_IN = "Okay, go ahead."
+POST_TOOL_REPLY = "I checked, your order was shipped today and should reach you by Friday evening."
+
+
+class _History:
+    def __init__(self):
+        self.messages = []
+
+    def append_assistant(self, content, **kwargs):
+        self.messages.append({"role": "assistant", "content": content, **kwargs})
+
+    def fill_tool_call_placeholder(self, _turn_id, _content, **_kwargs):
+        return None
+
+
+def _spawning_manager(pending_user_input, followup_turn_id):
+    tm = _Stub()
+    tm._pending_user_input = pending_user_input
+    tm._pending_assistant_history = {}
+    tm._sent_audio_sequences = set()
+    tm._blocked_sequences = set()
+    tm._committed_assistant_sequences = set()
+    tm._last_spoken_assistant = None
+    tm._last_spoken_user_input = None
+    tm._turn_msg_map = {}
+    tm.conversation_history = _History()
+    tm._TaskManager__get_updated_meta_info = lambda meta: {
+        **meta,
+        "sequence_id": followup_turn_id,
+        "turn_id": followup_turn_id,
+        "response_uid": f"r{followup_turn_id}",
+    }
+    return tm
+
+
+def test_a_followup_turn_inherits_its_parents_user_input():
+    tm = _spawning_manager(pending_user_input=(6, TOOL_CALLER_ASK), followup_turn_id=7)
+    followup = TaskManager._spawn_followup_meta_info(tm, {"sequence_id": 6, "turn_id": 6, "response_uid": "r6"})
+    TaskManager._stage_assistant_history(tm, followup, POST_TOOL_REPLY)
+    assert tm._pending_assistant_history[7]["user_input"] == TOOL_CALLER_ASK
+
+
+def test_a_followup_does_not_claim_a_newer_user_turn():
+    tm = _spawning_manager(pending_user_input=(7, TOOL_BARGE_IN), followup_turn_id=8)
+    TaskManager._spawn_followup_meta_info(tm, {"sequence_id": 6, "turn_id": 6, "response_uid": "r6"})
+    assert tm._pending_user_input == (7, TOOL_BARGE_IN)
+
+
+def test_a_barge_in_after_a_tool_call_is_answered():
+    tm = _spawning_manager(pending_user_input=(6, TOOL_CALLER_ASK), followup_turn_id=7)
+    followup = TaskManager._spawn_followup_meta_info(tm, {"sequence_id": 6, "turn_id": 6, "response_uid": "r6"})
+    TaskManager._stage_assistant_history(tm, followup, POST_TOOL_REPLY)
+    TaskManager._commit_staged_assistant_history(tm, 7)
+
+    tm._pending_user_input = (8, TOOL_BARGE_IN)
+    barge_in_meta = {"sequence_id": 8, "turn_id": 8, "response_uid": "r8"}
+    TaskManager._stage_assistant_history(tm, barge_in_meta, POST_TOOL_REPLY)
+
+    assert _is_duplicate(tm, 8, barge_in_meta) is False

@@ -13,6 +13,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Conne
 from .base_transcriber import BaseTranscriber
 from bolna.constants import ELEVENLABS_REALTIME_MAX_KEYTERMS
 from bolna.enums import TelephonyProvider
+from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
@@ -73,9 +74,8 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.include_language_detection = include_language_detection
 
         # Keyterm biasing: comma-separated config string -> array of terms (Scribe takes no weights)
-        self.keyterms = []
-        if keywords and isinstance(keywords, str):
-            self.keyterms = [kw.strip() for kw in keywords.split(",") if kw.strip()]
+        self.keyterms = keyword_terms(keywords)
+        if self.keyterms:
             if len(self.keyterms) > ELEVENLABS_REALTIME_MAX_KEYTERMS:
                 logger.warning(
                     f"ElevenLabs realtime supports up to {ELEVENLABS_REALTIME_MAX_KEYTERMS} keyterms; "
@@ -381,6 +381,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
                     }
 
                     await ws.send(json.dumps(message))
+                    self.count_audio_sent(len(audio_data), self.sampling_rate, mulaw=self.encoding == "mulaw")
                     # Track send time for latency calculation
                     self.last_audio_send_time = timestamp_ms()
                 except ConnectionClosedError as e:
@@ -606,6 +607,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
 
     async def transcribe(self):
         elevenlabs_ws = None
+        self.reset_billed_audio()
         try:
             start_time = timestamp_ms()
             try:
@@ -658,7 +660,6 @@ class ElevenLabsTranscriber(BaseTranscriber):
             if hasattr(self, "utterance_timeout_task") and self.utterance_timeout_task is not None:
                 self.utterance_timeout_task.cancel()
 
-            meta = dict(getattr(self, "meta_info", None) or {})
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )

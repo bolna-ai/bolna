@@ -128,7 +128,11 @@ async def test_the_filtered_turn_speaks_nothing_end_to_end():
     agent._build_messages = AsyncMock(return_value=[{"role": "user", "content": "attempt it again"}])
     agent._get_tool_choice_for_node.return_value = None
     agent._tools_for_node.return_value = []
+    agent._ends_call.return_value = False
+    agent._stream_node_reply = lambda *a: GraphAgent._stream_node_reply(agent, *a)
     agent.llm.generate_stream = lambda *a, **k: AzureLLM._generate_stream_chat(azure, *a, **k)
+    # The node resolves its own conversation LLM now; this node overrides nothing, so it is agent.llm.
+    agent._conversation_llm_for.return_value = agent.llm
 
     chunks = []
     with pytest.raises(BadRequestError):

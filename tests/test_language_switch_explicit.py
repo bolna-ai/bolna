@@ -318,3 +318,77 @@ async def test_explicit_mode_status_switch_but_no_explicit_flag_is_gated(monkeyp
     await run_switch(tm)
     tm.switch_language.assert_not_awaited()
     assert "gated:not_explicit" in outcomes(tm)
+
+
+# ── empty detector buffer: explicit mode judges the main ASR text ─────────────────
+
+
+def empty_detector(tm):
+    pool = tm.tools["transcriber"]
+    pool.take_lid_transcript.return_value = ("", None)
+    pool.lid_buffer_segments.return_value = []
+    pool.lid_buffer_max_segment_seconds.return_value = 0.0
+    pool.lid_buffer_language_confidence.return_value = None
+    return tm
+
+
+async def test_explicit_mode_empty_detector_judges_main_asr_text(monkeypatch):
+    # The detector sent nothing for the caller's one-word selection; the main ASR heard it.
+    tm = empty_detector(make_tm(monkeypatch, dict(EXPLICIT_SWITCH)))
+    await run_switch(tm)
+    assert tm.language_switcher.decide.await_args.args[:2] == ("Hindi.", "Hindi.")
+    tm.switch_language.assert_awaited_once()
+    record = tm.tools["transcriber"].lid_detection_events[-1]
+    assert record["outcome"] == "switched"
+    assert record["detector_fallback"] == "main_asr"
+    assert record["detector_segments"] == []
+    assert record["detector_lang_tag"] is None
+
+
+async def test_explicit_mode_empty_detector_still_needs_an_explicit_verdict(monkeypatch):
+    decision = dict(EXPLICIT_SWITCH, request_status="no_request", explicit_request=False, target_language=None)
+    tm = empty_detector(make_tm(monkeypatch, decision))
+    await run_switch(tm)
+    tm.switch_language.assert_not_awaited()
+    assert outcomes(tm) == ["stay"]
+    assert tm.tools["transcriber"].lid_detection_events[-1]["detector_fallback"] == "main_asr"
+
+
+async def test_ambient_mode_empty_detector_makes_no_decision(monkeypatch):
+    tm = empty_detector(make_tm(monkeypatch, dict(EXPLICIT_SWITCH), explicit_only=False))
+    await run_switch(tm)
+    tm.language_switcher.decide.assert_not_awaited()
+    tm.switch_language.assert_not_awaited()
+    assert outcomes(tm) == []
+
+
+async def test_explicit_mode_empty_detector_without_main_text_makes_no_decision(monkeypatch):
+    tm = empty_detector(make_tm(monkeypatch, dict(EXPLICIT_SWITCH)))
+    run = TaskManager._TaskManager__run_language_switch.__get__(tm, TaskManager)
+    await run("  ", {"sequence_id": 1}, "en")
+    tm.language_switcher.decide.assert_not_awaited()
+    assert outcomes(tm) == []
+
+
+async def test_detector_text_present_records_no_fallback(monkeypatch):
+    tm = make_tm(monkeypatch, dict(EXPLICIT_SWITCH))
+    await run_switch(tm)
+    assert tm.language_switcher.decide.await_args.args[0] == "Hindi."
+    assert tm.tools["transcriber"].lid_detection_events[-1]["detector_fallback"] is None
+
+
+async def test_explicit_mode_empty_detector_strips_the_main_asr_text(monkeypatch):
+    tm = empty_detector(make_tm(monkeypatch, dict(EXPLICIT_SWITCH)))
+    run = TaskManager._TaskManager__run_language_switch.__get__(tm, TaskManager)
+    await run("  Hindi. ", {"sequence_id": 1}, "en")
+    assert tm.language_switcher.decide.await_args.args[0] == "Hindi."
+
+
+async def test_explicit_mode_empty_detector_keypad_turn_makes_no_decision(monkeypatch):
+    from bolna.constants import DTMF_MESSAGE_PREFIX
+
+    tm = empty_detector(make_tm(monkeypatch, dict(EXPLICIT_SWITCH)))
+    run = TaskManager._TaskManager__run_language_switch.__get__(tm, TaskManager)
+    await run(DTMF_MESSAGE_PREFIX + "2", {"sequence_id": 1}, "en")
+    tm.language_switcher.decide.assert_not_awaited()
+    assert outcomes(tm) == []

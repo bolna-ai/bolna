@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 
 from .base_transcriber import BaseTranscriber
 from bolna.enums import TelephonyProvider
+from bolna.constants import SMALLEST_MAX_KEYWORDS
+from bolna.helpers.asr_keywords import keyword_entries
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
@@ -60,7 +62,8 @@ class SmallestTranscriber(BaseTranscriber):
         self.language = language
         self.endpointing = endpointing
         self.model = model
-        self.keywords = keywords
+        # Pulse takes the agent's own `term:intensifier` syntax.
+        self.keywords = ",".join(keyword_entries(keywords)[:SMALLEST_MAX_KEYWORDS])
         self.word_timestamps = word_timestamps
         self.process_interim_results = process_interim_results
 
@@ -181,6 +184,9 @@ class SmallestTranscriber(BaseTranscriber):
         # Add word timestamps if enabled
         if self.word_timestamps:
             params["word_timestamps"] = "true"
+
+        if self.keywords:
+            params["keywords"] = self.keywords
 
         # Unified Waves endpoint (docs.smallest.ai -> /speech-to-text): WSS /waves/v1/stt/live
         websocket_url = f"wss://{self.smallest_host}/waves/v1/stt/live?{urlencode(params)}"
@@ -496,6 +502,7 @@ class SmallestTranscriber(BaseTranscriber):
                         # Smallest AI expects raw binary audio chunks
                         if isinstance(audio_data, bytes):
                             await ws.send(audio_data)
+                            self.count_audio_sent(len(audio_data), self.sampling_rate, mulaw=self.encoding == "mulaw")
                         else:
                             # If string (possibly base64), send as-is
                             await ws.send(audio_data)
@@ -642,9 +649,8 @@ class SmallestTranscriber(BaseTranscriber):
 
                 # Check if this is the last message
                 if is_last:
+                    # transcribe() emits the single closing packet; a second one here was billed twice.
                     logger.info("Received is_last=true, session complete")
-                    self.meta_info["transcriber_duration"] = time.time() - (self.connection_start_time or time.time())
-                    yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
                     return
 
             except json.JSONDecodeError as e:
@@ -672,6 +678,7 @@ class SmallestTranscriber(BaseTranscriber):
     async def transcribe(self):
         """Main transcription method."""
         smallest_ws = None
+        self.reset_billed_audio()
         try:
             start_time = timestamp_ms()
 
@@ -734,8 +741,6 @@ class SmallestTranscriber(BaseTranscriber):
             if hasattr(self, "utterance_timeout_task") and self.utterance_timeout_task:
                 self.utterance_timeout_task.cancel()
 
-            # Send connection closed message
-            meta = dict(getattr(self, "meta_info", None) or {})
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )

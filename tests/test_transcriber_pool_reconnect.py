@@ -16,6 +16,9 @@ class FakeTranscriber:
         self.input_queue = asyncio.Queue()
         self.transcription_task = None
 
+    def is_connected(self):
+        return self.transcription_task is not None and not self.transcription_task.done()
+
 
 def _pool():
     transcribers = {"hi": FakeTranscriber(), "ta": FakeTranscriber()}
@@ -96,3 +99,11 @@ async def test_switch_does_not_reconnect_dropped_target_after_eos():
     await pool.switch("hi")
     transcribers["hi"].run.assert_not_awaited()
     assert pool.active_label == "hi"
+
+
+async def test_reconnect_clears_a_stale_connection_error():
+    # Non-azure providers never clear it, so a stale error would end a recovered call.
+    pool, transcribers = _pool()
+    transcribers["ta"].connection_error = "socket died"
+    assert await pool.reconnect_active() is True
+    assert transcribers["ta"].connection_error is None

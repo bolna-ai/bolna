@@ -1,6 +1,7 @@
 import json
-from typing import Any, Literal, Optional, List, Union, Dict, Callable
-from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
+import annotated_types
+from typing import Annotated, Any, Literal, Optional, List, Union, Dict, Callable
+from pydantic import BaseModel, Discriminator, Field, Tag, field_validator, ValidationError, Json, model_validator
 from pydantic_core import PydanticCustomError
 from .providers import *
 from .enums import (
@@ -8,6 +9,7 @@ from .enums import (
     SynthesizerProvider,
     TranscriberProvider,
     S2SProvider,
+    LLMProvider,
     ReasoningEffort,
     Verbosity,
     ExpressionOperator,
@@ -16,7 +18,28 @@ from .enums import (
     NodeType,
     VariableType,
 )
-from .constants import MODEL_REASONING_EFFORT_MAP
+from .constants import (
+    AZURE_TTS_SPEED_MAX,
+    AZURE_TTS_SPEED_MIN,
+    CARTESIA_VOLUME_MAX,
+    CARTESIA_VOLUME_MIN,
+    DEEPGRAM_AURA_2_SPEED_MAX,
+    DEEPGRAM_AURA_2_SPEED_MIN,
+    MODEL_REASONING_EFFORT_MAP,
+    RESERVED_LLM_REQUEST_KEYS,
+    OPENAI_TTS_SPEED_MAX,
+    OPENAI_TTS_SPEED_MIN,
+    RIME_TIME_SCALE_FACTOR_MAX,
+    RIME_TIME_SCALE_FACTOR_MIN,
+    SARVAM_LOUDNESS_MAX,
+    SARVAM_LOUDNESS_MIN,
+    SMALLEST_TTS_SPEED_MAX,
+    SMALLEST_TTS_SPEED_MIN,
+    TTS_AUDIO_SETTINGS,
+    TTS_CONTROL_MODEL_PREFIXES,
+    TTS_CONTROL_MODELS,
+    TTS_MODEL_CONTROL_LIMITS,
+)
 
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
 
@@ -42,6 +65,103 @@ def validate_reasoning_effort_for_model(model: str, reasoning_effort: str) -> No
         raise ValueError(f"reasoning_effort '{reasoning_effort}' is not supported for model '{model}'.")
 
 
+def tts_control_applies(provider: str, key: str, model: Optional[str]) -> bool:
+    """Whether `model` takes the `key` provider_config control; one not listed per model applies to all."""
+    model = (model or "").lower()
+    models = TTS_CONTROL_MODELS.get(provider, {}).get(key)
+    prefixes = TTS_CONTROL_MODEL_PREFIXES.get(provider, {}).get(key)
+    if models is None and prefixes is None:
+        return True
+    return (models is not None and model in models) or (prefixes is not None and model.startswith(prefixes))
+
+
+def tts_control_limits(provider: str, key: str, model: Optional[str]) -> Optional[tuple]:
+    """The (min, max) `model` narrows `key` to, or None when the config field's own bounds apply."""
+    return TTS_MODEL_CONTROL_LIMITS.get(provider, {}).get((model or "").lower(), {}).get(key)
+
+
+def _tts_range_message(provider: str, key: str, low, high, model: Optional[str] = None) -> str:
+    scope = f"{provider.capitalize()} {model}" if model else provider.capitalize()
+    if low is None:
+        return f"{scope} {key} must be at most {high}"
+    if high is None:
+        return f"{scope} {key} must be at least {low}"
+    return f"{scope} {key} must be between {low} and {high}"
+
+
+def validate_tts_model_control_limits(provider: SynthesizerProvider, config: BaseModel) -> None:
+    for key, (low, high) in TTS_MODEL_CONTROL_LIMITS.get(provider, {}).get((config.model or "").lower(), {}).items():
+        value = getattr(config, key, None)
+        if value is not None and not low <= value <= high:
+            raise ValueError(_tts_range_message(provider.value, key, low, high, config.model))
+
+
+def tts_control_range(provider: str, key: str, model: Optional[str]) -> Optional[tuple]:
+    """The (min, max) bolna allows for provider_config.<key> on `model`: the model's own limit, else the
+    config field's ge/le (one side may be None). None when the provider's config has no bounded `key`."""
+    limits = tts_control_limits(provider, key, model)
+    if limits:
+        return limits
+    config_model = SYNTHESIZER_CONFIG_MODELS.get(provider)
+    config_field = config_model.model_fields.get(key) if config_model else None
+    if config_field is None:
+        return None
+    ge = next((m.ge for m in config_field.metadata if isinstance(m, annotated_types.Ge)), None)
+    le = next((m.le for m in config_field.metadata if isinstance(m, annotated_types.Le)), None)
+    return None if ge is None and le is None else (ge, le)
+
+
+def _render_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return f"{float(value):g}"
+    return str(value)
+
+
+def tts_render_settings(provider: str, provider_config: Optional[dict], exclude=()) -> str:
+    """The TTS_AUDIO_SETTINGS values in provider_config, as a stable string for audio cache keys.
+    Values at bolna's default are left out, so keys built before a setting was set still match."""
+    config_model = SYNTHESIZER_CONFIG_MODELS.get(provider)
+    if config_model is None or not isinstance(provider_config, dict):
+        return ""
+    settings = []
+    for key in sorted(TTS_AUDIO_SETTINGS.get(provider, frozenset()) - set(exclude)):
+        value = provider_config.get(key)
+        if value is None or value == "":
+            continue
+        config_field = config_model.model_fields.get(key)
+        default = config_field.default if config_field else None
+        rendered = _render_value(value)
+        if default is not None and rendered == _render_value(default):
+            continue
+        settings.append(f"{key}={rendered}")
+    return ",".join(settings)
+
+
+def tts_provider_config_error(provider: str, provider_config: Optional[dict]) -> Optional[str]:
+    """Why a provider_config value is outside bolna's range for its model, or None when every value fits.
+
+    Checks each value on its own, so it works on a partial or per-language config that the provider's
+    config model would reject for missing fields. Building the config model enforces the same ranges."""
+    if not isinstance(provider_config, dict):
+        return None
+    model = provider_config.get("model")
+    for key, value in provider_config.items():
+        bounds = tts_control_range(provider, key, model)
+        if bounds is None or value is None:
+            continue
+        low, high = bounds
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return f"{provider.capitalize()} {key} must be a number"
+        if (low is not None and number < low) or (high is not None and number > high):
+            per_model = tts_control_limits(provider, key, model) is not None
+            return _tts_range_message(provider, key, low, high, model if per_model else None)
+    return None
+
+
 class PollyConfig(BaseModel):
     voice: str
     engine: str
@@ -54,21 +174,29 @@ class ElevenLabsConfig(BaseModel):
     voice: str
     voice_id: str
     model: str
-    temperature: Optional[float] = 0.5
-    similarity_boost: Optional[float] = 0.75
-    speed: Optional[float] = 1.0
-    style: Optional[float] = 0.0
+    temperature: Optional[float] = Field(default=0.5, ge=0.0, le=1.0)
+    similarity_boost: Optional[float] = Field(default=0.75, ge=0.0, le=1.0)
+    speed: Optional[float] = Field(default=1.0, ge=0.7, le=1.2)
+    style: Optional[float] = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class OpenAIConfig(BaseModel):
     voice: str
     model: str
+    speed: Optional[float] = Field(default=1.0, ge=OPENAI_TTS_SPEED_MIN, le=OPENAI_TTS_SPEED_MAX)
 
 
 class DeepgramConfig(BaseModel):
     voice_id: str
     voice: str
     model: str
+    # Opt out of Deepgram's Model Improvement Program (zero retention after processing).
+    mip_opt_out: Optional[bool] = None
+    speed: Optional[float] = Field(
+        default=1.0,
+        ge=DEEPGRAM_AURA_2_SPEED_MIN,
+        le=DEEPGRAM_AURA_2_SPEED_MAX,
+    )
 
 
 class StandardVoiceConfig(BaseModel):
@@ -81,19 +209,30 @@ class StandardVoiceConfig(BaseModel):
 
 
 class CartesiaConfig(StandardVoiceConfig):
-    speed: Optional[float] = 1.0
+    speed: Optional[float] = Field(default=1.0, ge=0.6, le=1.5)
+    volume: Optional[float] = Field(default=1.0, ge=CARTESIA_VOLUME_MIN, le=CARTESIA_VOLUME_MAX)
 
 
 class RimeConfig(StandardVoiceConfig):
-    pass
+    time_scale_factor: Optional[float] = Field(
+        default=1.0,
+        ge=RIME_TIME_SCALE_FACTOR_MIN,
+        le=RIME_TIME_SCALE_FACTOR_MAX,
+    )
 
 
 class SmallestConfig(StandardVoiceConfig):
-    pass
+    speed: Optional[float] = Field(default=1.0, ge=SMALLEST_TTS_SPEED_MIN, le=SMALLEST_TTS_SPEED_MAX)
 
 
 class SarvamConfig(StandardVoiceConfig):
-    speed: Optional[float] = 1.0
+    speed: Optional[float] = Field(default=1.0, ge=0.3, le=3.0)
+    loudness: Optional[float] = Field(default=1.0, ge=SARVAM_LOUDNESS_MIN, le=SARVAM_LOUDNESS_MAX)
+
+    @model_validator(mode="after")
+    def validate_model_controls(self):
+        validate_tts_model_control_limits(SynthesizerProvider.SARVAM, self)
+        return self
 
 
 class PixaConfig(StandardVoiceConfig):
@@ -127,12 +266,18 @@ class AzureConfig(BaseModel):
     voice: str
     model: str
     language: str
-    speed: Optional[float] = 1.0
+    speed: Optional[float] = Field(default=1.0, ge=AZURE_TTS_SPEED_MIN, le=AZURE_TTS_SPEED_MAX)
 
 
 class GeminiConfig(StandardVoiceConfig):
     # voice_id holds the Gemini voice_name; style feeds structured speech_metadata.
     style: Optional[str] = None
+
+
+class SonioxConfig(StandardVoiceConfig):
+    # `voice` carries a built-in voice name ("Adrian"); a cloned voice's id goes in voice_id.
+    speed: Optional[float] = Field(default=None, ge=0.7, le=1.3)
+    reduce_silence: Optional[bool] = None
 
 
 # The config class each provider's provider_config is validated against. Adding a provider means
@@ -151,7 +296,27 @@ SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.MAYA.value: MayaConfig,
     SynthesizerProvider.KALPA.value: KalpaConfig,
     SynthesizerProvider.GEMINI.value: GeminiConfig,
+    SynthesizerProvider.SONIOX.value: SonioxConfig,
+    SynthesizerProvider.CUSTOM.value: OpenAIConfig,
 }
+
+
+class AssemblyAITranscriberConfig(BaseModel):
+    """AssemblyAI streaming session parameters; an unset field keeps AssemblyAI's default."""
+
+    mode: Optional[Literal["min_latency", "balanced", "max_accuracy"]] = None
+    min_turn_silence: Optional[int] = Field(default=None, ge=0)
+    max_turn_silence: Optional[int] = Field(default=None, ge=0)
+    interruption_delay: Optional[int] = Field(default=None, ge=0, le=1000)
+    vad_threshold: Optional[float] = Field(default=None, ge=0, le=1)
+    voice_focus: Optional[Literal["near-field", "far-field"]] = None
+    voice_focus_threshold: Optional[float] = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_voice_focus_threshold(self):
+        if self.voice_focus_threshold is not None and self.voice_focus is None:
+            raise ValueError("voice_focus_threshold requires voice_focus")
+        return self
 
 
 class Transcriber(BaseModel):
@@ -162,6 +327,8 @@ class Transcriber(BaseModel):
     encoding: Optional[str] = "linear16"
     endpointing: Optional[int] = 500
     keywords: Optional[str] = None
+    # Free-form ASR biasing text.
+    context: Optional[str] = None
     task: Optional[str] = "transcribe"
     provider: Optional[str] = "deepgram"
     multilingual: Optional[Dict[str, Any]] = None
@@ -170,6 +337,8 @@ class Transcriber(BaseModel):
     deepgram_host: Optional[str] = None
     deepgram_flux_host: Optional[str] = None
     deepgram_host_protocol: Optional[str] = None
+    # Opt out of Deepgram's Model Improvement Program (zero retention after processing).
+    mip_opt_out: Optional[bool] = None
     # Flux model parameters
     eot_threshold: Optional[float] = None
     eager_eot_threshold: Optional[float] = None
@@ -179,6 +348,7 @@ class Transcriber(BaseModel):
     noise_reduction: Optional[bool] = False
     vad_threshold: Optional[float] = 0.5
     vad_prefix_padding_ms: Optional[int] = 300
+    assemblyai_config: Optional[AssemblyAITranscriberConfig] = None
 
     @field_validator("provider")
     def validate_model(cls, value):
@@ -323,12 +493,24 @@ class Llm(BaseModel):
     verbosity: Optional[Verbosity] = None
     use_responses_api: Optional[bool] = False
     compact_threshold: Optional[int] = None
+    extra_body: Optional[Dict[str, Any]] = None
 
     @model_validator(mode="after")
     def validate_reasoning_effort_for_model(self):
         if self.reasoning_effort is not None and self.model is not None:
             effort_value = self.reasoning_effort.value
             validate_reasoning_effort_for_model(self.model, effort_value)
+        return self
+
+    @model_validator(mode="after")
+    def validate_extra_body(self):
+        if not self.extra_body:
+            return self
+        if self.provider != LLMProvider.CUSTOM.value:
+            raise ValueError("extra_body is only supported for custom LLM providers")
+        reserved = sorted(RESERVED_LLM_REQUEST_KEYS.intersection(self.extra_body))
+        if reserved:
+            raise ValueError(f"extra_body cannot override request fields: {', '.join(reserved)}")
         return self
 
 
@@ -378,6 +560,35 @@ class CallEvent(BaseModel):
     timestamp: Optional[float] = None
 
 
+class GraphEdgeParameter(BaseModel):
+    """A value an edge collects. description and allowed_values are what the routing model sees on the key."""
+
+    type: str = "string"
+    description: Optional[str] = None
+    allowed_values: Optional[List[str]] = None
+
+    @model_validator(mode="after")
+    def validate_allowed_values(self):
+        if self.allowed_values is None:
+            return self
+        if self.type != "string":
+            raise ValueError("allowed_values is only supported on string parameters")
+        if not self.allowed_values:
+            raise ValueError("allowed_values must list at least one value")
+        return self
+
+
+# Names the routing call or the agent's context_data already use: a parameter with one of these
+# names would lose its value or overwrite theirs. Names starting with "_" are internal state.
+RESERVED_EDGE_PARAMETER_NAMES = frozenset({"reasoning", "confidence", "recipient_data", "detected_language"})
+
+# Discriminated so an invalid definition reports its own error, not also "Input should be a valid string".
+GraphEdgeParameterSpec = Annotated[
+    Union[Annotated[str, Tag("type")], Annotated[GraphEdgeParameter, Tag("definition")]],
+    Discriminator(lambda value: "type" if isinstance(value, str) else "definition"),
+]
+
+
 class GraphEdge(BaseModel):
     """Edge definition for graph-based conversation flow.
 
@@ -395,10 +606,41 @@ class GraphEdge(BaseModel):
     function_name: Optional[str] = None  # e.g., "go_to_city_question"
     function_description: Optional[str] = None  # Detailed description for LLM
     # Optional parameters to collect during transition
-    parameters: Optional[Dict[str, str]] = None  # e.g., {"city": "string"}
+    # Name -> type, e.g. {"city": "string"}, or name -> GraphEdgeParameter for a per-key definition.
+    parameters: Optional[Dict[str, GraphEdgeParameterSpec]] = None
     # lower = evaluated first within a tier (expression/intent/unconditional); does not rank across tiers.
     # Defaults: expression/unconditional=0, llm=100
     priority: Optional[int] = None
+
+    @field_validator("parameters")
+    @classmethod
+    def validate_parameter_names(cls, parameters):
+        for name in parameters or {}:
+            if name in RESERVED_EDGE_PARAMETER_NAMES or name.startswith("_"):
+                raise ValueError(f'Edge parameter "{name}" is a reserved name; rename it.')
+        return parameters
+
+
+class GraphNodeLlmOverride(BaseModel):
+    """Per-node conversation LLM settings. Every field None inherits the agent-level value.
+
+    Mirrors the "LLM overrides" controls in the graph editor's node inspector. Without this declared,
+    the whole object was an unknown key and Pydantic's default extra="ignore" dropped it on save.
+    """
+
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    reasoning_effort: Optional[ReasoningEffort] = None
+
+    @model_validator(mode="after")
+    def validate_effort_for_model(self):
+        # Only checkable when the node names its own model; otherwise the effort rides whatever the
+        # agent-level model is, which GraphAgentConfig validates.
+        if self.reasoning_effort is not None and self.model:
+            validate_reasoning_effort_for_model(self.model, self.reasoning_effort.value)
+        return self
 
 
 class GraphNode(BaseModel):
@@ -408,11 +650,25 @@ class GraphNode(BaseModel):
     prompt: str = ""
     static_message: Optional[LocalizedText] = None
     repeat_after_silence_seconds: Optional[float] = None
+    # Per-node override of ConversationConfig.number_of_words_for_interruption; None inherits it.
+    number_of_words_for_interruption: Optional[int] = None
+    # Per-node conversation LLM (the model that speaks); None inherits the agent's.
+    llm_config: Optional[GraphNodeLlmOverride] = None
+    # Per-node routing model, served on the agent's routing provider and credentials; None inherits.
+    routing_model: Optional[str] = None
+    # Per-node routing effort; None inherits the agent's routing_reasoning_effort.
+    routing_reasoning_effort: Optional[ReasoningEffort] = None
     examples: Optional[Dict[str, str]] = None
     edges: List[GraphEdge] = Field(default_factory=list)
     function_call: Optional[str] = None
     completion_check: Optional[Callable[[List[dict]], bool]] = None
     rag_config: Optional[RagConfig] = None
+
+    @model_validator(mode="after")
+    def validate_routing_effort_for_model(self):
+        if self.routing_reasoning_effort is not None and self.routing_model:
+            validate_reasoning_effort_for_model(self.routing_model, self.routing_reasoning_effort.value)
+        return self
 
     @model_validator(mode="after")
     def validate_router_node(self):
@@ -659,6 +915,21 @@ class S2SConfig(BaseModel):
         return values
 
 
+class WebSearchConfig(BaseModel):
+    enabled: bool = False
+    provider: Literal["openai", "firecrawl", "exa", "parallel"] = "openai"
+    api_key: Optional[str] = None
+    max_results: int = Field(default=3, ge=1, le=10)
+    max_snippet_chars: int = Field(default=400, ge=50, le=4000)
+    timeout_seconds: float = Field(default=8.0, gt=0, le=30)
+    pre_call_message: Optional[LocalizedText] = None
+    scope: Optional[str] = None
+    nodes: List[str] = []
+    description: Optional[str] = None
+    # Used only by the openai provider's Responses side call.
+    model: str = "gpt-5.4-mini"
+
+
 class ToolsConfig(BaseModel):
     llm_agent: Optional[Union[LlmAgent, SimpleLlmAgent]] = None
     synthesizer: Optional[Synthesizer] = None
@@ -666,6 +937,7 @@ class ToolsConfig(BaseModel):
     input: Optional[IOModel] = None
     output: Optional[IOModel] = None
     api_tools: Optional[ToolModel] = None
+    web_search: Optional[WebSearchConfig] = None
     s2s: Optional[S2SConfig] = None
     switch_tool_description: Optional[str] = None
     switch_handoff_messages: Optional[Dict[str, str]] = None
@@ -680,6 +952,9 @@ class ToolsChainModel(BaseModel):
 class ConversationConfig(BaseModel):
     optimize_latency: Optional[bool] = True  # This will work on in conversation
     hangup_after_silence: Optional[int] = 20
+    # [silence] re-prompts per silence period; None uses DEFAULT_MAX_SILENCE_REPEATS, 0 turns them off
+    # unless the node has a _silence_repeats exit edge; ignored when hangup_after_silence is 0
+    max_silence_repeats: Optional[int] = None
     incremental_delay: Optional[int] = 900  # use this to incrementally delay to handle long pauses
     number_of_words_for_interruption: Optional[int] = (
         1  # Maybe send half second of empty noise if needed for a while as soon as we get speaking true in nitro, use that to delay

@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bolna.agent_manager.task_manager import TaskManager
-from bolna.enums import HangupReason, TelephonyProvider
+from bolna.enums import AudioPlaybackReason, HangupReason, TelephonyProvider
 from bolna.helpers.utils import pcm_to_ulaw
 from bolna.s2s import events as s2s_events
 from bolna.s2s.events import AudioEncoding, AudioFormat
@@ -304,7 +304,7 @@ class TestBargeIn:
         # watchdog never fires and the call stays open and billing.
         tm = make_tm()
         await tm._s2s_drop_queued_audio()
-        tm.tools["input"].update_is_audio_being_played.assert_called_with(False)
+        tm.tools["input"].update_is_audio_being_played.assert_called_with(False, AudioPlaybackReason.S2S_DROP_QUEUED)
 
 
 class TestBargeInAccounting:
@@ -787,6 +787,27 @@ class TestToolDispatch:
         assert api.await_args.kwargs["url"] == "https://api.example/book"
         assert api.await_args.kwargs["day"] == "mon"
         assert tm.tools["s2s"].send_function_result.await_args.args[2] == '{"ok":1}'
+
+    async def test_a_bare_name_runs_the_prefixed_custom_tool(self):
+        # A model may call a custom tool without its prefix; it must still reach the tool, be
+        # recorded under the configured name, and get the result back under the name it called.
+        tm = make_tm(tools_params={"custom_task_book": {"url": "https://api.example/book", "method": "POST"}})
+        tm._start_api_call_detail = MagicMock(return_value={})
+        tm._finalize_api_call_detail = MagicMock()
+        with (
+            patch("bolna.agent_manager.task_manager.convert_to_request_log") as log,
+            patch(
+                "bolna.agent_manager.task_manager.trigger_api",
+                new=AsyncMock(return_value={"body": '{"ok":1}', "status_code": 200}),
+            ) as api,
+        ):
+            await tm._s2s_execute_tool(s2s_events.FunctionCall(name="book", call_id="c1", arguments='{"day":"mon"}'))
+
+        assert api.await_args.kwargs["url"] == "https://api.example/book"
+        assert api.await_args.kwargs["called_fun"] == "custom_task_book"
+        assert tm._start_api_call_detail.call_args.kwargs["called_fun"] == "custom_task_book"
+        assert {c.kwargs["tool_name"] for c in log.call_args_list} == {"custom_task_book"}
+        assert tm.tools["s2s"].send_function_result.await_args.args[:2] == ("c1", "book")
 
     async def test_custom_tool_forwards_the_configured_headers(self):
         # The field is `headers` everywhere else; reading `header` sends every authenticated

@@ -14,7 +14,13 @@ from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, get_synth_audio_format, resample, wav_bytes_to_pcm
-from bolna.constants import SARVAM_MODEL_SAMPLING_RATE_MAPPING, SARVAM_TTS_SUPPORTED_LANGUAGES
+from bolna.constants import (
+    SARVAM_LOUDNESS_MAX,
+    SARVAM_LOUDNESS_MIN,
+    SARVAM_MODEL_SAMPLING_RATE_MAPPING,
+    SARVAM_STREAMING_WAV_HEADER_MODELS,
+    SARVAM_TTS_SUPPORTED_LANGUAGES,
+)
 
 logger = configure_logger(__name__)
 
@@ -29,6 +35,7 @@ class SarvamSynthesizer(StreamSynthesizer):
         stream=False,
         buffer_size=400,
         speed=1.0,
+        loudness=1.0,
         synthesizer_key=None,
         **kwargs,
     ):
@@ -52,7 +59,9 @@ class SarvamSynthesizer(StreamSynthesizer):
         self.ws_url = f"wss://api.sarvam.ai/text-to-speech/ws?model={model}&send_completion_event=true"
 
         self.language = language
-        self.loudness = 1.0
+        self.loudness = float(loudness)
+        if not SARVAM_LOUDNESS_MIN <= self.loudness <= SARVAM_LOUDNESS_MAX:
+            raise ValueError(f"Sarvam loudness must be between {SARVAM_LOUDNESS_MIN} and {SARVAM_LOUDNESS_MAX}")
         self.pitch = 0.0
         self.pace = speed
         self.enable_preprocessing = True
@@ -74,7 +83,7 @@ class SarvamSynthesizer(StreamSynthesizer):
     def _process_audio_data(self, audio):
         fmt = get_synth_audio_format(audio)
 
-        if fmt == "wav" and self.model == "bulbul:v3":
+        if fmt == "wav" and self.model in SARVAM_STREAMING_WAV_HEADER_MODELS:
             received_sampling_rate = int.from_bytes(audio[24:28], byteorder="little")
             if self.original_sampling_rate != received_sampling_rate:
                 logger.warning(
@@ -82,7 +91,7 @@ class SarvamSynthesizer(StreamSynthesizer):
                     f"received {received_sampling_rate} for model {self.model}. Using received."
                 )
                 self.original_sampling_rate = received_sampling_rate
-            return None  # Header-only chunk for bulbul:v3
+            return None  # Header-only chunk
 
         try:
             resampled_audio = resample(
@@ -117,6 +126,9 @@ class SarvamSynthesizer(StreamSynthesizer):
                 try:
                     if self.ws_send_time is None:
                         self.ws_send_time = time.perf_counter()
+                    # Claim the socket before sending, not after: text lost into a socket that
+                    # dies mid-send is still this turn's audio, and still has to settle.
+                    self.current_turn_socket = self.websocket
                     await self._send_json({"type": "text", "data": {"text": text}})
                 except Exception as e:
                     logger.error(f"Error sending chunk: {e}")
@@ -138,11 +150,16 @@ class SarvamSynthesizer(StreamSynthesizer):
 
     async def receiver(self):
         not_connected_since = None
+        draining_ws = None
         while True:
             try:
                 if self.conversation_ended:
                     return
                 if not self._is_ws_connected():
+                    # A socket dying between recvs surfaces here, not below. self.websocket is
+                    # still the dead one — once monitor_connection swaps it, this branch is skipped.
+                    if self.has_unsettled_turn_on(self.websocket):
+                        yield b"\x00"
                     if self.connection_error:
                         return
                     now = time.perf_counter()
@@ -158,7 +175,13 @@ class SarvamSynthesizer(StreamSynthesizer):
                 else:
                     not_connected_since = None
 
-                response = await self.websocket.recv()
+                # A closing socket drains buffered frames first; they must not play as
+                # the next turn, which the replacement socket is already serving.
+                draining_ws = self.websocket
+                response = await draining_ws.recv()
+                if draining_ws is not self.websocket:
+                    logger.info("Dropping frame from a replaced Sarvam socket")
+                    continue
                 data = json.loads(response)
 
                 if data.get("type") == "audio":
@@ -177,7 +200,17 @@ class SarvamSynthesizer(StreamSynthesizer):
                     return
 
             except websockets.exceptions.ConnectionClosed:
-                break
+                # Keep looping, never break: SynthesizerPool iterates generate() once, so
+                # ending here leaves the call with no audio path at all.
+                logger.info("Sarvam WebSocket connection closed, waiting for reconnect")
+                if self.conversation_ended or self.connection_error:
+                    return
+                # A turn dying with the socket gets no 'final'; end it or playback stays
+                # marked in progress for the rest of the call.
+                if self.has_unsettled_turn_on(draining_ws):
+                    logger.error("Sarvam WebSocket dropped mid-turn, ending the turn")
+                    yield b"\x00"
+                await asyncio.sleep(0.05)
             except Exception as e:
                 logger.error(f"Error occurred in receiver - {e}")
 
@@ -186,21 +219,19 @@ class SarvamSynthesizer(StreamSynthesizer):
     # ------------------------------------------------------------------
 
     def _config_message(self):
-        return {
-            "type": "config",
-            "data": {
-                "target_language_code": self.language,
-                "speaker": self.voice_id,
-                "pitch": self.pitch,
-                "pace": self.pace,
-                "loudness": self.loudness,
-                "enable_preprocessing": self.enable_preprocessing,
-                "output_audio_codec": "wav",
-                "output_audio_bitrate": "32k",
-                "max_chunk_length": 250,
-                "min_buffer_size": self.buffer_size,
-            },
+        data = {
+            "target_language_code": self.language,
+            "speaker": self.voice_id,
+            "pace": self.pace,
+            "enable_preprocessing": self.enable_preprocessing,
+            "output_audio_codec": "wav",
+            "output_audio_bitrate": "32k",
+            "max_chunk_length": 250,
+            "min_buffer_size": self.buffer_size,
         }
+        if self.model == "bulbul:v2":
+            data.update({"pitch": self.pitch, "loudness": self.loudness})
+        return {"type": "config", "data": data}
 
     async def set_target_language(self, language):
         """Switch TTS output language on the live socket via a fresh config message (no reconnect)."""
@@ -268,11 +299,12 @@ class SarvamSynthesizer(StreamSynthesizer):
     async def synthesize(self, text):
         return await self._generate_http(text)
 
-    async def _generate_http(self, text):
+    def _http_payload(self, text):
         payload = {
             "target_language_code": self.language,
             "text": text,
             "speaker": self.voice_id,
+            "pace": self.pace,
             "pitch": self.pitch,
             "loudness": self.loudness,
             "speech_sample_rate": self.sampling_rate,
@@ -282,4 +314,8 @@ class SarvamSynthesizer(StreamSynthesizer):
         if self.model == "bulbul:v3":
             payload.pop("pitch")
             payload.pop("loudness")
+        return payload
+
+    async def _generate_http(self, text):
+        payload = self._http_payload(text)
         return await self._send_payload(payload)

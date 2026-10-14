@@ -20,7 +20,8 @@ def _switcher(monkeypatch, generate, hedge_after=0.05):
     sw = LanguageSwitcher(available_labels=["hi", "mr"], run_id="r1")
     sw._llm = MagicMock()
     sw._llm.generate = generate
-    sw._log_decision = MagicMock()
+    sw._log_request = MagicMock(return_value={})
+    sw._log_response = MagicMock()
     return sw
 
 

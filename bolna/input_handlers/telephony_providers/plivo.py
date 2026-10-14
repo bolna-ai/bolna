@@ -1,3 +1,4 @@
+import asyncio
 import os
 import plivo as plivosdk
 from dotenv import load_dotenv
@@ -42,7 +43,7 @@ class PlivoInputHandler(TelephonyInputHandler):
 
     async def disconnect_stream(self):
         try:
-            self.client.calls.delete_all_streams(self.call_sid)
+            await asyncio.to_thread(self.client.calls.delete_all_streams, self.get_call_sid())
         except Exception as e:
             logger.info("Error deleting plivo stream: {}".format(str(e)))
 

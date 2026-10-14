@@ -23,7 +23,7 @@ jobs:
         id: v
         run: |
           CURRENT=$(grep -oP '(?<=__version__ = ")[^"]+' bolna/__init__.py)
-          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+          LATEST_TAG=$(git describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || echo "0.0.0")
           HIGHEST=$(printf '%s\n%s\n' "$CURRENT" "$LATEST_TAG" | sort -V | tail -1)
           if [ "$CURRENT" = "$HIGHEST" ] && [ "$CURRENT" != "$LATEST_TAG" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -37,6 +37,7 @@ jobs:
         if: steps.v.outputs.skip == 'false'
         env:
           NEXT: ${{ steps.v.outputs.next }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -44,4 +45,4 @@ jobs:
           sed -i "s/^version = \".*\"/version = \"$NEXT\"/" pyproject.toml
           git add bolna/__init__.py pyproject.toml
           git commit -m "bump: version $NEXT"
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          git push origin "HEAD:$HEAD_REF"

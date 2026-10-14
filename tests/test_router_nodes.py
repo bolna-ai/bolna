@@ -7,6 +7,8 @@ Covers:
   * generate(): transition into a router resolves to a speaking node, entry-node dispatch
 """
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -585,6 +587,44 @@ class TestRouterIntentRouting:
         assert "transition_to_general" in names  # catch-all offered as a real option
         assert "stay_on_current_node" not in names
 
+    async def test_every_routing_tool_asks_for_a_rationale(self):
+        # Required on every tool with no opt-in: streaming keeps it off the critical path
+        # rather than dropping it, and it is what a misroute is debugged from.
+        agent = _intent_router_agent(detected_language="en")
+        intent_edges = [{"to_node_id": "billing", "condition": "billing", "function_name": "go_to_billing"}]
+        tools = agent._build_transition_tools_for_edges(intent_edges, allow_stay=True)
+
+        assert len(tools) == 2
+        for tool in tools:
+            params = tool["function"]["parameters"]
+            assert "reasoning" in params["properties"]
+            assert "reasoning" in params["required"]
+
+    async def test_a_stranded_tail_never_reaches_the_next_hop(self):
+        # A hop that is never built leaves its tail on the agent. If the next decision picked
+        # it up, that hop would record the previous turn's rationale, confidence and tokens,
+        # and meter those tokens twice.
+        agent = _intent_router_agent(detected_language="en")
+        stranded = asyncio.create_task(asyncio.sleep(30))
+        agent._pending_routing_tail = stranded
+
+        agent.routing_llm = MagicMock()
+        agent.routing_llm.route = AsyncMock(
+            return_value={
+                "function_name": "go_to_billing",
+                "arguments": {},
+                "usage": {},
+                "service_tier": None,
+                "overflowed": False,
+                "routing_tail": None,
+            }
+        )
+        await agent.decide_next_node_with_functions([{"role": "user", "content": "my invoice"}])
+
+        await asyncio.sleep(0)  # let the cancellation land
+        assert stranded.cancelled()
+        assert agent._pending_routing_tail is None
+
     async def test_chained_intent_routers_route_independently(self):
         # Two intent routers chained (built as raw dicts, bypassing the validation that
         # now forbids this): with intent_call_spent removed, each routes on its own call
@@ -781,3 +821,111 @@ class TestFirstDeliveryHold:
 
         mock_llm.assert_called_once()
         assert agent.current_node_id == "C"
+
+
+def _static_extract_agent():
+    """Static question -> extract router (intent edge with parameters) -> check router (expression)."""
+    nodes = [
+        {"id": "start", "prompt": "Start.", "edges": [{"to_node_id": "avail_ask", "condition_type": "unconditional"}]},
+        {
+            "id": "avail_ask",
+            "node_type": "static",
+            "static_message": "Are you available to speak right now?",
+            "edges": [{"to_node_id": "avail_extract", "condition_type": "unconditional"}],
+        },
+        {
+            "id": "avail_extract",
+            "node_type": "router",
+            "edges": [
+                {
+                    "to_node_id": "avail_check",
+                    "condition": "The candidate replied.",
+                    "function_name": "record_availability",
+                    "parameters": {"availability": "string"},
+                },
+                {"to_node_id": "avail_check", "condition_type": "unconditional"},
+            ],
+        },
+        {
+            "id": "avail_check",
+            "node_type": "router",
+            "edges": [
+                {
+                    "to_node_id": "edu_ask",
+                    "condition_type": "expression",
+                    "expression": _expr("availability", "eq", "Yes"),
+                },
+                {"to_node_id": "avail_retry", "condition_type": "unconditional"},
+            ],
+        },
+        {
+            "id": "avail_retry",
+            "node_type": "static",
+            "static_message": "Sorry, are you available now?",
+            "edges": [
+                {
+                    "to_node_id": "edu_ask",
+                    "condition": "The candidate replied.",
+                    "function_name": "record_availability",
+                    "parameters": {"availability": "string"},
+                }
+            ],
+        },
+        {"id": "edu_ask", "node_type": "static", "static_message": "What is your qualification?", "edges": []},
+    ]
+    agent = _make_agent(_base_config(nodes, "start"))
+    agent._advance_to_node("avail_ask", 0)
+    agent.mark_first_response_delivered()
+    return agent
+
+
+def _extraction(to_node, params):
+    return (to_node, params, 300.0, [{"role": "system", "content": "routing"}], [], "replied", 1.0, None)
+
+
+class TestNodeExtractedData:
+    async def test_extract_router_value_drives_check_router_and_is_recorded(self):
+        agent = _static_extract_agent()
+        with patch.object(
+            agent,
+            "_decide_next_node_llm",
+            new_callable=AsyncMock,
+            return_value=_extraction("avail_check", {"availability": "Yes"}),
+        ):
+            await _collect(agent.generate([{"role": "user", "content": "yes, go ahead"}]))
+
+        assert agent.current_node_id == "edu_ask"
+        assert agent.node_extracted_data == {"availability": "Yes"}
+        assert agent.context_data["availability"] == "Yes"
+
+    async def test_later_extraction_overwrites_earlier_value(self):
+        agent = _static_extract_agent()
+        with patch.object(
+            agent,
+            "_decide_next_node_llm",
+            new_callable=AsyncMock,
+            return_value=_extraction("avail_check", {"availability": "N/A"}),
+        ):
+            await _collect(agent.generate([{"role": "user", "content": "why?"}]))
+        assert agent.current_node_id == "avail_retry"
+
+        agent.mark_first_response_delivered()
+        with patch.object(
+            agent,
+            "_decide_next_node_llm",
+            new_callable=AsyncMock,
+            return_value=_extraction("edu_ask", {"availability": "Yes"}),
+        ):
+            await _collect(agent.generate([{"role": "user", "content": "yes"}]))
+
+        assert agent.current_node_id == "edu_ask"
+        assert agent.node_extracted_data == {"availability": "Yes"}
+
+    async def test_routing_without_parameters_records_nothing(self):
+        agent = _static_extract_agent()
+        with patch.object(
+            agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=_extraction("avail_check", {})
+        ):
+            await _collect(agent.generate([{"role": "user", "content": "hmm"}]))
+
+        assert agent.node_extracted_data == {}

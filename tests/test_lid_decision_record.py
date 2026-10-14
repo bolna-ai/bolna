@@ -144,3 +144,8 @@ def test_inflight_activity_survives_removed_input_tool():
     tm.execute_function_call_task = None
     activity = TaskManager._inflight_response_activity(tm)
     assert activity["audio_playing"] is False
+
+
+def test_detector_fallback_defaults_to_none_and_is_recorded():
+    assert _record()["detector_fallback"] is None
+    assert _record(detector_fallback="main_asr")["detector_fallback"] == "main_asr"

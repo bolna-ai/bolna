@@ -98,9 +98,11 @@ class MarkEventMetaData:
         if value.get("type") != "pre_mark_message":
             self._mark_history[mark_id] = value
         logger.info(
-            "BOLNA_TRACE_MARK update mark_id=%s type=%s seq=%s turn=%s response_uid=%s group_uid=%s counter=%s dur=%.3f text_len=%s",
+            "BOLNA_TRACE_MARK send mark_id=%s type=%s category=%s seq=%s turn=%s response_uid=%s "
+            "group_uid=%s counter=%s dur=%.3f text_len=%s final=%s",
             mark_id,
             value.get("type"),
+            value.get("message_category") or value.get("type"),
             value.get("sequence_id"),
             value.get("turn_id"),
             value.get("response_uid"),
@@ -108,6 +110,7 @@ class MarkEventMetaData:
             value.get("counter"),
             duration,
             len(value.get("text_synthesized", "") or ""),
+            value.get("is_final_chunk"),
         )
         self.mark_changed.set()
         if value.get("type") != "pre_mark_message":
@@ -183,16 +186,6 @@ class MarkEventMetaData:
             entry["ack_ts"] = time.time()
         result = self.mark_event_meta_data.pop(mark_id, {})
         if result:
-            logger.info(
-                "BOLNA_TRACE_MARK fetch mark_id=%s type=%s seq=%s turn=%s response_uid=%s group_uid=%s counter=%s",
-                mark_id,
-                result.get("type"),
-                result.get("sequence_id"),
-                result.get("turn_id"),
-                result.get("response_uid"),
-                result.get("response_group_uid"),
-                result.get("counter"),
-            )
             self.mark_changed.set()
         return result
 

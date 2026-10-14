@@ -24,6 +24,7 @@ Ref: https://docs.asterisk.org/Configuration/Channel-Drivers/WebSocket/
 """
 
 import asyncio
+from bolna.enums import AudioPlaybackReason
 import os
 import time
 import uuid
@@ -200,7 +201,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         for mid in remaining:
             self.input_handler.process_mark_message({"name": mid})
         if self.input_handler.is_audio_being_played_to_user():
-            self.input_handler.update_is_audio_being_played(False)
+            self.input_handler.update_is_audio_being_played(False, AudioPlaybackReason.SIP_PLAYBACK_FINISHED)
 
     # ------------------------------------------------------------------
     # Audio framing / sending
@@ -324,7 +325,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             if self.mark_event_meta_data:
                 self.mark_event_meta_data.clear_data()
             if self.input_handler:
-                self.input_handler.update_is_audio_being_played(False)
+                self.input_handler.update_is_audio_being_played(False, AudioPlaybackReason.SIP_INTERRUPTION)
         except Exception as e:
             logger.error(f"sip-trunk handle_interruption: {e}")
 
@@ -431,6 +432,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         """
         if self._closed:
             return
+        sent = False
         try:
             audio_chunk = ws_data_packet.get("data")
             meta_info = ws_data_packet.get("meta_info") or {}
@@ -502,6 +504,8 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                     except Exception as e:
                         logger.debug(f"sip-trunk send_bytes stopped: {e}")
                         return
+                # XOFF-queued audio counts too: drain_local_queue sends it once Asterisk catches up.
+                sent = True
 
             # Ask Asterisk to echo the mark back once this chunk reaches the front of
             # its playout queue (same contract as Plivo/Twilio).
@@ -522,6 +526,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         except Exception as e:
             logger.error(f"sip-trunk output error: {e}")
             traceback.print_exc()
+        return sent
 
     async def send_hangup(self):
         await self._send_control("HANGUP")

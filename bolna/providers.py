@@ -13,6 +13,7 @@ from .synthesizer import (
     MayaSynthesizer,
     KalpaSynthesizer,
     GeminiSynthesizer,
+    SonioxSynthesizer,
 )
 from .transcriber import (
     DeepgramTranscriber,
@@ -27,6 +28,7 @@ from .transcriber import (
     OpenAITranscriber,
     SonioxTranscriber,
     GeminiTranscriber,
+    RealtimeTranscriber,
 )
 from .input_handlers import (
     DefaultInputHandler,
@@ -49,14 +51,26 @@ from .output_handlers import (
 from .llms import OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
 from .s2s import GeminiLiveS2S, OpenAIRealtimeS2S
 from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider, S2SProvider
+from .constants import ELEVENLABS_DIALOGUE_MODEL_PREFIXES
 
 
 def elevenlabs_synthesizer(**kwargs):
-    """Eleven v3 is served only from the text-to-dialogue socket; multi-stream-input 403s
-    on those model ids. Everything else stays on the original synthesizer."""
+    """Dialogue-socket models go to the dialogue synthesizer, everything else to the original."""
     # `or ""` rather than a get() default: a stored config can carry an explicit null model.
-    cls = ElevenlabsV3Synthesizer if (kwargs.get("model") or "").startswith("eleven_v3") else ElevenlabsSynthesizer
+    is_dialogue_model = (kwargs.get("model") or "").startswith(ELEVENLABS_DIALOGUE_MODEL_PREFIXES)
+    cls = ElevenlabsV3Synthesizer if is_dialogue_model else ElevenlabsSynthesizer
     return cls(**kwargs)
+
+
+def custom_synthesizer(**kwargs):
+    """A customer's own TTS on the OpenAI synthesizer, at the endpoint the platform injects per call."""
+    # Handed over as `endpoint` so an OpenAI leg in the same multilingual pool never picks up this URL.
+    endpoint = kwargs.pop("synthesizer_base_url", None)
+    if not endpoint:
+        raise ValueError("custom TTS needs synthesizer_base_url")
+    # An endpoint without auth still needs a key for the SDK; an explicit one keeps it off OPENAI_API_KEY.
+    kwargs["synthesizer_key"] = kwargs.get("synthesizer_key") or "none"
+    return OPENAISynthesizer(endpoint=endpoint, **kwargs)
 
 
 SUPPORTED_SYNTHESIZER_MODELS = {
@@ -73,6 +87,8 @@ SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.MAYA.value: MayaSynthesizer,
     SynthesizerProvider.KALPA.value: KalpaSynthesizer,
     SynthesizerProvider.GEMINI.value: GeminiSynthesizer,
+    SynthesizerProvider.SONIOX.value: SonioxSynthesizer,
+    SynthesizerProvider.CUSTOM.value: custom_synthesizer,
 }
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
@@ -88,6 +104,7 @@ SUPPORTED_TRANSCRIBER_PROVIDERS = {
     TranscriberProvider.OPENAI.value: OpenAITranscriber,
     TranscriberProvider.SONIOX.value: SonioxTranscriber,
     TranscriberProvider.GEMINI.value: GeminiTranscriber,
+    TranscriberProvider.BOLNA.value: RealtimeTranscriber,
 }
 
 # Backwards compatibility
@@ -112,6 +129,7 @@ SUPPORTED_LLM_PROVIDERS = {
     LLMProvider.OPENROUTER.value: LiteLLM,
     LLMProvider.AZURE.value: AzureLLM,
     LLMProvider.GOOGLE.value: GeminiLLM,
+    LLMProvider.BOLNA.value: OpenAiLLM,
 }
 SUPPORTED_INPUT_HANDLERS = {
     TelephonyProvider.DEFAULT.value: DefaultInputHandler,

@@ -81,3 +81,18 @@ def test_no_override_leaves_labels_untouched(monkeypatch):
 
     assert "deepgram_host" not in cfg["multilingual"]["en"]
     assert "deepgram_host_protocol" not in cfg["multilingual"]["en"]
+
+
+def test_top_level_mip_opt_out_inherited_into_legs(monkeypatch):
+    cfg = {
+        "provider": "deepgram",
+        "mip_opt_out": True,
+        "multilingual": {
+            "en": {"provider": "deepgram", "model": "nova-3"},
+            "hi": {"provider": "deepgram", "model": "nova-2", "mip_opt_out": False},
+        },
+    }
+    _run_setup(monkeypatch, cfg)
+
+    assert cfg["multilingual"]["en"]["mip_opt_out"] is True
+    assert cfg["multilingual"]["hi"]["mip_opt_out"] is False

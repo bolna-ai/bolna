@@ -133,6 +133,52 @@ class ConversationHistory:
         )
         self.append_assistant(None, tool_calls=tool_calls, turn_id=turn_id)
 
+    def fill_tool_call_placeholder(self, turn_id: int | None, content: str, **kwargs) -> dict | None:
+        """Put the turn's spoken text into the placeholder attach_tool_calls_to_turn left, so it stays
+        ahead of its tool results. Returns the filled message, or None when there is no placeholder."""
+        if turn_id is None:
+            return None
+        for msg in reversed(self._messages):
+            if msg.get("role") == ChatRole.ASSISTANT and msg.get("turn_id") == turn_id:
+                if msg.get("content") is not None or not msg.get("tool_calls"):
+                    return None
+                msg["content"] = content
+                msg.update(kwargs)
+                return msg
+        return None
+
+    def drop_tool_call(self, tool_call_id: str) -> bool:
+        """Erase a tool call and its result, keeping anything the agent actually said.
+
+        A cancelled end_call otherwise leaves "Call is ending now" in history, and the model reads
+        that as already having hung up: it repeats the goodbye and never re-invokes the tool.
+        """
+        if not tool_call_id:
+            return False
+
+        def call_id(call):
+            return call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
+
+        removed = False
+        for messages in (self._messages, self._interim):
+            messages[:] = [m for m in messages if m.get("tool_call_id") != tool_call_id]
+            for index in range(len(messages) - 1, -1, -1):
+                message = messages[index]
+                calls = message.get("tool_calls")
+                if not calls:
+                    continue
+                kept = [c for c in calls if call_id(c) != tool_call_id]
+                if len(kept) == len(calls):
+                    continue
+                removed = True
+                if kept:
+                    message["tool_calls"] = kept
+                elif message.get("content"):
+                    message.pop("tool_calls", None)
+                else:
+                    messages.pop(index)
+        return removed
+
     def update_system_prompt(self, content: str):
         if self._messages and self._messages[0].get("role") == ChatRole.SYSTEM:
             self._messages[0]["content"] = content
@@ -352,6 +398,13 @@ class ConversationHistory:
             return False
         last = self._messages[-1]
         return last.get("role") == ChatRole.USER and last.get("content", "").strip() == content.strip()
+
+    def repeats_last_user_turn(self, content: str) -> bool:
+        """True when content equals the most recent user turn, even once the agent's reply follows it."""
+        for message in reversed(self._messages):
+            if message.get("role") == ChatRole.USER:
+                return (message.get("content") or "").strip() == content.strip()
+        return False
 
     def __len__(self) -> int:
         return len(self._messages)
