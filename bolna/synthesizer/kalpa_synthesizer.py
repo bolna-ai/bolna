@@ -35,6 +35,7 @@ import aiohttp
 import websockets
 from websockets.exceptions import InvalidHandshake
 
+from .base_synthesizer import raise_if_rejected
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
@@ -877,9 +878,9 @@ class KalpaSynthesizer(StreamSynthesizer):
             async with session.post(url, headers=headers, json=payload) as response:
                 request_id = response.headers.get("X-Request-ID")
                 if response.status != 200:
-                    logger.error(
-                        f"Kalpa TTS HTTP error: {response.status} request_id={request_id} - {await response.text()}"
-                    )
+                    detail = await response.text()
+                    logger.error(f"Kalpa TTS HTTP error: {response.status} request_id={request_id} - {detail}")
+                    raise_if_rejected("Kalpa", response.status, detail)
                     return None
                 data = await response.json()
         audio = (data.get("audio") or {}).get("data_b64")

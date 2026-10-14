@@ -9,7 +9,9 @@ import aiohttp
 import websockets
 from websockets.exceptions import InvalidHandshake
 
+from .base_synthesizer import REJECTED_STATUSES, raise_if_rejected
 from .stream_synthesizer import StreamSynthesizer
+from bolna.exceptions import SynthesizerError
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
@@ -197,9 +199,10 @@ class SonioxSynthesizer(StreamSynthesizer):
                 logger.error(f"Soniox TTS endpoint not found: {e}")
             else:
                 logger.error(f"Soniox TTS handshake failed: {e}")
-            # A handshake rejection will not fix itself on retry, so it is surfaced rather
-            # than left to monitor_connection's failure budget.
-            self.connection_error = str(e)
+            # A rejection will not fix itself on retry, so it is surfaced rather than left to
+            # monitor_connection's failure budget.
+            if getattr(getattr(e, "response", None), "status_code", None) in REJECTED_STATUSES:
+                self.connection_error = str(e)
         except Exception as e:
             logger.error(f"Failed to connect to Soniox TTS: {e}")
         return None
@@ -312,6 +315,8 @@ class SonioxSynthesizer(StreamSynthesizer):
 
     async def receiver(self):
         while True:
+            if self.connection_error:
+                return
             if not self._is_ws_connected():
                 await asyncio.sleep(0.05)
                 continue
@@ -338,6 +343,11 @@ class SonioxSynthesizer(StreamSynthesizer):
                     f"{event.get('error_type')} {event.get('error_message')} "
                     f"(code={event.get('error_code')} request_id={event.get('request_id')})"
                 )
+                if event.get("error_code") in REJECTED_STATUSES:
+                    self.connection_error = (
+                        f"Soniox rejected the request ({event.get('error_code')}): {event.get('error_message')}"
+                    )
+                    return
 
                 if not stale and self.stream_id is not None and stream_id == self.stream_id:
                     self._stream_open = False
@@ -400,8 +410,11 @@ class SonioxSynthesizer(StreamSynthesizer):
                     if response.status != 200:
                         body = await response.text()
                         logger.error(f"Soniox TTS HTTP {response.status}: {body[:300]}")
+                        raise_if_rejected("Soniox", response.status, body[:300])
                         return None
                     return await response.read()
+        except SynthesizerError:
+            raise
         except Exception as e:
             logger.error(f"Soniox TTS HTTP request failed: {e}")
             return None

@@ -11,7 +11,8 @@ import re
 
 import aiohttp
 
-from .base_synthesizer import BaseSynthesizer
+from .base_synthesizer import BaseSynthesizer, raise_if_rejected
+from bolna.exceptions import SynthesizerError
 from bolna.constants import GEMINI_TTS_DEFAULT_MODEL, GEMINI_TTS_LOCATION, GEMINI_TTS_NATIVE_SAMPLE_RATE
 from bolna.helpers.gcp_auth import get_gcp_credentials
 from bolna.helpers.logger_config import configure_logger
@@ -118,9 +119,13 @@ class GeminiSynthesizer(BaseSynthesizer):
                     self._endpoint(project), headers=headers, json=self._build_payload(text)
                 ) as response:
                     if response.status != 200:
-                        logger.error(f"Gemini TTS HTTP error: {response.status} - {await response.text()}")
+                        detail = await response.text()
+                        logger.error(f"Gemini TTS HTTP error: {response.status} - {detail}")
+                        raise_if_rejected("Gemini", response.status, detail)
                         return None, None
                     data = await response.json()
+        except SynthesizerError:
+            raise
         except Exception as e:
             logger.error(f"Gemini TTS request failed: {e}")
             return None, None

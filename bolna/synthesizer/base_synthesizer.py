@@ -4,10 +4,20 @@ import asyncio
 import re
 
 from pydub import AudioSegment
+from bolna.exceptions import SynthesizerError
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
 
 logger = configure_logger(__name__)
+
+# Statuses that fail every request for the rest of the call: key, credits, access or voice.
+REJECTED_STATUSES = (401, 402, 403, 404)
+
+
+def raise_if_rejected(provider, status, detail):
+    """End the call with the provider's reason when it rejects a request for good."""
+    if status in REJECTED_STATUSES:
+        raise SynthesizerError(f"{provider} rejected the request ({status}): {detail}", provider=provider)
 
 
 class BaseSynthesizer:

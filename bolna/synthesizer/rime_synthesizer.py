@@ -9,7 +9,9 @@ import aiohttp
 import websockets
 from dotenv import load_dotenv
 
+from .base_synthesizer import raise_if_rejected
 from .stream_synthesizer import StreamSynthesizer
+from bolna.exceptions import SynthesizerError
 from bolna.constants import RIME_TIME_SCALE_FACTOR_MAX, RIME_TIME_SCALE_FACTOR_MIN, RIME_TIME_SCALE_MODELS
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
@@ -255,8 +257,12 @@ class RimeSynthesizer(StreamSynthesizer):
                 async with session.post(self.api_url, headers=headers, json=payload) as response:
                     if response.status == 200:
                         return await response.read()
-                    else:
-                        return b"\x00"
+                    detail = await response.text()
+                    logger.error(f"Rime HTTP status {response.status}: {detail}")
+                    raise_if_rejected("Rime", response.status, detail)
+                    return None
+        except SynthesizerError:
+            raise
         except Exception as e:
             logger.error(f"Rime HTTP error: {e}")
 
