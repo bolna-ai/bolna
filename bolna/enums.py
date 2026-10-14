@@ -65,6 +65,8 @@ class SynthesizerProvider(str, Enum):
     KALPA = "kalpa"
     GEMINI = "gemini"
     SONIOX = "soniox"
+    # A customer's own TTS server, over the OpenAI speech API.
+    CUSTOM = "custom"
 
     @classmethod
     def all_values(cls):
@@ -87,6 +89,8 @@ class TranscriberProvider(str, Enum):
     OPENAI = "openai"
     SONIOX = "soniox"
     GEMINI = "gemini"
+    # Our self-hosted ASR, over the OpenAI Realtime transcription protocol.
+    BOLNA = "bolna"
 
     @classmethod
     def all_values(cls):
@@ -115,6 +119,7 @@ class LLMProvider(str, Enum):
     OPENROUTER = "openrouter"
     AZURE = "azure"
     GOOGLE = "google"
+    BOLNA = "bolna"
 
     @classmethod
     def all_values(cls):

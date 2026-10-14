@@ -95,6 +95,7 @@ def _cancel_target(history):
         hangup_detail="END_CALL_TOOL",
         hangup_cancel_events=[],
         conversation_start_init_ts=0.0,
+        _invalidate_response_chain=MagicMock(),
     )
 
 

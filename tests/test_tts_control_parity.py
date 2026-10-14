@@ -215,3 +215,19 @@ def test_out_of_range_controls_fail_at_setup(monkeypatch, factory, kwargs):
         monkeypatch.setattr("bolna.synthesizer.openai_synthesizer.AsyncOpenAI", MagicMock())
     with pytest.raises(ValueError):
         factory(task_manager_instance=_task_manager(), **kwargs)
+
+
+@pytest.mark.parametrize("model", ["bulbul:v2", "bulbul:v3"])
+def test_sarvam_speed_is_on_http_and_websocket_payloads(model):
+    # The HTTP payload is what pre-renders the cached welcome; without pace it plays at default speed.
+    synth = SarvamSynthesizer(
+        voice_id="anushka",
+        model=model,
+        language="hi-IN",
+        speed=1.5,
+        synthesizer_key="test-key",
+        task_manager_instance=_task_manager(),
+    )
+
+    assert synth._http_payload("hello")["pace"] == 1.5
+    assert synth._config_message()["data"]["pace"] == 1.5

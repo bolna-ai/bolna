@@ -117,10 +117,10 @@ def test_v3_does_not_carry_v1_context_state():
 # ---------------------------------------------------------------------------
 
 
-def test_only_v3_models_reach_the_dialogue_class():
+def test_only_v3_and_v4_models_reach_the_dialogue_class():
     for model in ("eleven_turbo_v2_5", "eleven_flash_v2_5", "eleven_multilingual_v2"):
         assert type(_make(model)) is ElevenlabsSynthesizer, model
-    for model in ("eleven_v3", "eleven_v3_conversational"):
+    for model in ("eleven_v3", "eleven_v3_conversational", "eleven_v4", "eleven_v4_turbo"):
         assert type(_make(model)) is ElevenlabsV3Synthesizer, model
 
 

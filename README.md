@@ -260,6 +260,7 @@ These are the current supported ASRs Providers:
 | Provider     | Environment variable to be added in `.env` file |
 |--------------|-------------------------------------------------|
 | Deepgram     | `DEEPGRAM_AUTH_TOKEN`                           |
+| Bolna (self-hosted, OpenAI Realtime transcription protocol) | `REALTIME_TRANSCRIBER_URL` (`{model}` is replaced by the model), `REALTIME_TRANSCRIBER_KEY` |
 
 </details>
 &nbsp;<br>
@@ -298,6 +299,7 @@ https://github.com/bolna-ai/bolna/blob/c8a0d1428793d4df29133119e354bc2f85a7ca76/
 | Smallest   | `SMALLEST_API_KEY`                            |
 | Maya       | `MAYA_API_KEY`                            |
 | Kalpa      | `KALPA_API_KEY`                            |
+| Custom (the customer's own server, OpenAI speech API) | None: the platform injects the endpoint (`synthesizer_base_url`) and key (`synthesizer_key`) per call |
 
 </details>
 &nbsp;<br>

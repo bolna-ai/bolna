@@ -7,12 +7,17 @@ LLM response, which is what makes a graph-agent trace read as non-sequential.
 """
 
 import asyncio
+import time
 from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 import bolna.helpers.utils as utils
+from bolna.agent_manager.task_manager import TaskManager
 from bolna.enums import LogComponent, LogDirection
+from bolna.llms.types import LatencyData, LLMStreamChunk
 
 
 @pytest.fixture
@@ -120,3 +125,61 @@ async def test_routing_request_row_precedes_its_response_row(captured):
     request_row, response_row = captured
     assert request_row["time"] < response_row["time"]
     assert response_row["latency"] == 0.6918
+
+
+def streaming_task_manager(generate):
+    tm = TaskManager.__new__(TaskManager)
+    tm.hangup_triggered = False
+    tm.conversation_ended = False
+    tm.stream = True
+    tm.turn_based_conversation = False
+    tm.language = "en"
+    tm.llm_config = {"model": "gpt-4.1-mini"}
+    tm.llm_latencies = SimpleNamespace(turn_latencies=[])
+    tm.tools = {"input": MagicMock(reset_response_heard_by_user=MagicMock()), "llm_agent": MagicMock(generate=generate)}
+    tm._stamp_llm_latency_dict = MagicMock()
+    tm._inject_language_instruction = lambda messages: messages
+    tm._handle_llm_output = AsyncMock()
+    tm._TaskManager__process_stop_words = lambda data, meta_info: data
+    tm._TaskManager__store_into_history = MagicMock()
+    return tm
+
+
+async def run_generation(tm):
+    meta_info = {"llm_start_time": time.time(), "sequence_id": 4, "turn_id": 6, "_non_fatal_errors": []}
+    await TaskManager._TaskManager__do_llm_generation_impl(
+        tm, [{"role": "user", "content": "hi"}], meta_info, "synthesizer"
+    )
+    return tm._TaskManager__store_into_history.call_args.kwargs["ts"]
+
+
+async def test_llm_response_row_is_stamped_when_the_first_text_arrived():
+    """TTS starts on the first sentence, so a stream-end stamp sorts the LLM response below
+    the synthesizer rows of its own reply."""
+    sent = {}
+
+    async def generate(messages, synthesize, meta_info):
+        latency = LatencyData(sequence_id=4, first_token_latency_ms=400.0)
+        sent["first"] = time.time()
+        yield LLMStreamChunk(data="Your refund is approved.", end_of_stream=False, latency=latency)
+        await asyncio.sleep(0.05)
+        sent["last"] = time.time()
+        yield LLMStreamChunk(data="It reaches your account in three days.", end_of_stream=True, latency=latency)
+
+    ts = await run_generation(streaming_task_manager(generate))
+
+    assert sent["first"] <= ts < sent["last"]
+
+
+async def test_a_reply_with_no_text_keeps_the_stream_end_stamp():
+    sent = {}
+
+    async def generate(messages, synthesize, meta_info):
+        sent["end"] = time.time()
+        yield LLMStreamChunk(
+            data="", end_of_stream=True, latency=LatencyData(sequence_id=4, first_token_latency_ms=820.0)
+        )
+
+    ts = await run_generation(streaming_task_manager(generate))
+
+    assert ts is not None and ts >= sent["end"]

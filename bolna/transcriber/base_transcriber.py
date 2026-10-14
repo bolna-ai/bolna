@@ -1,6 +1,7 @@
 import json
 import time
 import uuid
+from typing import Callable
 from dotenv import load_dotenv
 from bolna.helpers.logger_config import configure_logger
 
@@ -23,7 +24,46 @@ class BaseTranscriber:
         self.turn_latencies = []
         self.connection_error = None
         self.is_transcript_sent_for_processing = False
+        self.agent_context_source = None
         self.reset_audio_frame_state()
+        self.closed_connections_billed_s = 0.0
+        self.audio_sent_s = 0.0
+        self.provider_audio_duration_s = None
+
+    def reset_billed_audio(self) -> None:
+        """Start a connection's billing window. A pool reconnect reuses the instance, so the window
+        that ends here moves into the call total rather than carrying into the next connection."""
+        self.closed_connections_billed_s += self._connection_billed_s()
+        self.audio_sent_s = 0.0
+        self.provider_audio_duration_s = None
+
+    def count_audio_sent(self, num_bytes: int, sample_rate: int, mulaw: bool = False) -> None:
+        self.audio_sent_s += num_bytes / ((1 if mulaw else 2) * sample_rate)
+
+    def _connection_billed_s(self) -> float:
+        """The provider's own billed duration when it reports one, else the audio actually sent."""
+        if self.provider_audio_duration_s is not None:
+            return self.provider_audio_duration_s
+        return self.audio_sent_s
+
+    def billed_audio_s(self) -> float:
+        """The call's ASR usage: every closed connection plus the one still open. task_manager reads
+        this at teardown because after a hangup it stops reading closing packets after the first."""
+        return self.closed_connections_billed_s + self._connection_billed_s()
+
+    def closing_meta(self) -> dict:
+        """Meta for the connection's transcriber_connection_closed packet. Closes the billing window, so
+        a second packet for the same connection reports 0 and the call total counts it once."""
+        meta = dict(getattr(self, "meta_info", None) or {})
+        meta["transcriber_duration"] = round(self._connection_billed_s(), 4)
+        self.reset_billed_audio()
+        if self.connection_error:
+            meta["connection_error"] = self.connection_error
+        return meta
+
+    def set_agent_context_source(self, source: Callable[[], str | None]) -> None:
+        """Point at the agent's latest spoken reply, for providers that bias the caller's next turn with it."""
+        self.agent_context_source = source
 
     def reset_audio_frame_state(self) -> None:
         """Restart the audio position -> send-time map; ASR stream positions restart per connection."""
@@ -97,6 +137,13 @@ class BaseTranscriber:
 
     async def cleanup(self):
         """Clean up transcriber resources. Override in subclasses."""
+        pass
+
+    async def discard_open_turn(self):
+        """Close the turn in progress without delivering it, as a multilingual call switches away.
+
+        Override where the provider can leave a turn open; the default has nothing to close.
+        """
         pass
 
     def is_connected(self):

@@ -19,6 +19,8 @@ from bolna.constants import (
     SONIOX_AUTO_LANGUAGE_VALUES,
     SONIOX_DEFAULT_MULTILINGUAL_HINTS,
     SONIOX_ENDPOINT_TOKEN,
+    SONIOX_FINALIZE_DISCARD_S,
+    SONIOX_FINALIZE_TOKEN,
     SONIOX_WEBSOCKET_HOST,
 )
 
@@ -104,6 +106,8 @@ class SonioxTranscriber(BaseTranscriber):
         self.turn_counter = 0
         self.last_interim_time = None
         self._last_detected_language = None
+        # Set while a discarded turn's flushed tokens are still due back (see discard_open_turn).
+        self.discard_until_fin_deadline = None
 
     def _resolve_audio_params(self):
         """Set encoding, sample rate and frame duration from the telephony/web I/O provider."""
@@ -220,6 +224,7 @@ class SonioxTranscriber(BaseTranscriber):
                     continue
                 if isinstance(data, (bytes, bytearray)):
                     self.record_audio_frame(self._audio_frame_seconds(len(data)), timestamp_ms())
+                    self.count_audio_sent(len(data), self.sampling_rate, mulaw=self.encoding == "mulaw")
                 try:
                     await ws.send(data)
                 except ConnectionClosedError as e:
@@ -309,6 +314,9 @@ class SonioxTranscriber(BaseTranscriber):
                     logger.error(f"Soniox error: {self.connection_error}")
                     break
 
+                if res.get("total_audio_proc_ms") is not None:
+                    self.provider_audio_duration_s = res["total_audio_proc_ms"] / 1000
+
                 endpoint_hit = False
                 new_final_text = ""
                 non_final_text = ""
@@ -316,6 +324,11 @@ class SonioxTranscriber(BaseTranscriber):
                 for token in res.get("tokens", []):
                     text = token.get("text", "")
                     if not text:
+                        continue
+                    if text == SONIOX_FINALIZE_TOKEN:
+                        self.discard_until_fin_deadline = None
+                        continue
+                    if self.is_discarded_turn_leftover():
                         continue
                     if text == SONIOX_ENDPOINT_TOKEN:
                         endpoint_hit = True
@@ -385,6 +398,35 @@ class SonioxTranscriber(BaseTranscriber):
             except Exception as e:
                 logger.error(f"Error processing Soniox message: {e}")
                 traceback.print_exc()
+
+    async def discard_open_turn(self):
+        """Close the turn in progress without delivering it, as a multilingual call switches away.
+
+        A standby leg only gets keepalive silence, so a sentence it was cut off in would never reach
+        an endpoint: it would drip out one keepalive at a time and be prefixed to the caller's next
+        utterance if the call switched back. Finalize flushes it now; the receiver drops what comes
+        back up to the <fin> marker. With no turn open there is nothing to flush or wait for.
+        """
+        turn_open = self.current_turn_id is not None
+        self._reset_turn_state()
+        if not turn_open or self.websocket_connection is None:
+            return
+        self.discard_until_fin_deadline = time.time() + SONIOX_FINALIZE_DISCARD_S
+        try:
+            await self.websocket_connection.send(json.dumps({"type": "finalize"}))
+        except Exception as e:
+            self.discard_until_fin_deadline = None
+            logger.warning(f"Soniox: could not finalize the discarded turn: {e}")
+
+    def is_discarded_turn_leftover(self) -> bool:
+        """True while tokens are the discarded turn's flushed words, i.e. before its <fin> arrives."""
+        if self.discard_until_fin_deadline is None:
+            return False
+        if time.time() < self.discard_until_fin_deadline:
+            return True
+        logger.warning("Soniox: no <fin> after finalizing the discarded turn; accepting tokens again")
+        self.discard_until_fin_deadline = None
+        return False
 
     async def _force_finalize_utterance(self):
         """Force-finalize a stuck utterance when Soniox never sends the endpoint token."""
@@ -497,6 +539,7 @@ class SonioxTranscriber(BaseTranscriber):
         soniox_ws = None
         # Audio positions restart at 0 on each connection; reset local frame bookkeeping with them.
         self.reset_audio_frame_state()
+        self.reset_billed_audio()
         try:
             start_time = timestamp_ms()
             try:
@@ -548,7 +591,6 @@ class SonioxTranscriber(BaseTranscriber):
             if self.sender_task is not None:
                 self.sender_task.cancel()
 
-            meta = dict(getattr(self, "meta_info", None) or {})
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )

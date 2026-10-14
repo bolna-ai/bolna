@@ -7,6 +7,7 @@ interruption point.
 """
 
 import asyncio
+from types import SimpleNamespace
 import time
 
 import pytest
@@ -113,6 +114,7 @@ def _wait_tm(mark_data):
     tm.mark_event_meta_data = marks
     tm.conversation_ended = False
     tm.hangup_mark_event_timeout = 0.5
+    tm.tools = {"input": SimpleNamespace(input_stream_ended=False)}
     tm._turn_audio_flushed = asyncio.Event()
     tm._turn_audio_flushed.set()
     return tm

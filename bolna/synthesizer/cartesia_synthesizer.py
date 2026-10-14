@@ -24,7 +24,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
         voice_id,
         voice,
         language="en",
-        model="sonic-english",
+        model="sonic-3.6",
         audio_format="mp3",
         sampling_rate="16000",
         stream=False,

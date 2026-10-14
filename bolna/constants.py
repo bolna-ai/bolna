@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
-from bolna.enums import GeminiToolBehavior, GeminiToolScheduling, ReasoningEffort as RE, TelephonyProvider
+from bolna.enums import GeminiToolBehavior, GeminiToolScheduling, ReasoningEffort as RE, SynthesizerProvider, TelephonyProvider
 
 PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
@@ -32,7 +32,11 @@ ELEVENLABS_REALTIME_MAX_KEYTERMS = 50
 # Past these the engine rejects the session rather than truncating.
 ASSEMBLYAI_MAX_KEYTERMS = 100
 ASSEMBLYAI_MAX_PROMPT_CHARACTERS = 1750
+ASSEMBLYAI_MAX_AGENT_CONTEXT_CHARACTERS = 1750
 SMALLEST_MAX_KEYWORDS = 100
+
+SARVAM_MAX_KEYTERMS = 50
+SARVAM_MAX_KEYTERM_CHARACTERS = 64
 
 # Beyond this a phrase list costs Azure accuracy and latency rather than buying either.
 AZURE_MAX_PHRASES = 2000
@@ -79,10 +83,17 @@ DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD = 0.5  # confidence to trigger speculative LLM
 DEEPGRAM_FLUX_EOT_TIMEOUT_MS = 500  # max silence before forcing end-of-turn
 # Min time a Flux turn may stay open with no transcriber events before it is force-closed.
 DEEPGRAM_FLUX_TURN_STALL_FLOOR_S = 3.0
+# Deepgram re-sends a just-finalized sentence ~1s after the final; a word-for-word repeat later than this is real speech
+REDELIVERED_TRANSCRIPT_WINDOW_MS = 2000
 # Past this much silence (no audio playing, both sides silent), force a hangup - the call has
 # made no forward progress at all, e.g. a hung LLM call or an s2s tool task that never
 # completes. BOLNA-2563.
 STALL_HANGUP_HARD_CAP_S = 60.0
+# [silence] re-prompts allowed per silence period (reset when the user speaks or the node changes;
+# raised to what the node's own _silence_repeats exit edge needs). Each re-prompt counts as agent
+# speech and restarts the silence clock, so without a cap a node re-prompt shorter than
+# hangup_after_silence keeps a silent caller on the line until the max call duration.
+DEFAULT_MAX_SILENCE_REPEATS = 2
 # Max time to wait for one LLM reply (_run_llm_task). If the LLM never comes back - no reply,
 # no error, it just hangs - force it to fail after this many seconds and hang up, instead of
 # leaving the call stuck forever. BOLNA-2563.
@@ -134,6 +145,9 @@ S2S_GOODBYE_TIMEOUT_S = 10.0
 # Soniox real-time STT
 SONIOX_WEBSOCKET_HOST = "stt-rt.soniox.com"
 SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops
+SONIOX_FINALIZE_TOKEN = "<fin>"  # closes the tokens a {"type": "finalize"} request flushed
+# Ceiling on dropping a finalized turn's leftovers, in case its <fin> never comes back.
+SONIOX_FINALIZE_DISCARD_S = 3.0
 # Hinted for multilingual auto-detect: Soniox identifies and code-switches across these in one
 # stream; hinting the relevant set sharpens accuracy over fully-open auto. No real-time as/od.
 SONIOX_DEFAULT_MULTILINGUAL_HINTS = ["en", "hi", "ta", "te", "kn", "ml", "mr", "bn", "gu", "pa", "ur"]
@@ -340,6 +354,9 @@ AUDIO_STREAM_END_SENTINELS = (b"\x00", b"\x00\x00")
 
 END_CALL_FUNCTION_PREFIX = "end_call"
 TRANSFER_CALL_FUNCTION_PREFIX = "transfer_call"
+# meta_info flag a graph end node sets so the task manager hangs up once its reply has played.
+HANGUP_AFTER_REPLY = "hangup_after_reply"
+WEB_SEARCH_FUNCTION_NAME = "web_search"
 
 END_CALL_TOOL_DEFINITION = {
     "type": "function",
@@ -361,11 +378,38 @@ END_CALL_TOOL_DEFINITION = {
     },
 }
 
+WEB_SEARCH_TOOL_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": WEB_SEARCH_FUNCTION_NAME,
+        "description": (
+            "Look up current public information on the web. Use this for news, prices, scores, "
+            "and facts that may have changed after your knowledge cutoff. Answer the caller in "
+            "one or two spoken sentences."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "A short search query for the fact the caller asked about.",
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+}
+
 # Provider TTS controls. Config models and synthesizer adapters share these
 # bounds so validation cannot drift between agent setup and direct package use.
 CARTESIA_VOLUME_MIN = 0.5
 CARTESIA_VOLUME_MAX = 2.0
 CARTESIA_VOLUME_MODELS = {"sonic-3", "sonic-3.5", "sonic-3.6", "sonic-preview"}
+
+# Served only from the text-to-dialogue socket; multi-stream-input 403s on these.
+ELEVENLABS_DIALOGUE_MODEL_PREFIXES = ("eleven_v3", "eleven_v4")
 
 DEEPGRAM_AURA_2_SPEED_MIN = 0.7
 DEEPGRAM_AURA_2_SPEED_MAX = 1.5
@@ -381,6 +425,46 @@ SMALLEST_TTS_SPEED_MAX = 2.0
 
 SARVAM_LOUDNESS_MIN = 0.3
 SARVAM_LOUDNESS_MAX = 3.0
+
+AZURE_TTS_SPEED_MIN = 0.5
+AZURE_TTS_SPEED_MAX = 2.0
+
+# Per-model TTS controls, read by the config validators in bolna.models and by the dashboard. A config
+# field's ge/le is the provider-wide range; a control listed here applies only to the models named, or has
+# a narrower range on one model. Model ids are lowercase.
+SARVAM_LOUDNESS_MODELS = frozenset({"bulbul:v2"})
+RIME_TIME_SCALE_MODELS = frozenset({"coda", "mistv3"})
+ELEVENLABS_STYLE_MODELS = frozenset({"eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2"})
+
+TTS_CONTROL_MODELS = {
+    SynthesizerProvider.CARTESIA: {"volume": CARTESIA_VOLUME_MODELS},
+    SynthesizerProvider.ELEVENLABS: {"style": ELEVENLABS_STYLE_MODELS},
+    SynthesizerProvider.RIME: {"time_scale_factor": RIME_TIME_SCALE_MODELS},
+    SynthesizerProvider.SARVAM: {"loudness": SARVAM_LOUDNESS_MODELS},
+}
+# Deepgram model ids can carry the voice ("aura-2-thalia-en"), so its controls match on the family prefix.
+TTS_CONTROL_MODEL_PREFIXES = {
+    SynthesizerProvider.DEEPGRAM: {"speed": ("aura-2",)},
+}
+TTS_MODEL_CONTROL_LIMITS = {
+    SynthesizerProvider.SARVAM: {"bulbul:v3": {"speed": (0.5, 2.0)}},
+}
+# provider_config keys that change how the audio sounds, so cached audio (welcome, static-node clips) keys on them.
+TTS_AUDIO_SETTINGS = {
+    SynthesizerProvider.AZURETTS: frozenset({"speed"}),
+    SynthesizerProvider.CARTESIA: frozenset({"speed", "volume"}),
+    SynthesizerProvider.DEEPGRAM: frozenset({"speed"}),
+    SynthesizerProvider.ELEVENLABS: frozenset({"speed", "similarity_boost", "temperature", "style"}),
+    SynthesizerProvider.GEMINI: frozenset({"style"}),
+    SynthesizerProvider.KALPA: frozenset({"temperature", "acoustic_temperature", "audio_quality", "max_new_tokens"}),
+    SynthesizerProvider.OPENAI: frozenset({"speed"}),
+    SynthesizerProvider.PIXA: frozenset({"top_p", "repetition_penalty"}),
+    SynthesizerProvider.RIME: frozenset({"time_scale_factor"}),
+    SynthesizerProvider.SARVAM: frozenset({"speed", "loudness"}),
+    SynthesizerProvider.SMALLEST: frozenset({"speed"}),
+    SynthesizerProvider.SONIOX: frozenset({"speed", "reduce_silence"}),
+    SynthesizerProvider.CUSTOM: frozenset({"speed"}),
+}
 
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,

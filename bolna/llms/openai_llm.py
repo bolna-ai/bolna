@@ -216,8 +216,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
-        is_custom = kwargs.get("provider") == LLMProvider.CUSTOM.value
-        if is_custom:
+        provider = kwargs.get("provider")
+        self_hosted = provider in (LLMProvider.CUSTOM.value, LLMProvider.BOLNA.value)
+        is_custom = provider == LLMProvider.CUSTOM.value
+        if self_hosted:
             if kwargs.get("extra_body"):
                 self.model_args["extra_body"] = kwargs["extra_body"]
         else:
@@ -226,7 +228,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         # http2=False: cancelled h2 requests leak streams until the connection pins at 100 (barge-in)
         http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False)
 
-        if is_custom:
+        if self_hosted:
             base_url = kwargs.get("base_url")
             api_key = kwargs.get("llm_key", None)
             self.async_client = AsyncOpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
@@ -255,11 +257,11 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.run_id = kwargs.get("run_id", None)
 
         # Self-hosted endpoints speak chat completions only; Responses-API chaining is OpenAI-specific.
-        use_responses_api = kwargs.get("use_responses_api", False) and not is_custom
+        use_responses_api = kwargs.get("use_responses_api", False) and not self_hosted
         self._init_responses_api(use_responses_api, compact_threshold=kwargs.get("compact_threshold"))
 
         self._ws_transport = None
-        if self.use_responses_api and not is_custom and not base_url:
+        if self.use_responses_api and not self_hosted and not base_url:
             self._ws_transport = OpenAIWSConnection(api_key=api_key)
             self._ws_transport.start_connect()
 
@@ -663,7 +665,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
                 if evt_type == ResponseStreamEvent.CREATED:
                     resp = evt.get("response", {})
-                    self.previous_response_id = resp.get("id")
+                    self._on_response_created(resp.get("id"))
                     self._log_llm_request_id(response_id=resp.get("id"))
                     ws_service_tier = resp.get("service_tier")
                     if latency_data is None:
@@ -727,7 +729,13 @@ class OpenAiLLM(OpenAICompatibleLLM):
                         func_call_names[item_id] = resolve_tool_name(item.get("name", ""), self.api_params)
                         func_call_ids[item_id] = item.get("call_id", "")
 
-                        if not gave_pre_call_msg and not received_textual and self.trigger_function_call:
+                        # An unconfigured tool is dropped later, so a filler would promise a reply that never comes.
+                        if (
+                            not gave_pre_call_msg
+                            and not received_textual
+                            and self.trigger_function_call
+                            and func_call_names[item_id] in self.api_params
+                        ):
                             gave_pre_call_msg = True
                             func_name = func_call_names[item_id]
                             func_params = self.api_params.get(func_name)
@@ -754,8 +762,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
                 elif evt_type == ResponseStreamEvent.COMPLETED:
                     resp = evt.get("response", {})
-                    self.previous_response_id = resp.get("id", self.previous_response_id)
-                    self._pending_call_ids = set(func_call_ids.values())
+                    self._on_response_completed(resp.get("id"), func_call_ids.values())
                     ws_service_tier = ws_service_tier or resp.get("service_tier")
                     response_usage = resp.get("usage")
                     break
@@ -843,6 +850,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         if self._ws_transport and self.previous_response_id:
             asyncio.ensure_future(self._ws_transport.cancel_response(self.previous_response_id))
             self.previous_response_id = None
+            self._in_flight_response_id = None
             self._pending_call_ids = set()
 
     async def close(self):

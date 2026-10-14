@@ -48,12 +48,17 @@ def _make_synth():
     )
 
 
-async def _collect(gen, limit=50):
+async def _collect(gen, limit=50, idle_s=0.3):
+    """Items yielded until the receiver goes idle; it waits for a reconnect once the fake runs dry."""
     out = []
-    async for item in gen:
-        out.append(item)
-        if len(out) >= limit:
-            break
+    try:
+        while len(out) < limit:
+            try:
+                out.append(await asyncio.wait_for(gen.__anext__(), timeout=idle_s))
+            except (asyncio.TimeoutError, StopAsyncIteration):
+                break
+    finally:
+        await gen.aclose()
     return out
 
 

@@ -219,6 +219,7 @@ class PixaTranscriber(BaseTranscriber):
                 if audio_data:
                     try:
                         await ws.send(audio_data)
+                        self.count_audio_sent(len(audio_data), self.sampling_rate, mulaw=self.encoding == "mulaw")
                     except ConnectionClosed as e:
                         logger.error(f"Connection closed while sending audio: {e}")
                         break
@@ -508,6 +509,7 @@ class PixaTranscriber(BaseTranscriber):
     async def transcribe(self):
         """Main transcription loop."""
         pixa_ws = None
+        self.reset_billed_audio()
         try:
             start_time = time.perf_counter()
             try:
@@ -567,11 +569,9 @@ class PixaTranscriber(BaseTranscriber):
                     self.websocket_connection = None
                     self.connection_authenticated = False
 
-            # Send connection closed notification
-            meta = dict(getattr(self, "meta_info", None) or {})
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )
 
     def get_meta_info(self):
         """Return current meta info."""

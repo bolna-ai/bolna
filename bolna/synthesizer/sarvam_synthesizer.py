@@ -304,6 +304,7 @@ class SarvamSynthesizer(StreamSynthesizer):
             "target_language_code": self.language,
             "text": text,
             "speaker": self.voice_id,
+            "pace": self.pace,
             "pitch": self.pitch,
             "loudness": self.loudness,
             "speech_sample_rate": self.sampling_rate,
