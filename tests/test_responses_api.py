@@ -871,6 +871,7 @@ def _make_azure_llm(**overrides):
     llm.compact_threshold = defaults.get("compact_threshold", None)
     llm._interruption_hint = defaults.get("_interruption_hint", None)
     llm.async_client = AsyncMock()  # AsyncAzureOpenAI mock (chat completions)
+    llm._overflow_client = None
     llm._responses_api_client = AsyncMock()  # AsyncOpenAI v1 mock (responses API)
     llm.model_args = {"model": llm.model, "max_tokens": llm.max_tokens, "temperature": llm.temperature}
     return llm
