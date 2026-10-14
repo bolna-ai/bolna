@@ -12,12 +12,21 @@ import aiohttp
 import websockets
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.constants import ELEVENLABS_LANGUAGE_CODE_MODELS, ELEVENLABS_LANGUAGE_CODES
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, resample
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
 logger = configure_logger(__name__)
+
+
+def elevenlabs_language_code(model, language):
+    """ISO 639-1 code to enforce for `language` ("hi-IN", "multi-hi" → "hi"), or None when the model can't take it."""
+    if model not in ELEVENLABS_LANGUAGE_CODE_MODELS or not language:
+        return None
+    code = language.lower().removeprefix("multi-").split("-")[0]
+    return code if code in ELEVENLABS_LANGUAGE_CODES else None
 
 
 class ElevenlabsBase(StreamSynthesizer):
@@ -62,6 +71,7 @@ class ElevenlabsBase(StreamSynthesizer):
             self.cache = InmemoryScalarCache()
 
         self.elevenlabs_host = os.getenv("ELEVENLABS_API_HOST", "api.elevenlabs.io")
+        self.language_code = None
         # Set from the x-trace-id response header on connect; both sockets log against it.
         self.ws_trace_id = None
         if self.use_mulaw:
@@ -123,6 +133,8 @@ class ElevenlabsBase(StreamSynthesizer):
                 "style": self.style,
             },
         }
+        if self.language_code:
+            payload["language_code"] = self.language_code
         headers = {"xi-api-key": self.api_key}
         fmt = format or self._get_output_format()
         url = f"{self.api_url}{fmt}"
@@ -138,13 +150,16 @@ class ElevenlabsBase(StreamSynthesizer):
 class ElevenlabsSynthesizer(ElevenlabsBase):
     """Eleven v1/v2 models over the multi-stream-input socket, one context per turn."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, language=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.language_code = elevenlabs_language_code(self.model, language)
         self.ws_url = (
             f"wss://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/multi-stream-input"
             f"?model_id={self.model}&output_format={self.wire_format}"
             f"&inactivity_timeout=170&sync_alignment=true&optimize_streaming_latency=4"
         )
+        if self.language_code:
+            self.ws_url += f"&language_code={self.language_code}"
         self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/stream?optimize_streaming_latency=2&output_format="
 
         # One context per turn: closed at end_of_llm_stream and on interruption, so each

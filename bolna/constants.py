@@ -408,6 +408,12 @@ CARTESIA_VOLUME_MODELS = {"sonic-3", "sonic-3.5", "sonic-3.6", "sonic-preview"}
 # Served only from the text-to-dialogue socket; multi-stream-input 403s on these.
 ELEVENLABS_DIALOGUE_MODEL_PREFIXES = ("eleven_v3", "eleven_v4")
 
+# Only these models take language_code, and the socket closes (1008) on a code the model doesn't support.
+ELEVENLABS_LANGUAGE_CODE_MODELS = {"eleven_flash_v2_5", "eleven_turbo_v2_5"}
+ELEVENLABS_LANGUAGE_CODES = set(
+    "en ja zh de hi fr ko pt it es id nl tr fil pl sv bg ro ar cs el fi hr ms sk da ta uk ru hu no vi".split()
+)
+
 DEEPGRAM_AURA_2_SPEED_MIN = 0.7
 DEEPGRAM_AURA_2_SPEED_MAX = 1.5
 
