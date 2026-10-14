@@ -1,10 +1,21 @@
 import asyncio
+from dataclasses import dataclass
+
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 
 # Sentinel pushed into _output_queue to unblock generate() on switch
 _SWITCH_SENTINEL = object()
+_CLEANUP_SENTINEL = object()
+
+
+@dataclass(frozen=True)
+class _GenerationResult:
+    label: str
+    generation: int
+    message: object | None = None
+    error: BaseException | None = None
 
 
 class SynthesizerPool:
@@ -16,12 +27,11 @@ class SynthesizerPool:
     maintain one connection per voice. Standby synths keep their connection
     alive via monitor_connection() but receive no text, so no billing occurs.
 
-    Audio output funnels through a single _output_queue. A per-synth
-    _run_generate task iterates that synth's generate() and puts results
-    into the shared queue. On switch(), the old task is cancelled and a new
-    one started; a SENTINEL is pushed so the pool's generate() returns,
-    letting __listen_synthesizer's outer while-loop re-enter and pick up
-    the new active synth.
+    Audio output and provider failures funnel through a single _output_queue.
+    Every result carries its source generation so work left behind by a retired
+    synth can be discarded safely. On switch(), the old task is cancelled and
+    a new one started; a sentinel makes the pool's generate() return, letting
+    __listen_synthesizer's outer loop re-enter for the new active synth.
     """
 
     def __init__(self, synthesizers, active_label, multilingual_config):
@@ -41,6 +51,8 @@ class SynthesizerPool:
         self._monitor_tasks = {}  # label -> monitor task
         self._multilingual_config = multilingual_config
         self._switch_lock = asyncio.Lock()
+        self._generation = 0
+        self._closed = False
 
     # ------------------------------------------------------------------
     # Properties
@@ -103,32 +115,47 @@ class SynthesizerPool:
             logger.info(f"SynthesizerPool: monitor started for '{label}'")
 
         # Start the generate-forwarding task for the active synth
-        self._gen_task = asyncio.create_task(self._run_generate(self.active_label))
+        self._gen_task = asyncio.create_task(self._run_generate(self.active_label, self._generation))
         logger.info(f"SynthesizerPool: generate task started for active='{self.active_label}'")
 
-    async def _run_generate(self, label):
-        """Iterate synth.generate() and forward results into the shared _output_queue."""
+    async def _run_generate(self, label, generation=None):
+        """Forward a provider's messages or failure with generation identity."""
+        generation = self._generation if generation is None else generation
         try:
             synth = self.synthesizers[label]
             async for message in synth.generate():
-                self._output_queue.put_nowait(message)
+                self._output_queue.put_nowait(_GenerationResult(label=label, generation=generation, message=message))
         except asyncio.CancelledError:
             logger.info(f"SynthesizerPool: _run_generate cancelled for '{label}'")
         except Exception as e:
             logger.error(f"SynthesizerPool: error in _run_generate for '{label}': {e}", exc_info=True)
+            self._output_queue.put_nowait(_GenerationResult(label=label, generation=generation, error=e))
 
     async def generate(self):
         """Async generator that yields audio packets from the active synthesizer.
 
         Returns (stops iteration) when a _SWITCH_SENTINEL is encountered,
         which signals __listen_synthesizer to re-enter via the outer while loop.
+        Provider failures from the active generation are re-raised to that
+        consumer; results from retired generations are discarded.
         """
         while True:
             message = await self._output_queue.get()
             if message is _SWITCH_SENTINEL:
                 logger.info("SynthesizerPool: generate() received SWITCH_SENTINEL, returning")
                 return
-            yield message
+            if message is _CLEANUP_SENTINEL:
+                logger.info("SynthesizerPool: generate() received CLEANUP_SENTINEL, returning")
+                return
+            if message.generation != self._generation or message.label != self.active_label:
+                logger.info(
+                    f"SynthesizerPool: ignoring stale result for '{message.label}' "
+                    f"(generation={message.generation}, active={self.active_label}, current={self._generation})"
+                )
+                continue
+            if message.error is not None:
+                raise message.error
+            yield message.message
 
     # ------------------------------------------------------------------
     # Switching
@@ -148,6 +175,9 @@ class SynthesizerPool:
         """
         # Serialize: concurrent switches would each start a _run_generate (dual recv on one ws).
         async with self._switch_lock:
+            if self._closed:
+                raise RuntimeError("Cannot switch a closed SynthesizerPool")
+
             if label == self.active_label:
                 logger.info(f"SynthesizerPool: already active on '{label}', no-op")
                 return
@@ -156,6 +186,8 @@ class SynthesizerPool:
                 raise ValueError(f"Unknown synthesizer label '{label}'. Available: {list(self.synthesizers.keys())}")
 
             old = self.active_label
+            self._generation += 1
+            generation = self._generation
 
             if self._gen_task and not self._gen_task.done():
                 self._gen_task.cancel()
@@ -166,7 +198,7 @@ class SynthesizerPool:
                 logger.info(f"SynthesizerPool: cancelled generate task for '{old}'")
 
             self.active_label = label
-            self._gen_task = asyncio.create_task(self._run_generate(label))
+            self._gen_task = asyncio.create_task(self._run_generate(label, generation))
             logger.info(f"SynthesizerPool: started generate task for '{label}'")
 
             self._output_queue.put_nowait(_SWITCH_SENTINEL)
@@ -192,6 +224,9 @@ class SynthesizerPool:
 
     async def cleanup(self):
         """Clean up all synthesizers and cancel all tasks."""
+        self._closed = True
+        self._generation += 1
+
         # Cancel generate task
         if self._gen_task and not self._gen_task.done():
             self._gen_task.cancel()
@@ -214,5 +249,9 @@ class SynthesizerPool:
         for label, synth in self.synthesizers.items():
             logger.info(f"SynthesizerPool: cleaning up '{label}'")
             await synth.cleanup()
+
+        while not self._output_queue.empty():
+            self._output_queue.get_nowait()
+        self._output_queue.put_nowait(_CLEANUP_SENTINEL)
 
         logger.info("SynthesizerPool: cleanup complete")
