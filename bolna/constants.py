@@ -273,15 +273,6 @@ TRANSFERING_CALL_FILLER = {
     "fr": "D'accord, je transfère l'appel. Un instant, s'il vous plaît.",
 }
 
-# Longer than the backend's 15 s dial attempt plus its DB work; shorter than LLM_GENERATION_TIMEOUT_S,
-# which the POST runs inside.
-TRANSFER_WEBHOOK_TIMEOUT_S = 25.0
-# Used when the transfer tool sets no ring_timeout; the max is the longest ring the backend accepts.
-TRUNK_TRANSFER_RING_TIMEOUT_S = 30
-TRUNK_TRANSFER_MAX_RING_TIMEOUT_S = 120
-# How long past the ring timeout to wait for the fork's transfer_failed before ending the call anyway.
-TRANSFER_DEADLINE_MARGIN_S = 15.0
-
 DEFAULT_USER_ONLINE_MESSAGE = "Hey, are you still there?"
 DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION = 6
 DEFAULT_LANGUAGE_CODE = "en"

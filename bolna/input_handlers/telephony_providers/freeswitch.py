@@ -16,7 +16,7 @@ class FreeSwitchInputHandler(DefaultInputHandler):
     plus text frames (JSON control/metadata). Same audio pipeline as the web/default path
     (linear16 16k → transcriber); only the transport differs (binary vs base64-in-JSON).
     Browser web calls and SIP trunk legs share this fork; on a trunk leg the media node's sidecar
-    also sends keypad digits (dtmf) and transfer outcomes as text frames."""
+    also sends keypad digits (dtmf) as text frames."""
 
     # mod_audio_stream sends 20ms (640B) frames; ASR providers wrap each packet as an
     # independent audio unit (sarvam: one WAV per message), and 20ms slivers are undecodable.
@@ -33,9 +33,6 @@ class FreeSwitchInputHandler(DefaultInputHandler):
         self.on_playout_done = None
         # set by FreeSwitchOutputHandler: per-mark playback echoes from the module
         self.on_mark_played = None
-        # set by TaskManager: the media node reports whether a trunk transfer's target answered
-        self.on_transfer_failed = None
-        self.on_transfer_connected = None
         # set by TaskManager: /process_transfer rejects a POST without a call_sid
         self.call_sid = None
         self._dtmf = DtmfAccumulator(self.queues["dtmf"].put_nowait)
@@ -58,14 +55,6 @@ class FreeSwitchInputHandler(DefaultInputHandler):
             # is_dtmf_active mirrors the agent's dtmf_enabled (set by task_manager)
             if self.is_dtmf_active:
                 self._dtmf.press(str(message.get("digit") or ""))
-            return
-        if message.get("type") == "transfer_failed":
-            if self.on_transfer_failed:
-                self.on_transfer_failed(message.get("cause") or "")
-            return
-        if message.get("type") == "transfer_connected":
-            if self.on_transfer_connected:
-                self.on_transfer_connected()
             return
         if message.get("type") == "playoutDone":
             # mod_audio_stream: all queued TTS has really been played to the caller — hand the
