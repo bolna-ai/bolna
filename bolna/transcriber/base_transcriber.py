@@ -139,6 +139,13 @@ class BaseTranscriber:
         """Clean up transcriber resources. Override in subclasses."""
         pass
 
+    async def discard_open_turn(self):
+        """Close the turn in progress without delivering it, as a multilingual call switches away.
+
+        Override where the provider can leave a turn open; the default has nothing to close.
+        """
+        pass
+
     def is_connected(self):
         """True while the provider connection is usable.
 

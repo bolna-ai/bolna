@@ -28,6 +28,8 @@ from bolna.llms import OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 from bolna.constants import (
+    END_CALL_FUNCTION_PREFIX,
+    HANGUP_AFTER_REPLY,
     LANGUAGE_NAMES,
     RESPONSES_API_MODEL_PREFIXES,
     canonical_model,
@@ -53,6 +55,10 @@ _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
 _PROMPT_VAR_PATTERN = re.compile(r"\{\{?\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z0-9_]+|\[[^\[\]{}]+\])*\s*\}\}?")
 _ROUTER_REASONING_DESC = "Brief explanation of why this routing decision was made"
 _ROUTER_CONFIDENCE_DESC = "Confidence score from 0.0 to 1.0 for this routing decision"
+_END_NODE_INSTRUCTION = (
+    "This is the final turn: the call ends as soon as you finish speaking. Deliver this step's closing "
+    "message now. Do not ask the user anything or invite a reply."
+)
 
 # Time variables frozen per call for the conversation prompt; see _prompt_context.
 _TIME_VAR_KEYS = (
@@ -92,6 +98,7 @@ class GraphAgent(BaseAgent):
         self._silence_repeats = 0
         self._event_triggered_generation = False
         self._active_node_first_response_delivered = True
+        self._end_node_closed = False
         self._hold_until_first_delivery = not self.config.get("turn_based_conversation", False)
         self._last_deterministic_eval = None
         self._frozen_time_vars: Optional[Dict[str, Any]] = None
@@ -745,6 +752,7 @@ class GraphAgent(BaseAgent):
                 self.current_node_entry_index = 0  # caller should set to len(history)
                 self._silence_repeats = 0
                 self._active_node_first_response_delivered = False
+                self._end_node_closed = False
 
                 if self.current_node_id not in self.node_history or self.node_history[-1] != self.current_node_id:
                     self.node_history.append(self.current_node_id)
@@ -979,6 +987,7 @@ class GraphAgent(BaseAgent):
         self.current_node_entry_index = entry_index
         self._silence_repeats = 0
         self._active_node_first_response_delivered = False
+        self._end_node_closed = False
         if not self.node_history or self.node_history[-1] != self.current_node_id:
             self.node_history.append(self.current_node_id)
 
@@ -1356,6 +1365,10 @@ class GraphAgent(BaseAgent):
         fn = current_node.get("function_call")
         if not fn:
             return None
+        # Forcing end_call hangs up before the node speaks; the closing turn speaks and then hangs up instead,
+        # and "none" keeps end_call offered (an empty tools list breaks Anthropic) without letting the model end first.
+        if fn == END_CALL_FUNCTION_PREFIX:
+            return "none" if self._ends_call(current_node) else None
 
         missing = self._missing_forced_function_vars(current_node, fn)
         if missing:
@@ -1440,6 +1453,42 @@ class GraphAgent(BaseAgent):
             return False
         return any(msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids_for_fn for msg in node_history)
 
+    def _ends_call(self, node: Optional[dict]) -> bool:
+        # Only the first reply of a visit closes; once a barge-in keeps the call up, the node converses
+        # normally and the model ends the call through the end_call tool when the caller is done.
+        return bool(
+            node
+            and node.get("function_call") == END_CALL_FUNCTION_PREFIX
+            and not self._end_node_closed
+            and self.llm
+            and getattr(self.llm, "trigger_function_call", False)
+        )
+
+    async def _stream_node_reply(self, node_llm, node, messages, meta_info, synthesize, tool_choice, tools):
+        """Stream the node's reply; on an end_call node's closing turn, flag it so the task manager
+        hangs up once the reply has played."""
+        ends_call = self._ends_call(node)
+        if ends_call:
+            # A chained Responses request does not resend the system prompt, which carries the closing instruction.
+            node_llm.invalidate_response_chain()
+        spoke = False
+        async for chunk in node_llm.generate_stream(
+            messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=tools
+        ):
+            if ends_call and isinstance(chunk, LLMStreamChunk):
+                if chunk.is_function_call:
+                    ends_call = False  # another tool ran first; the follow-up turn on this node closes
+                    if str(getattr(chunk.data, "called_fun", "")).startswith(END_CALL_FUNCTION_PREFIX):
+                        # The model ended the call itself (Gemini ignores tool_choice); never close a second time.
+                        self._end_node_closed = True
+                elif isinstance(chunk.data, str) and chunk.data.strip():
+                    spoke = True
+            yield chunk
+        # An empty reply leaves the node open, so its next turn closes instead of hanging up in silence.
+        if ends_call and spoke and meta_info is not None:
+            meta_info[HANGUP_AFTER_REPLY] = True
+            self._end_node_closed = True
+
     def _prompt_context(self) -> Optional[dict]:
         """Context for prompt substitution with time frozen at call start.
 
@@ -1471,6 +1520,10 @@ class GraphAgent(BaseAgent):
         prompt_context = self._prompt_context()
         if prompt_context:
             node_prompt = update_prompt_with_context(node_prompt, prompt_context)
+        # The call ends after this reply, so a question here would be cut off by the hangup. Part of the
+        # system prompt, not its own message: Gemini keeps only the last system message.
+        if self._ends_call(current_node):
+            node_prompt = f"{node_prompt}\n\n{_END_NODE_INSTRUCTION}"
 
         if self.agent_information:
             agent_info = self.agent_information
@@ -1614,11 +1667,11 @@ class GraphAgent(BaseAgent):
                 )
                 yield {"messages": messages}
                 tool_choice = self._get_tool_choice_for_node(history=message)
-                forced_name = tool_choice["function"]["name"] if tool_choice else None
+                forced_name = tool_choice["function"]["name"] if isinstance(tool_choice, dict) else None
                 node_tools = self._tools_for_node(current_node, forced_name)
                 node_llm = self._conversation_llm_for(current_node)
-                async for chunk in node_llm.generate_stream(
-                    messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
+                async for chunk in self._stream_node_reply(
+                    node_llm, current_node, messages, meta_info, synthesize, tool_choice, node_tools
                 ):
                     yield chunk
                 return
@@ -1716,11 +1769,11 @@ class GraphAgent(BaseAgent):
             messages = await self._build_messages(message, meta_info=meta_info)
             yield {"messages": messages}
             tool_choice = self._get_tool_choice_for_node(history=message)
-            forced_name = tool_choice["function"]["name"] if tool_choice else None
+            forced_name = tool_choice["function"]["name"] if isinstance(tool_choice, dict) else None
             node_tools = self._tools_for_node(current_node, forced_name)
             node_llm = self._conversation_llm_for(current_node)
-            async for chunk in node_llm.generate_stream(
-                messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
+            async for chunk in self._stream_node_reply(
+                node_llm, current_node, messages, meta_info, synthesize, tool_choice, node_tools
             ):
                 yield chunk
 

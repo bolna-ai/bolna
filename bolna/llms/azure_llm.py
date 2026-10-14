@@ -1,7 +1,10 @@
 import os
 import json
 import re
+from dataclasses import dataclass
 from urllib.parse import urlparse
+
+import httpx
 from bolna.llms.http_client_pool import get_shared_http_client
 from dotenv import load_dotenv
 from openai import (
@@ -38,9 +41,28 @@ load_dotenv()
 
 def should_overflow(error) -> bool:
     """Whether another backend is worth trying: saturation, a server fault, or no connection."""
-    if isinstance(error, APIConnectionError):
+    if isinstance(error, (APIConnectionError, httpx.TransportError)):
         return True
-    return isinstance(error, APIStatusError) and (error.status_code == 429 or error.status_code >= 500)
+    if isinstance(error, APIStatusError):
+        return error.status_code == 429 or error.status_code >= 500
+    # A fault reported inside an already-open stream has no status code, only its error type.
+    return isinstance(error, APIError) and error.type == "server_error"
+
+
+def has_output(chunk) -> bool:
+    """Whether a streamed chunk carries text or a tool call, as opposed to the role or a filter result."""
+    if not getattr(chunk, "choices", None):
+        return False
+    delta = chunk.choices[0].delta
+    return bool(getattr(delta, "content", None) or getattr(delta, "tool_calls", None))
+
+
+@dataclass
+class ReissuedStream:
+    """The turn's stream dropped before any output and was re-issued on the overflow target."""
+
+    stream: object
+    error: Exception
 
 
 class AzureLLM(OpenAICompatibleLLM):
@@ -164,13 +186,41 @@ class AzureLLM(OpenAICompatibleLLM):
         except (APIStatusError, APIConnectionError) as e:
             if self._overflow_client is None or not should_overflow(e):
                 raise
-            overflow_args = {
-                **model_args,
-                "model": self._overflow_model,
-                "service_tier": self._overflow_service_tier,
-            }
             logger.warning(f"Azure OpenAI saturated, overflowing turn to {self._overflow_model} run_id={self.run_id}")
-            return await self._overflow_client.chat.completions.create(**overflow_args), True
+            return await self._overflow_completion(model_args), True
+
+    async def _overflow_completion(self, model_args):
+        overflow_args = {
+            **model_args,
+            "model": self._overflow_model,
+            "service_tier": self._overflow_service_tier,
+        }
+        return await self._overflow_client.chat.completions.create(**overflow_args)
+
+    async def _overflow_on_early_drop(self, completion_stream, model_args):
+        """Yield the stream's chunks; if it drops before any output, nothing was spoken, so re-issue on the overflow."""
+        produced = False
+        try:
+            async for chunk in completion_stream:
+                produced = produced or has_output(chunk)
+                yield chunk
+            return
+        except Exception as e:
+            if produced or not should_overflow(e):
+                raise
+            dropped = e
+        logger.warning(
+            f"Azure OpenAI stream dropped before any output, overflowing turn to {self._overflow_model} "
+            f"run_id={self.run_id}: {dropped!r}"
+        )
+        try:
+            completion_stream = await self._overflow_completion(model_args)
+        except Exception as e:
+            logger.error(f"Azure OpenAI overflow after a dropped stream failed: {e}")
+            raise
+        yield ReissuedStream(completion_stream, dropped)
+        async for chunk in completion_stream:
+            yield chunk
 
     async def _generate_stream_chat(
         self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
@@ -241,7 +291,19 @@ class AzureLLM(OpenAICompatibleLLM):
             logger.error(f"Azure OpenAI unexpected error: {e}")
             raise
 
-        async for chunk in completion_stream:
+        chunks = completion_stream
+        if self._overflow_client is not None and not turn_overflowed:
+            chunks = self._overflow_on_early_drop(completion_stream, model_args)
+        async for chunk in chunks:
+            if isinstance(chunk, ReissuedStream):
+                completion_stream, turn_overflowed = chunk.stream, True
+                first_token_time = latency_data = None
+                if isinstance(meta_info, dict):
+                    meta_info.setdefault("_non_fatal_errors", []).append(
+                        {"error_type": "stream_dropped_before_output", "error": str(chunk.error), "model": self.model}
+                    )
+                continue
+
             # Final usage-only chunk (choices=[]) from stream_options
             if not chunk.choices or len(chunk.choices) == 0:
                 if hasattr(chunk, "usage") and chunk.usage:

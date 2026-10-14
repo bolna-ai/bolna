@@ -31,6 +31,7 @@ def _target(llm_task=None, hangup_task=None):
         hangup_detail="END_CALL_TOOL",
         hangup_cancel_events=[],
         conversation_start_init_ts=0.0,
+        _invalidate_response_chain=MagicMock(),
     )
 
 
@@ -85,6 +86,12 @@ async def test_does_not_mark_cancelled_once_conversation_ended():
     tm.conversation_ended = True
     TaskManager._cancel_pending_hangup(tm)
     assert tm._hangup_cancelled is False
+
+
+async def test_drops_the_response_chain_so_the_closing_turn_context_does_not_linger():
+    tm = _target()
+    TaskManager._cancel_pending_hangup(tm)
+    tm._invalidate_response_chain.assert_called_once()
 
 
 async def test_restores_the_user_online_check_on_resume():
