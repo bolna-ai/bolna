@@ -21,11 +21,11 @@ from bolna.synthesizer.elevenlabs_synthesizer import (
             ["आप बिल्कुल सही हाथों में हैं।"],
             "और Pro Performance",
         ),
-        ("Your order is on its way. Anything else?", ["Your order is on its way."], "Anything else?"),
+        ("Your order is on its way. Anything else?", ["Your order is on its way.", "Anything else?"], ""),
         (
             "我们的产品在全国都非常受欢迎，很多老客户都会反复购买。您要了解一下吗？",
-            ["我们的产品在全国都非常受欢迎，很多老客户都会反复购买。"],
-            "您要了解一下吗？",
+            ["我们的产品在全国都非常受欢迎，很多老客户都会反复购买。", "您要了解一下吗？"],
+            "",
         ),
         ("Ji haan, maine link bhej diya hai. toh aap", ["Ji haan, maine link bhej diya hai."], "toh aap"),
         (
@@ -66,15 +66,15 @@ def test_dots_inside_a_sentence_do_not_split_it(sentence):
     assert split_flushable(sentence, end_of_stream=False) == ([sentence], "")
 
 
-def test_short_sentences_wait_to_be_sent_with_the_next_one():
+def test_short_sentences_are_sent_on_their_own():
     assert split_flushable("जी। बिल्कुल। मैं अभी आपका order check करती हूँ। हाँ,", end_of_stream=False) == (
-        ["जी। बिल्कुल। मैं अभी आपका order check करती हूँ।"],
+        ["जी।", "बिल्कुल।", "मैं अभी आपका order check करती हूँ।"],
         "हाँ,",
     )
 
 
 def test_end_of_stream_sends_everything_held():
-    assert split_flushable("जी। और कुछ", end_of_stream=True) == (["जी। और कुछ"], "")
+    assert split_flushable("जी। और कुछ", end_of_stream=True) == (["जी।", "और कुछ"], "")
 
 
 def test_long_unfinished_sentence_is_cut_at_its_last_clause_break_outside_numbers():

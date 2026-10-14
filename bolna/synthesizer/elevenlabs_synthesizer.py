@@ -27,8 +27,6 @@ CLAUSE_BREAKS = ",，、،;"
 # Their "." rarely ends a sentence, and a wrong end cuts mid-sentence while a missed one only merges two.
 ABBREVIATIONS = set("mr mrs ms dr prof sr jr st smt shri pvt ltd inc co etc vs".split())
 INITIALISM = re.compile(r"(?:[a-z]\.)+[a-z]")
-# Shorter sentences wait for the next one, so no generation is too short to carry the voice's language.
-MIN_FLUSH_CHARS = 20
 # Past this, an unfinished sentence is flushed at its last clause break so first audio isn't held back.
 CLAUSE_FLUSH_CHARS = 120
 MAX_UNFLUSHED_CHARS = 250
@@ -51,7 +49,7 @@ def _ends_sentence(text_before, text_after, mark):
 
 def _clause_cut(text, limit):
     """Index just past the last clause break before `limit` that isn't inside a number ("1,25,000"), or 0."""
-    for index in range(min(len(text), limit) - 1, MIN_FLUSH_CHARS - 1, -1):
+    for index in range(min(len(text), limit) - 1, 0, -1):
         if text[index] in CLAUSE_BREAKS and not (text[index - 1].isdigit() and text[index + 1 : index + 2].isdigit()):
             return index + 1
     return 0
@@ -61,8 +59,6 @@ def split_flushable(text, end_of_stream):
     """Split `text` into the units to send now and the unfinished rest to hold for the next push."""
     units, start = [], 0
     for match in SENTENCE_END.finditer(text):
-        if match.end() - start < MIN_FLUSH_CHARS:
-            continue
         if _ends_sentence(text[start : match.start()], text[match.end() :], match.group()):
             units.append(text[start : match.end()].strip())
             start = match.end()
