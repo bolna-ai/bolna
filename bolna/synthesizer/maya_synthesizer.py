@@ -293,6 +293,8 @@ class MayaSynthesizer(StreamSynthesizer):
                         f"Maya end of stream request_id={data.get('request_id')} session_id={data.get('session_id')}"
                     )
                     self._discard_audio = False
+                    # The next turn is a new stream; the held-back tail must not lead it.
+                    self.stream_resampler.reset()
                     yield b"\x00"
                 elif event == "cancelled":
                     # Terminator for a turn we interrupted, sent instead of `end`. Nothing
@@ -300,6 +302,7 @@ class MayaSynthesizer(StreamSynthesizer):
                     # sentinel: handle_interruption() already abandoned the turn.
                     logger.info(f"Maya cancelled request_id={data.get('request_id')}")
                     self._discard_audio = False
+                    self.stream_resampler.reset()
                 elif event == "error":
                     # Not a terminator: an error rejects one frame (a bad config, say) while the
                     # utterance still completes with its own `end`. Emitting a sentinel here
@@ -344,6 +347,7 @@ class MayaSynthesizer(StreamSynthesizer):
             # Sent before returning so every reconnect replays it.
             await websocket.send(json.dumps(self._config_message()))
             self._discard_audio = False
+            self.stream_resampler.reset()
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")

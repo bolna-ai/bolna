@@ -103,10 +103,13 @@ class SarvamSynthesizer(StreamSynthesizer):
         """A complete HTTP clip converts in one pass, outside the WS stream."""
         return self._process_audio_data(audio)
 
-    async def handle_interruption(self):
-        # The interrupted turn's held-back samples must not lead the next turn.
+    def reset_stream_resampler(self):
+        # A finished or abandoned turn's held-back samples must not lead the next turn.
         if self.stream_resampler is not None:
             self.stream_resampler.reset()
+
+    async def handle_interruption(self):
+        self.reset_stream_resampler()
         await super().handle_interruption()
 
     def _process_audio_data(self, audio):
@@ -188,6 +191,7 @@ class SarvamSynthesizer(StreamSynthesizer):
                     # A socket dying between recvs surfaces here, not below. self.websocket is
                     # still the dead one — once monitor_connection swaps it, this branch is skipped.
                     if self.has_unsettled_turn_on(self.websocket):
+                        self.reset_stream_resampler()
                         yield b"\x00"
                     if self.connection_error:
                         return
@@ -220,6 +224,7 @@ class SarvamSynthesizer(StreamSynthesizer):
                 event_type = data.get("data", {}).get("event_type") or data.get("event_type")
                 if event_type == "final":
                     self.last_text_sent = False
+                    self.reset_stream_resampler()
                     yield b"\x00"
                     continue
 
@@ -238,6 +243,7 @@ class SarvamSynthesizer(StreamSynthesizer):
                 # marked in progress for the rest of the call.
                 if self.has_unsettled_turn_on(draining_ws):
                     logger.error("Sarvam WebSocket dropped mid-turn, ending the turn")
+                    self.reset_stream_resampler()
                     yield b"\x00"
                 await asyncio.sleep(0.05)
             except Exception as e:

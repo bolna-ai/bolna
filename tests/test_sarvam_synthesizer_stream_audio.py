@@ -107,6 +107,29 @@ def test_interruption_drops_the_held_back_tail(model):
     assert len(synth.stream_resampler.history) == 0 and synth.stream_resampler.next_output == 0
 
 
+@pytest.mark.parametrize("model", STREAMING_MODELS)
+def test_a_final_event_drops_the_held_back_tail(model):
+    # Without a cancel, an interrupted turn's late frames refill the resampler until its final.
+    synth = _synth(model)
+    synth._process_audio_chunk(_wav_header())
+    synth._process_audio_chunk(_pcm(4000))
+    frames = ['{"data": {"event_type": "final"}}']
+
+    async def recv():
+        if not frames:
+            raise asyncio.CancelledError
+        return frames.pop(0)
+
+    synth.websocket = MagicMock(recv=recv)
+    synth._is_ws_connected = MagicMock(return_value=True)
+
+    async def first_item():
+        return await synth.receiver().__anext__()
+
+    assert asyncio.run(first_item()) == b"\x00"
+    assert len(synth.stream_resampler.history) == 0 and synth.stream_resampler.next_output == 0
+
+
 def test_http_audio_converts_in_one_pass_outside_the_ws_stream():
     synth = _synth("bulbul:v3")
     synth._process_audio_data(_wav_header())

@@ -400,6 +400,23 @@ def test_interruption_drops_the_held_back_tail():
     assert len(s.stream_resampler.history) == 0 and s.stream_resampler.next_output == 0
 
 
+@pytest.mark.parametrize("terminator", ["end", "cancelled"])
+def test_a_turn_terminator_drops_the_held_back_tail(terminator):
+    s = _synth(use_mulaw=True)
+    s._process_audio_chunk(_pcm(0.5))
+    assert len(s.stream_resampler.history) > 0
+    _drain(s, [json.dumps({"type": terminator, "request_id": "r1"})])
+    assert len(s.stream_resampler.history) == 0 and s.stream_resampler.next_output == 0
+
+
+def test_the_next_turn_starts_as_if_it_were_the_first():
+    first, second = _synth(use_mulaw=False, sampling_rate="8000"), _synth(use_mulaw=False, sampling_rate="8000")
+    first._process_audio_chunk(_pcm(0.5))
+    _drain(first, [json.dumps({"type": "end", "request_id": "r1"})])
+    turn = np.arange(2400, dtype=np.int16).tobytes()
+    assert first._process_audio_chunk(turn) == second._process_audio_chunk(turn)
+
+
 def test_web_chunks_pass_through_untouched_at_native_rate():
     s = _synth(use_mulaw=False, sampling_rate="24000")
     chunk = _pcm(0.5)
