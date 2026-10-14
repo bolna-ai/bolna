@@ -42,6 +42,8 @@ async def get_agent(agent_id: str):
 
         return json.loads(agent_data)
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching agent {agent_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -123,6 +125,8 @@ async def edit_agent(agent_id: str, agent_data: CreateAgentPayload = Body(...)):
 
         return {"agent_id": agent_id, "state": "updated"}
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error updating agent {agent_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -139,6 +143,8 @@ async def delete_agent(agent_id: str):
         await redis_client.delete(agent_id)
         return {"agent_id": agent_id, "state": "deleted"}
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error deleting agent {agent_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
