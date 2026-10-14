@@ -20,10 +20,13 @@ from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 logger = configure_logger(__name__)
 
 # Left to split a reply itself, ElevenLabs can cut mid-sentence and garble or repeat the word at
-# the cut, so text is sent one sentence at a time with a flush after each.
-SENTENCE_END = re.compile(r"""[?!।॥。！？؟۔]+["'”’)]*|\.+["'”’)]*(?=\s|$)""")
+# the cut, so text is sent one sentence at a time with a flush. ASCII marks need whitespace after
+# them, so "7.5" and the "?" in a URL stay inside the sentence.
+SENTENCE_END = re.compile(r"""[।॥。！？؟۔]+["'”’)]*|[?!.]+["'”’)]*(?=\s|$)""")
 CLAUSE_BREAKS = ",，、،;"
-ABBREVIATIONS = {"mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "no", "rs", "smt", "shri", "etc", "approx"}
+# Their "." rarely ends a sentence, and a wrong end cuts mid-sentence while a missed one only merges two.
+ABBREVIATIONS = set("mr mrs ms dr prof sr jr st smt shri pvt ltd inc co etc vs".split())
+INITIALISM = re.compile(r"(?:[a-z]\.)+[a-z]")
 # Shorter sentences wait for the next one, so no generation is too short to carry the voice's language.
 MIN_FLUSH_CHARS = 20
 # Past this, an unfinished sentence is flushed at its last clause break so first audio isn't held back.
@@ -31,20 +34,24 @@ CLAUSE_FLUSH_CHARS = 120
 MAX_UNFLUSHED_CHARS = 250
 
 
-def _ends_sentence(text_before, mark):
-    """False for a "." after an abbreviation ("Mr.", "U.S.") or a list marker ("1.")."""
-    if not mark.startswith("."):
+def _ends_sentence(text_before, text_after, mark):
+    """False for a "." after an abbreviation ("Mr.", "U.S."), a list marker ("1.") or before a number ("Rs. 500")."""
+    if "." not in mark:
         return True
     words = text_before.split()
     if not words:
         return False
-    last = words[-1].lower()
-    return not (last.isdigit() or last in ABBREVIATIONS or "." in last)
+    last = words[-1].lower().lstrip("([{\"'“‘")
+    if last in ABBREVIATIONS or INITIALISM.fullmatch(last):
+        return False
+    if last.isdigit() and (len(words) == 1 or words[-2][-1] in ":.;,!?।"):
+        return False
+    return not (text_after.lstrip()[:1].isdigit() and last.isalpha() and len(last) <= 4)
 
 
-def _clause_cut(text):
-    """Index just past the last clause break that isn't inside a number ("1,25,000"), or 0."""
-    for index in range(len(text) - 1, MIN_FLUSH_CHARS - 1, -1):
+def _clause_cut(text, limit):
+    """Index just past the last clause break before `limit` that isn't inside a number ("1,25,000"), or 0."""
+    for index in range(min(len(text), limit) - 1, MIN_FLUSH_CHARS - 1, -1):
         if text[index] in CLAUSE_BREAKS and not (text[index - 1].isdigit() and text[index + 1 : index + 2].isdigit()):
             return index + 1
     return 0
@@ -56,19 +63,19 @@ def split_flushable(text, end_of_stream):
     for match in SENTENCE_END.finditer(text):
         if match.end() - start < MIN_FLUSH_CHARS:
             continue
-        if _ends_sentence(text[start : match.start()], match.group()):
+        if _ends_sentence(text[start : match.start()], text[match.end() :], match.group()):
             units.append(text[start : match.end()].strip())
             start = match.end()
     rest = text[start:].strip()
     if end_of_stream:
         return [unit for unit in units + [rest] if unit], ""
-    cut = 0
-    if len(rest) > CLAUSE_FLUSH_CHARS:
-        cut = _clause_cut(rest)
-    if not cut and len(rest) > MAX_UNFLUSHED_CHARS:
-        # Text without spaces (e.g. Chinese) has no word boundary, so it's cut at the cap.
-        cut = rest.rfind(" ") + 1 or MAX_UNFLUSHED_CHARS
-    if cut:
+    while len(rest) > CLAUSE_FLUSH_CHARS:
+        cut = _clause_cut(rest, MAX_UNFLUSHED_CHARS)
+        if not cut and len(rest) > MAX_UNFLUSHED_CHARS:
+            # Text without spaces (e.g. Chinese) has no word boundary, so it's cut at the cap.
+            cut = rest.rfind(" ", 0, MAX_UNFLUSHED_CHARS) + 1 or MAX_UNFLUSHED_CHARS
+        if not cut:
+            break
         units.append(rest[:cut].strip())
         rest = rest[cut:].strip()
     return [unit for unit in units if unit], rest
@@ -255,12 +262,16 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
 
     def _take_flushable(self, text, sequence_id, end_of_llm_stream):
         """Units of this turn's text to send now; the unfinished sentence stays buffered."""
+        carried = []
         if sequence_id != self.pending_sequence_id:
+            # A turn still being answered gets its held text spoken first; a superseded turn's is dropped.
+            if self.pending_text and self.should_synthesize_response(self.pending_sequence_id):
+                carried = [self.pending_text]
             self.pending_text, self.pending_sequence_id = "", sequence_id
         # The LLM wrappers cut pushes at a space and drop it, so pushes are rejoined with one.
         joined = " ".join(f"{self.pending_text} {text or ''}".split())
         units, self.pending_text = split_flushable(joined, end_of_llm_stream)
-        return units
+        return carried + units
 
     async def handle_interruption(self):
         self.pending_text = ""
@@ -297,6 +308,10 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                 await self.flush_synthesizer_stream()
                 return
 
+            # Stamped before the hold, so first-audio latency includes the wait for a sentence end.
+            if self.ws_send_time is None:
+                self.ws_send_time = time.perf_counter()
+                logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
             # Before the first await, so pushes reach the buffer in push order.
             units = self._take_flushable(text, sequence_id, end_of_llm_stream)
 
@@ -308,17 +323,13 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                     await self.flush_synthesizer_stream()
                     return
                 try:
-                    if self.ws_send_time is None:
-                        self.ws_send_time = time.perf_counter()
-                        logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
-                    # Claim before sending: text lost into a socket that dies mid-send is still this turn's.
-                    self.current_turn_socket = self.websocket
-                    await self.websocket.send(json.dumps({"text": f"{unit} ", "context_id": self.context_id}))
+                    message = {"text": f"{unit} ", "context_id": self.context_id}
                     # The turn's last unit is flushed by the end-of-stream below.
                     if not (end_of_llm_stream and index == len(units) - 1):
-                        await self.websocket.send(
-                            json.dumps({"text": "", "context_id": self.context_id, "flush": True})
-                        )
+                        message["flush"] = True
+                    # Claim before sending: text lost into a socket that dies mid-send is still this turn's.
+                    self.current_turn_socket = self.websocket
+                    await self.websocket.send(json.dumps(message))
                 except websockets.exceptions.ConnectionClosed:
                     self._send_hit_closed_socket(end_of_llm_stream)
                     return

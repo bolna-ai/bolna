@@ -29,10 +29,12 @@ from bolna.synthesizer.elevenlabs_synthesizer import (
         ),
         ("Ji haan, maine link bhej diya hai. toh aap", ["Ji haan, maine link bhej diya hai."], "toh aap"),
         (
-            "Here are the options for you. 1. Lodha Group with modern homes. 2. Hiranandani",
-            ["Here are the options for you.", "1. Lodha Group with modern homes."],
+            "Here are the options for you: 1. Lodha Group with modern homes. 2. Hiranandani",
+            ["Here are the options for you: 1. Lodha Group with modern homes."],
             "2. Hiranandani",
         ),
+        ("Your order number is 4821. It will reach you", ["Your order number is 4821."], "It will reach you"),
+        ("Please write to support@example.com. We reply", ["Please write to support@example.com."], "We reply"),
     ],
 )
 def test_text_is_split_at_sentence_ends(text, units, rest):
@@ -54,6 +56,10 @@ def test_a_sentence_ending_exactly_at_the_push_boundary_is_sent_without_waiting(
         "You get 7.5 percent off on this order today.",
         "Orders above Rs. 500 ship free in the U.S. this week.",
         "Option No. 2 is the cheapest plan we have.",
+        "I am calling from Acme Industries Pvt. Ltd. about your order.",
+        "Please ask our manager (Mr. Sharma) for the refund today.",
+        "Your appointment is on Jan. 15 at 10 a.m. at our office.",
+        "Visit https://example.com/?ref=abc for more on the offer today.",
     ],
 )
 def test_dots_inside_a_sentence_do_not_split_it(sentence):
@@ -83,8 +89,14 @@ def test_long_unfinished_sentence_is_cut_at_its_last_clause_break_outside_number
 def test_unfinished_sentence_without_a_clause_break_is_held_until_the_cap():
     text = "word " * (CLAUSE_FLUSH_CHARS // 5 + 2)
     assert split_flushable(text, end_of_stream=False) == ([], text.strip())
-    units, rest = split_flushable("word " * (MAX_UNFLUSHED_CHARS // 5 + 2), end_of_stream=False)
-    assert units and len(units[0]) <= MAX_UNFLUSHED_CHARS + 5 and rest
+
+
+@pytest.mark.parametrize("text", ["word " * 160, "很" * 700])
+def test_neither_sent_units_nor_held_text_exceed_the_cap(text):
+    units, rest = split_flushable(text, end_of_stream=False)
+    assert units
+    assert all(len(unit) <= MAX_UNFLUSHED_CHARS for unit in units)
+    assert len(rest) <= MAX_UNFLUSHED_CHARS
 
 
 class FakeSocket:
@@ -119,8 +131,16 @@ def _synth(current=(1,)):
 
 
 def _wire(sent):
-    """Frames as text, "<flush>" and "<close>"."""
-    return ["<close>" if m.get("close_context") else "<flush>" if m.get("flush") else m["text"].strip() for m in sent]
+    """Frames as their text, then "<flush>" or "<close>" when the frame carries one."""
+    wire = []
+    for message in sent:
+        if message.get("text", "").strip():
+            wire.append(message["text"].strip())
+        if message.get("flush"):
+            wire.append("<flush>")
+        if message.get("close_context"):
+            wire.append("<close>")
+    return wire
 
 
 async def test_each_sentence_goes_out_as_one_frame_followed_by_a_flush():
@@ -140,13 +160,35 @@ async def test_each_sentence_goes_out_as_one_frame_followed_by_a_flush():
     ]
 
 
-async def test_a_new_turn_drops_the_previous_turns_unsent_text():
+async def test_a_superseded_turns_unsent_text_is_dropped():
     synth = _synth(current=(1, 2))
     await synth.sender("Sure, let me check the order status for", 1)
     synth.task_manager_instance.current = {2}
     await synth.sender("Your refund was processed yesterday.", 2, end_of_llm_stream=True)
 
     assert _wire(synth.websocket.sent) == ["Your refund was processed yesterday.", "<flush>", "<close>"]
+
+
+async def test_a_live_turns_unsent_text_is_spoken_before_the_follow_up():
+    synth = _synth(current=(1, 2))
+    await synth.sender("Sure, let me check the order status for you", 1)
+    await synth.sender("Your refund was processed yesterday.", 2, end_of_llm_stream=True)
+
+    assert _wire(synth.websocket.sent) == [
+        "Sure, let me check the order status for you",
+        "<flush>",
+        "Your refund was processed yesterday.",
+        "<flush>",
+        "<close>",
+    ]
+
+
+async def test_first_audio_latency_is_measured_from_the_first_push_even_when_it_is_held():
+    synth = _synth()
+    await synth.sender("Sure, let me check the order status for", 1)
+
+    assert synth.websocket.sent == []
+    assert synth.ws_send_time is not None
 
 
 async def test_interruption_drops_the_unsent_text():
