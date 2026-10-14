@@ -7,6 +7,8 @@ goodbye was a free-form follow-up and the caller could not reply.
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.agent_types.graph_agent import GraphAgent
 from bolna.constants import END_CALL_TOOL_DEFINITION, HANGUP_AFTER_REPLY
@@ -164,6 +166,10 @@ def _hangup_tm(interruptible_flag):
     tm.interruptible_hangup_message = interruptible_flag
     tm._hangup_interruptible_window = False
     tm.process_call_hangup = AsyncMock()
+    tm.eager_llm_task = None
+    tm.conversation_ended = False
+    tm._hangup_processing = False
+    tm.conversation_config = {}
     tm.window_during_reply = None
 
     async def _reply_playing():
@@ -201,4 +207,46 @@ async def test_a_barge_in_during_the_reply_keeps_the_call_up():
     await tm._TaskManager__hang_up_after_reply()
     await asyncio.sleep(0)
 
+    tm.process_call_hangup.assert_not_awaited()
+
+
+async def test_a_newer_turn_replacing_the_reply_leaves_the_call_live():
+    tm = _hangup_tm(interruptible_flag=False)
+    tm.wait_for_current_message = AsyncMock(side_effect=asyncio.CancelledError)
+
+    with pytest.raises(asyncio.CancelledError):
+        await tm._TaskManager__hang_up_after_reply()
+
+    assert tm.hangup_triggered is False  # the next turn is not skipped as a call already hanging up
+    assert tm._end_call_in_progress is False
+    tm.process_call_hangup.assert_not_awaited()
+
+
+async def test_a_speculative_reply_hangs_up_only_once_its_turn_is_final():
+    tm = _hangup_tm(interruptible_flag=False)
+    hangup = asyncio.create_task(tm._TaskManager__hang_up_after_reply())
+    tm.eager_llm_task = hangup
+    await asyncio.sleep(0.1)
+
+    tm.wait_for_current_message.assert_not_awaited()
+
+    tm.llm_task, tm.eager_llm_task = hangup, None  # EndOfTurn promotes the speculative task
+    await hangup
+    await asyncio.sleep(0)
+
+    tm.process_call_hangup.assert_awaited_once()
+
+
+async def test_a_speculative_reply_withdrawn_by_the_caller_commits_no_hangup():
+    tm = _hangup_tm(interruptible_flag=False)
+    tm.hangup_triggered = False
+    hangup = asyncio.create_task(tm._TaskManager__hang_up_after_reply())
+    tm.eager_llm_task = hangup
+    await asyncio.sleep(0.1)
+
+    hangup.cancel()  # TurnResumed
+    with pytest.raises(asyncio.CancelledError):
+        await hangup
+
+    assert tm.hangup_triggered is False
     tm.process_call_hangup.assert_not_awaited()

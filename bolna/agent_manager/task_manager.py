@@ -114,6 +114,7 @@ from bolna.helpers.utils import (
     get_md5_hash,
     scalar_fields,
     static_node_audio_key,
+    static_node_ends_call,
     clean_json_string,
     wav_bytes_to_pcm,
     mp3_bytes_to_pcm,
@@ -879,12 +880,15 @@ class TaskManager(BaseManager):
                     )
                     logger.info("end_call tool active as primary hangup")
                 elif self.__is_graph_agent():
-                    # a node opting in via function_call="end_call" needs the tool regardless of the hangup toggle
+                    # a node opting in via function_call="end_call" needs the tool regardless of the hangup toggle;
+                    # a static node hangs up without a model, so it never needs it
                     llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {}) or {}
                     end_call_nodes = [
                         n.get("id")
                         for n in (llm_config.get("nodes") or [])
-                        if n.get("function_call") == END_CALL_FUNCTION_PREFIX and n.get("id")
+                        if n.get("function_call") == END_CALL_FUNCTION_PREFIX
+                        and n.get("id")
+                        and n.get("node_type") != NodeType.STATIC
                     ]
                     if end_call_nodes:
                         self.kwargs["api_tools"] = _inject_end_call_tool(
@@ -3093,6 +3097,11 @@ class TaskManager(BaseManager):
                 for _digit in dtmf_digits:
                     self.dtmf_events.append({"digit": _digit, "ts_ms": _dtmf_ts})
 
+                # Key presses follow the same gate as speech, so they cannot cut a goodbye that speech cannot.
+                if self._should_ignore_transcriber_input():
+                    logger.info(f"DTMF ignored while the call is hanging up or transferring: {dtmf_digits}")
+                    continue
+
                 dtmf_message = DTMF_MESSAGE_PREFIX + dtmf_digits
                 base_meta_info = {
                     "io": self.tools["input"].io_provider,
@@ -3198,7 +3207,7 @@ class TaskManager(BaseManager):
                     "message_category": "event_proactive",
                 }
                 ws_packet = create_ws_data_packet(get_md5_hash(static_text), meta_info=meta_info, is_md5_hash=True)
-                await self._synthesize(ws_packet)
+                await self.__play_static_clip(ws_packet, ends_call=static_node_ends_call(target_node))
         else:
             # LLM node: set flag and trigger generation without adding a user message
             self.tools["llm_agent"]._event_triggered_generation = True
@@ -4311,7 +4320,7 @@ class TaskManager(BaseManager):
                     meta_info["message_category"] = "static_node"
                     meta_info["is_silence_trigger"] = is_silence_trigger
                     ws_packet = create_ws_data_packet(static_hash, meta_info=meta_info, is_md5_hash=True)
-                    await self._synthesize(ws_packet)
+                    await self.__play_static_clip(ws_packet, ends_call=llm_message.get(HANGUP_AFTER_REPLY, False))
                     return
 
                 data = llm_message.data
@@ -4735,8 +4744,26 @@ class TaskManager(BaseManager):
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
         logger.info("Interruptible hangup: barge-in cancelled pending hangup, resuming conversation")
 
+    async def __play_static_clip(self, ws_packet, ends_call: bool):
+        """Play a static node's clip, ending the call after it when the node is an end_call node."""
+        holds_flush = ends_call and not self.turn_based_conversation
+        if holds_flush:
+            # The hangup waits on this, and the clip sets it only once it has been sent.
+            self._turn_audio_flushed.clear()
+        try:
+            await self._synthesize(ws_packet)
+        except asyncio.CancelledError:
+            if holds_flush:
+                self._turn_audio_flushed.set()
+            raise
+        if ends_call:
+            await self.__hang_up_after_reply()
+
     async def __hang_up_after_reply(self):
         """End the call once a graph end node's closing reply has played, as end_call does after its goodbye."""
+        # A speculative reply is withdrawn if the caller resumes speaking, so commit only once its turn is final.
+        while asyncio.current_task() is self.eager_llm_task and not self.conversation_ended:
+            await asyncio.sleep(0.05)
         self.check_if_user_online = False
         self._end_call_in_progress = True
         self._hangup_cancelled = False
@@ -4745,6 +4772,14 @@ class TaskManager(BaseManager):
         try:
             self._enter_hangup_state()
             await self.wait_for_current_message()
+        except asyncio.CancelledError:
+            # A newer turn replaced this reply before the teardown was armed, so the call carries on with it.
+            if not (self.conversation_ended or self._hangup_processing):
+                self.hangup_triggered = False
+                self.hangup_decision_at = None
+                self._end_call_in_progress = False
+                self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
+            raise
         finally:
             self._hangup_interruptible_window = False
 
@@ -7705,6 +7740,9 @@ class TaskManager(BaseManager):
                 meta_info["format"] = audio_format
                 meta_info["end_of_synthesizer_stream"] = True
                 await self.tools["output"].handle(create_ws_data_packet(audio_chunk, meta_info))
+                if static_node_audio:
+                    # Sent directly rather than through the output loop, which is what marks a clip flushed.
+                    self._turn_audio_flushed.set()
             else:
                 if meta_info.get("message_category", None) == "filler":
                     logger.info(f"Getting {text} filler from local fs")
