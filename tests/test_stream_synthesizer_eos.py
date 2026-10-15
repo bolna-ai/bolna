@@ -27,6 +27,7 @@ class FakeStreamSynth:
         self.meta_info = None
         self.provider_name = "elevenlabs"
         self.first_chunk_generated = False
+        self.stale_eos_pending = 0
 
     async def receiver(self):
         for item in self.recv_items:
@@ -46,6 +47,8 @@ class FakeStreamSynth:
 
     def _process_audio_chunk(self, audio):
         return audio
+
+    consume_stale_eos = StreamSynthesizer.consume_stale_eos
 
     def _stamp_mark_id(self, meta_info):
         pass

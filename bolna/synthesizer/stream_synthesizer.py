@@ -30,10 +30,15 @@ logger = configure_logger(__name__)
 
 # Maximum consecutive connection failures before giving up
 MAX_CONNECTION_FAILURES = 3
+# How long an abandoned turn's eos is still expected; Sarvam's arrived 0.2-2 s after the barge-in.
+STALE_EOS_WINDOW_S = 10
 
 
 class StreamSynthesizer(BaseSynthesizer):
     """Base class for all WebSocket-streaming synthesizers."""
+
+    # Providers without a per-turn cancel still end an abandoned, already-flushed stream with its eos.
+    delivers_eos_after_interruption = False
 
     def __init__(self, stream=True, provider_name="stream", task_manager_instance=None, buffer_size=400, **kwargs):
         super().__init__(
@@ -68,6 +73,9 @@ class StreamSynthesizer(BaseSynthesizer):
         self.current_sequence_chars = 0
         # Socket this turn's text was attempted on; only that socket's loss settles the turn.
         self.current_turn_socket = None
+        # Eos sentinels still owed for abandoned, already-flushed turns; they must not close the next turn.
+        self.stale_eos_pending = 0
+        self.stale_eos_deadline = None
 
     # ------------------------------------------------------------------
     # Subclass hooks (override these)
@@ -177,6 +185,8 @@ class StreamSynthesizer(BaseSynthesizer):
 
     def _stamp_turn_start(self, meta_info):
         """Only stamp on the first push of a new turn (don't re-stamp on subsequent chunks)."""
+        if self.open_turn_is_retired(meta_info.get("sequence_id")):
+            self.abandon_open_turn()
         if self.current_turn_start_time is None:
             # Drop leftover entries from a previous turn so this turn's first audio
             # chunk doesn't pop a stale entry and inherit a dead sequence_id (which
@@ -239,6 +249,11 @@ class StreamSynthesizer(BaseSynthesizer):
                 raise Exception(self.connection_error)
 
             audio, extra_meta = self._unpack_receiver_message(raw_item)
+
+            # An abandoned turn's eos: nothing downstream owns it, and it must not take the next turn's meta.
+            if audio == b"\x00" and self.consume_stale_eos():
+                logger.info(f"{self.provider_name}: dropped an abandoned turn's eos")
+                continue
 
             # Pop meta_info from the text_queue when available
             if self.text_queue:
@@ -315,17 +330,69 @@ class StreamSynthesizer(BaseSynthesizer):
                         "message_category": self.current_message_category,
                     }
                 )
-                self.current_turn_start_time = None
-                self.current_turn_id = None
-                self.current_sequence_id = None
-                self.current_message_category = None
-                self.current_tts_start_ms = None
-                self.ws_send_time = None
-                self.current_turn_ttfb = None
-                self.current_sequence_chars = 0
-                self.current_turn_socket = None
+                self.reset_turn_state()
         except Exception:
             pass
+
+    def reset_turn_state(self):
+        self.current_turn_start_time = None
+        self.current_turn_id = None
+        self.current_sequence_id = None
+        self.current_message_category = None
+        self.current_tts_start_ms = None
+        self.ws_send_time = None
+        self.current_turn_ttfb = None
+        self.current_sequence_chars = 0
+        self.current_turn_socket = None
+
+    def open_turn_is_retired(self, next_sequence_id):
+        """True when a push for another sequence finds the open turn's sequence already retired."""
+        open_sequence_id = self.current_sequence_id
+        if self.current_turn_start_time is None or open_sequence_id in (None, -1, next_sequence_id):
+            return False
+        try:
+            return not self.should_synthesize_response(open_sequence_id)
+        except Exception:
+            return False
+
+    def consume_stale_eos(self):
+        """True for an eos owed by an abandoned turn. Bounded in time: a provider that never sends it
+        must not cost every later turn its own eos."""
+        if not self.stale_eos_pending:
+            return False
+        if time.perf_counter() > self.stale_eos_deadline:
+            self.stale_eos_pending = 0
+            return False
+        self.stale_eos_pending -= 1
+        return True
+
+    def call_relative_now_ms(self):
+        call_start_ms = getattr(self.task_manager_instance, "conversation_start_init_ts", None)
+        return round(time.time() * 1000 - call_start_ms, 2) if isinstance(call_start_ms, (int, float)) else None
+
+    def abandon_open_turn(self):
+        """Close a turn cut off before its eos, so the next sequence does not inherit its start.
+
+        Without this, the next push found the timer still running and reused this turn's tts_start and
+        first-result latency."""
+        if self.current_turn_start_time is None:
+            return
+        entry = {
+            "turn_id": self.current_turn_id,
+            "sequence_id": self.current_sequence_id,
+            "tts_start_ms": self.current_tts_start_ms,
+            "characters": self.current_sequence_chars,
+            "message_category": self.current_message_category,
+            "cancelled_at_ms": self.call_relative_now_ms(),
+        }
+        if self.current_turn_ttfb is not None:
+            entry["first_result_latency_ms"] = round(self.current_turn_ttfb * 1000)
+        self._upsert_turn_latency(entry)
+        if self.delivers_eos_after_interruption and self.last_text_sent:
+            self.stale_eos_pending += 1
+            self.stale_eos_deadline = time.perf_counter() + STALE_EOS_WINDOW_S
+        logger.info(f"{self.provider_name}: abandoned open turn seq={self.current_sequence_id}")
+        self.reset_turn_state()
 
     # ------------------------------------------------------------------
     # monitor_connection() — shared reconnect loop
@@ -350,6 +417,8 @@ class StreamSynthesizer(BaseSynthesizer):
                         break
                 else:
                     self.websocket = result
+                    # A new socket carries none of the old one's eos.
+                    self.stale_eos_pending = 0
                     consecutive_failures = 0
             await asyncio.sleep(1)
 

@@ -202,7 +202,9 @@ def _cleanup_target():
     tm.voicemail_handler = SimpleNamespace(cancel_task=lambda: None)
 
     output = SimpleNamespace(handle_interruption=AsyncMock())
-    synth = SimpleNamespace(handle_interruption=AsyncMock(), flush_synthesizer_stream=AsyncMock())
+    synth = SimpleNamespace(
+        handle_interruption=AsyncMock(), flush_synthesizer_stream=AsyncMock(), abandon_open_turn=MagicMock()
+    )
     inp = SimpleNamespace(
         welcome_message_played=MagicMock(return_value=True),
         reset_response_heard_by_user=MagicMock(),

@@ -232,6 +232,7 @@ class FakeStreamSynth:
         self.current_turn_ttfb = None
         self.current_sequence_chars = 38
         self.turn_latencies = []
+        self.stale_eos_pending = 0
 
     async def receiver(self):
         for item in self.recv_items:
@@ -257,6 +258,8 @@ class FakeStreamSynth:
 
     _upsert_turn_latency = StreamSynthesizer._upsert_turn_latency
     _record_turn_latency = StreamSynthesizer._record_turn_latency
+    reset_turn_state = StreamSynthesizer.reset_turn_state
+    consume_stale_eos = StreamSynthesizer.consume_stale_eos
     has_unsettled_turn_on = StreamSynthesizer.has_unsettled_turn_on
 
 

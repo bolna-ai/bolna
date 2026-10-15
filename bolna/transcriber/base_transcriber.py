@@ -1,3 +1,4 @@
+import bisect
 import json
 import time
 import uuid
@@ -81,6 +82,23 @@ class BaseTranscriber:
         self.audio_cursor_s += frame_seconds
         self.audio_frame_timestamps.append((frame_start, self.audio_cursor_s, send_timestamp))
         self.num_frames += 1
+
+    def audio_position_wall_time(self, audio_position_s):
+        """Wall-clock seconds the caller spoke this stream position, or None if no frame holds it.
+
+        Each frame is sent as it fills, so its last sample is heard at its send time. Mapping through
+        the frame keeps standby gaps and keepalive bursts out of it, unlike one stream-start anchor."""
+        if audio_position_s is None or not self.audio_frame_timestamps:
+            return None
+        # Frames tile the stream in order, so the first one ending at or after the position holds it.
+        index = bisect.bisect_left(self.audio_frame_timestamps, audio_position_s, key=lambda frame: frame[1])
+        if index == len(self.audio_frame_timestamps):
+            last_start, last_end, last_send = self.audio_frame_timestamps[-1]
+            return last_send / 1000 + (audio_position_s - last_end)
+        frame_start, frame_end, send_timestamp = self.audio_frame_timestamps[index]
+        if audio_position_s < frame_start:
+            return None
+        return send_timestamp / 1000 - (frame_end - audio_position_s)
 
     def _upsert_turn_latency(self, entry: dict) -> None:
         """Replace existing turn_latencies entry with matching turn_id, or append if new."""
