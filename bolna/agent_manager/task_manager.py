@@ -881,7 +881,7 @@ class TaskManager(BaseManager):
                     logger.info("end_call tool active as primary hangup")
                 elif self.__is_graph_agent():
                     # a node opting in via function_call="end_call" needs the tool regardless of the hangup toggle;
-                    # a static node hangs up without a model, so it never needs it
+                    # a static node never runs a model, so it never needs it
                     llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {}) or {}
                     end_call_nodes = [
                         n.get("id")
@@ -3098,9 +3098,9 @@ class TaskManager(BaseManager):
                     self.dtmf_events.append({"digit": _digit, "ts_ms": _dtmf_ts})
 
                 # A key press cannot cut a goodbye that speech is not allowed to interrupt.
-                if (
-                    self.hangup_triggered or self._end_call_in_progress
-                ) and self._hangup_interruptible_window is not True:
+                if (self.hangup_triggered or self._end_call_in_progress) and (
+                    self.conversation_ended or self._hangup_interruptible_window is not True
+                ):
                     logger.info(f"DTMF ignored while the call is hanging up: {dtmf_digits}")
                     continue
 
@@ -4558,7 +4558,7 @@ class TaskManager(BaseManager):
             if rag_latency.get("sequence_id") not in existing_seq_ids:
                 self.rag_latencies["turn_latencies"].append(rag_latency)
 
-        if meta_info.pop(HANGUP_AFTER_REPLY, False) and await self.__turn_is_final(meta_info):
+        if meta_info.pop(HANGUP_AFTER_REPLY, False):
             await self.__hang_up_after_reply()
 
     def _append_eager_llm_stub(self, meta_info):
@@ -4749,7 +4749,7 @@ class TaskManager(BaseManager):
     async def __play_static_clip(self, ws_packet, ends_call: bool):
         """Play a static node's clip, ending the call after it when the node is an end_call node."""
         # An event can land on an end node while another hangup is already under way.
-        ends_call = ends_call and not self.hangup_triggered
+        ends_call = ends_call and not (self.hangup_triggered or self._end_call_in_progress)
         holds_flush = ends_call and not self.turn_based_conversation
         if holds_flush:
             # The hangup waits on this, and the clip sets it only once it has been sent.
@@ -4760,22 +4760,11 @@ class TaskManager(BaseManager):
             if holds_flush:
                 self._turn_audio_flushed.set()
             raise
-        if ends_call and await self.__turn_is_final(ws_packet["meta_info"]):
+        if ends_call:
             self.__enter_reply_hangup()
             # Detached so a long clip's playout is not held to the generation timeout.
             self._end_call_hangup_task = asyncio.create_task(self.__finish_reply_hangup())
             self._end_call_hangup_task.add_done_callback(self.__log_detached_hangup_exception)
-
-    async def __turn_is_final(self, meta_info) -> bool:
-        """Wait out a speculative reply: True once EndOfTurn promotes its turn, False if a newer turn replaced it."""
-        while (
-            meta_info.get("eager_eot")
-            and self.eager_meta_info is not None
-            and self.eager_meta_info.get("sequence_id") == meta_info.get("sequence_id")
-            and not self.conversation_ended
-        ):
-            await asyncio.sleep(0.05)
-        return not meta_info.get("eager_eot") or self.eager_meta_info is None
 
     async def __hang_up_after_reply(self):
         """End the call once a graph end node's closing reply has played, as end_call does after its goodbye."""
@@ -4793,14 +4782,6 @@ class TaskManager(BaseManager):
     async def __finish_reply_hangup(self):
         try:
             await self.wait_for_current_message()
-        except asyncio.CancelledError:
-            # A newer turn replaced this reply before the teardown was armed, so the call carries on with it.
-            if not (self.conversation_ended or self._hangup_processing):
-                self.hangup_triggered = False
-                self.hangup_decision_at = None
-                self._end_call_in_progress = False
-                self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
-            raise
         finally:
             self._hangup_interruptible_window = False
 

@@ -72,6 +72,7 @@ def _tm(turn_based=False):
     tm._turn_audio_flushed.set()
     tm.check_if_user_online = True
     tm.hangup_triggered = False
+    tm._end_call_in_progress = False
     tm.hangup_decision_at = None
     tm.interruption_manager = MagicMock()
     tm.interruptible_hangup_message = False
@@ -81,7 +82,6 @@ def _tm(turn_based=False):
     tm.mark_event_meta_data = MagicMock(mark_event_meta_data={})
     tm.hangup_mark_event_timeout = 5
     tm.process_call_hangup = AsyncMock()
-    tm.eager_meta_info = None
     tm._hangup_processing = False
     tm.conversation_config = {}
     tm.task_config = {"tools_config": {"output": {"format": "pcm"}}}
@@ -150,9 +150,10 @@ async def test_an_event_into_a_static_end_node_hangs_up_after_its_clip():
     tm.process_call_hangup.assert_awaited_once()
 
 
-async def test_an_event_into_a_static_end_node_during_another_hangup_arms_no_second_one():
+@pytest.mark.parametrize("hangup_flag", ["hangup_triggered", "_end_call_in_progress"])
+async def test_an_event_into_a_static_end_node_during_another_hangup_arms_no_second_one(hangup_flag):
     tm = _tm()
-    tm.hangup_triggered = True
+    setattr(tm, hangup_flag, True)
     tm._synthesize = AsyncMock()
 
     await tm._proactive_generate_for_event({"event": "paid"}, {"node_type": NodeType.STATIC, "target_node": BYE})
