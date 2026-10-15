@@ -84,6 +84,7 @@ from bolna.enums import (
     NodeType,
     ChatRole,
     S2SProvider,
+    SynthesizerProvider,
     ToolScope,
 )
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
@@ -305,6 +306,13 @@ ROUTING_TAIL_SETTLE_TIMEOUT = 1.0
 _NON_NODE_RESPONSE_CATEGORIES = frozenset(
     {"is_user_online_message", "filler", "backchanneling", "agent_welcome_message", "handoff"}
 )
+
+
+def with_synthesizer_language(provider, provider_config, language):
+    """ElevenLabs is told the language it speaks; other providers resolve theirs upstream."""
+    if provider != SynthesizerProvider.ELEVENLABS.value:
+        return provider_config
+    return {**provider_config, "language": language}
 
 
 def asr_id_to_int(value):
@@ -1979,6 +1987,8 @@ class TaskManager(BaseManager):
                         cfg["audio_format"] = "mp3"
                         cfg["stream"] = True if self.enforce_streaming else False
 
+                    # Legs copy the base voice's config, so its language may belong to another leg.
+                    provider_config = with_synthesizer_language(provider_name, provider_config, label)
                     cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
                     leg_kwargs = self.__pool_leg_kwargs(synthesizer_kwargs, "synthesizer_key", provider_name)
                     synthesizers[label] = cls(**cfg, **provider_config, **leg_kwargs, caching=caching)
@@ -2017,6 +2027,11 @@ class TaskManager(BaseManager):
             self.synthesizer_provider = synth_config.pop("provider")
             synthesizer_class = SUPPORTED_SYNTHESIZER_MODELS.get(self.synthesizer_provider)
             provider_config = synth_config.pop("provider_config")
+            transcriber_config = self.task_config["tools_config"].get("transcriber") or {}
+            agent_language = transcriber_config.get("active") or transcriber_config.get("language")
+            provider_config = with_synthesizer_language(
+                self.synthesizer_provider, provider_config, provider_config.get("language") or agent_language
+            )
             self.synthesizer_voice = provider_config["voice"]
             self.synthesizer_voice_id = provider_config.get("voice_id")
             self.synthesizer_model = provider_config.get("model")
