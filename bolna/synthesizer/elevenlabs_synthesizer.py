@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 import uuid
 from collections import deque
 from websockets.exceptions import InvalidHandshake
@@ -28,19 +29,29 @@ CLAUSE_FLUSH_CHARS = 120
 MAX_UNFLUSHED_CHARS = 250
 
 
+def _is_word(token):
+    """Letters, counting combining marks, so Devanagari like "रु" is a word."""
+    return all(ch.isalpha() or unicodedata.category(ch).startswith("M") for ch in token)
+
+
 def _ends_sentence(before, after, mark):
-    """A "." after an abbreviation ("Mr.", "U.S."), a list number ("1.") or before a number ("Rs. 500") doesn't."""
+    """A "." after an abbreviation ("Mr.", "U.S.", "Rs. 500") or a list number ("2.") doesn't end the sentence."""
     if "." not in mark:
         return True
     words = before.split()
     if not words:
         return False
-    last = words[-1].lower().lstrip("([{\"'“‘")
+    word = words[-1].lstrip("([{\"'“‘")
+    last = word.lower()
     if last in ABBREVIATIONS or INITIALISM.fullmatch(last):
         return False
     if last.isdigit():
-        return len(words) > 1 and words[-2][-1] not in ":.;,!?।"
-    return not (after.lstrip()[:1].isdigit() and last.isalpha() and len(last) <= 4)
+        return len(last) > 2 and len(words) > 1 and words[-2][-1] not in ":.;,!?।"
+    if len(last) <= 4 and _is_word(last):
+        next_char = after.lstrip()[:1]
+        # At a push boundary the next word isn't known yet, so a short capitalised word ("Rs.") waits for it.
+        return not (next_char.isdigit() or (not next_char and word[:1].isupper()))
+    return True
 
 
 def _clause_cut(text, limit):

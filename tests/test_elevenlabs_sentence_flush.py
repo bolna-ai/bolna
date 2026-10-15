@@ -35,6 +35,7 @@ from bolna.synthesizer.elevenlabs_synthesizer import (
         ),
         ("Your order number is 4821. It will reach you", ["Your order number is 4821."], "It will reach you"),
         ("Please write to support@example.com. We reply", ["Please write to support@example.com."], "We reply"),
+        ("Your order has shipped. आपको सिर्फ Rs.", ["Your order has shipped."], "आपको सिर्फ Rs."),
     ],
 )
 def test_text_is_split_at_sentence_ends(text, units, rest):
@@ -60,6 +61,8 @@ def test_a_sentence_ending_exactly_at_the_push_boundary_is_sent_without_waiting(
         "Please ask our manager (Mr. Sharma) for the refund today.",
         "Your appointment is on Jan. 15 at 10 a.m. at our office.",
         "Visit https://example.com/?ref=abc for more on the offer today.",
+        "Plans: 1. Gold and 2. Silver are both available today.",
+        "आपको सिर्फ रु. 500 का discount मिलेगा।",
     ],
 )
 def test_dots_inside_a_sentence_do_not_split_it(sentence):
