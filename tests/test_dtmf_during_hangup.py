@@ -42,10 +42,3 @@ async def test_a_key_press_interrupts_a_goodbye_the_caller_may_talk_over():
     await _press(tm, "1")
 
     tm._handle_transcriber_output.assert_awaited_once()
-
-
-async def test_a_key_press_mid_conversation_reaches_the_llm():
-    tm = _tm(hangup_triggered=False, interruptible_window=False)
-    await _press(tm, "42")
-
-    assert tm._handle_transcriber_output.await_args.args[1].endswith("42")

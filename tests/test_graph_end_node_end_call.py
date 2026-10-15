@@ -166,7 +166,7 @@ def _hangup_tm(interruptible_flag):
     tm.interruptible_hangup_message = interruptible_flag
     tm._hangup_interruptible_window = False
     tm.process_call_hangup = AsyncMock()
-    tm.eager_llm_task = None
+    tm.eager_meta_info = None
     tm.conversation_ended = False
     tm._hangup_processing = False
     tm.conversation_config = {}
@@ -222,31 +222,31 @@ async def test_a_newer_turn_replacing_the_reply_leaves_the_call_live():
     tm.process_call_hangup.assert_not_awaited()
 
 
-async def test_a_speculative_reply_hangs_up_only_once_its_turn_is_final():
+async def test_a_speculative_reply_waits_for_its_turn_to_be_promoted():
     tm = _hangup_tm(interruptible_flag=False)
-    hangup = asyncio.create_task(tm._TaskManager__hang_up_after_reply())
-    tm.eager_llm_task = hangup
+    reply = {"eager_eot": True, "sequence_id": 7}
+    tm.eager_meta_info = reply
+
+    # Run under wait_for, as __do_llm_generation does, so the check cannot rely on task identity.
+    final = asyncio.create_task(asyncio.wait_for(tm._TaskManager__turn_is_final(reply), timeout=5))
+    await asyncio.sleep(0.1)
+    assert not final.done()
+
+    tm.eager_meta_info = None  # EndOfTurn promotes the speculative task
+    assert await final is True
+
+
+async def test_a_speculative_reply_replaced_by_a_newer_turn_does_not_hang_up():
+    tm = _hangup_tm(interruptible_flag=False)
+    reply = {"eager_eot": True, "sequence_id": 7}
+    tm.eager_meta_info = reply
+    final = asyncio.create_task(tm._TaskManager__turn_is_final(reply))
     await asyncio.sleep(0.1)
 
-    tm.wait_for_current_message.assert_not_awaited()
-
-    tm.llm_task, tm.eager_llm_task = hangup, None  # EndOfTurn promotes the speculative task
-    await hangup
-    await asyncio.sleep(0)
-
-    tm.process_call_hangup.assert_awaited_once()
+    tm.eager_meta_info = {"eager_eot": True, "sequence_id": 8}
+    assert await final is False
 
 
-async def test_a_speculative_reply_withdrawn_by_the_caller_commits_no_hangup():
+async def test_a_reply_to_a_final_turn_hangs_up_without_waiting():
     tm = _hangup_tm(interruptible_flag=False)
-    tm.hangup_triggered = False
-    hangup = asyncio.create_task(tm._TaskManager__hang_up_after_reply())
-    tm.eager_llm_task = hangup
-    await asyncio.sleep(0.1)
-
-    hangup.cancel()  # TurnResumed
-    with pytest.raises(asyncio.CancelledError):
-        await hangup
-
-    assert tm.hangup_triggered is False
-    tm.process_call_hangup.assert_not_awaited()
+    assert await asyncio.wait_for(tm._TaskManager__turn_is_final({"sequence_id": 7}), timeout=0.05) is True

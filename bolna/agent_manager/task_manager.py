@@ -4556,7 +4556,7 @@ class TaskManager(BaseManager):
             if rag_latency.get("sequence_id") not in existing_seq_ids:
                 self.rag_latencies["turn_latencies"].append(rag_latency)
 
-        if meta_info.pop(HANGUP_AFTER_REPLY, False):
+        if meta_info.pop(HANGUP_AFTER_REPLY, False) and await self.__turn_is_final(meta_info):
             await self.__hang_up_after_reply()
 
     def _append_eager_llm_stub(self, meta_info):
@@ -4746,6 +4746,8 @@ class TaskManager(BaseManager):
 
     async def __play_static_clip(self, ws_packet, ends_call: bool):
         """Play a static node's clip, ending the call after it when the node is an end_call node."""
+        # An event can land on an end node while another hangup is already under way.
+        ends_call = ends_call and not self.hangup_triggered
         holds_flush = ends_call and not self.turn_based_conversation
         if holds_flush:
             # The hangup waits on this, and the clip sets it only once it has been sent.
@@ -4756,21 +4758,38 @@ class TaskManager(BaseManager):
             if holds_flush:
                 self._turn_audio_flushed.set()
             raise
-        if ends_call:
-            await self.__hang_up_after_reply()
+        if ends_call and await self.__turn_is_final(ws_packet["meta_info"]):
+            self.__enter_reply_hangup()
+            # Detached so a long clip's playout is not held to the generation timeout.
+            self._end_call_hangup_task = asyncio.create_task(self.__finish_reply_hangup())
+            self._end_call_hangup_task.add_done_callback(self.__log_detached_hangup_exception)
+
+    async def __turn_is_final(self, meta_info) -> bool:
+        """Wait out a speculative reply: True once EndOfTurn promotes its turn, False if a newer turn replaced it."""
+        while (
+            meta_info.get("eager_eot")
+            and self.eager_meta_info is not None
+            and self.eager_meta_info.get("sequence_id") == meta_info.get("sequence_id")
+            and not self.conversation_ended
+        ):
+            await asyncio.sleep(0.05)
+        return not meta_info.get("eager_eot") or self.eager_meta_info is None
 
     async def __hang_up_after_reply(self):
         """End the call once a graph end node's closing reply has played, as end_call does after its goodbye."""
-        # A speculative reply is withdrawn if the caller resumes speaking, so commit only once its turn is final.
-        while asyncio.current_task() is self.eager_llm_task and not self.conversation_ended:
-            await asyncio.sleep(0.05)
+        self.__enter_reply_hangup()
+        await self.__finish_reply_hangup()
+
+    def __enter_reply_hangup(self):
         self.check_if_user_online = False
         self._end_call_in_progress = True
         self._hangup_cancelled = False
         if self.interruptible_hangup_message:
             self._hangup_interruptible_window = True
+        self._enter_hangup_state()
+
+    async def __finish_reply_hangup(self):
         try:
-            self._enter_hangup_state()
             await self.wait_for_current_message()
         except asyncio.CancelledError:
             # A newer turn replaced this reply before the teardown was armed, so the call carries on with it.
