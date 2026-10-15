@@ -63,7 +63,9 @@ class TelephonyOutputHandler(DefaultOutputHandler):
 
             try:
                 if len(audio_chunk) == 1:
-                    audio_chunk += b"\x00"
+                    # A lone mu-law sample is repeated: a 0x00 pad decodes to full-scale negative, a click.
+                    is_mulaw_sample = audio_chunk != b"\x00" and meta_info.get("format") == "mulaw"
+                    audio_chunk += audio_chunk if is_mulaw_sample else b"\x00"
 
                 if audio_chunk and self.stream_sid and len(audio_chunk) != 1:
                     if audio_chunk != b"\x00\x00":

@@ -452,6 +452,11 @@ def pronunciation_dictionary_key(provider, provider_config, pronunciation_rules=
     return f"{key}#{digest}" if digest else key
 
 
+def static_node_ends_call(node: Optional[dict]) -> bool:
+    """A static node set to end_call hangs up after its message when it has no transitions to route on."""
+    return bool(node) and node.get("function_call") == END_CALL_FUNCTION_PREFIX and not node.get("edges")
+
+
 def is_valid_md5(hash_string):
     return bool(re.fullmatch(r"[0-9a-f]{32}", hash_string))
 
@@ -702,6 +707,50 @@ def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, orig
     buffer = io.BytesIO()
     audio.export(buffer, format="wav")
     return buffer.getvalue()
+
+
+class StreamingPcmResampler:
+    """resample(format="pcm") for audio arriving in pieces: output equals resampling the whole stream,
+    so piece edges don't click. The last few samples wait for the next piece; reset() drops them."""
+
+    def __init__(self, original_sample_rate, target_sample_rate):
+        divisor = math.gcd(original_sample_rate, target_sample_rate)
+        self.up = target_sample_rate // divisor
+        self.down = original_sample_rate // divisor
+        # Same rate passes through; firwin rejects the 1:1 design.
+        self.window = _resample_fir(self.up, self.down) if self.up != self.down else None
+        # Input samples on each side of an output sample that the filter reads.
+        self.margin = math.ceil((len(self.window) // 2) / self.up) + 1 if self.window is not None else 0
+        self.reset()
+
+    def reset(self):
+        self.history = np.zeros(0, dtype=np.float32)
+        # Absolute input index of history[0]; kept a multiple of down so outputs land on whole indices.
+        self.history_start = 0
+        self.next_output = 0
+
+    def process(self, pcm_bytes):
+        if self.up == self.down:
+            return pcm_bytes
+        incoming = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
+        buffered = np.concatenate((self.history, incoming))
+        buffered_end = self.history_start + len(buffered)
+
+        # Output m sits at input m*down/up; it is final once margin input samples follow it.
+        ready = buffered_end - self.margin
+        end = (ready * self.up) // self.down + 1 if ready >= 0 else 0
+        end = max(end, self.next_output)
+
+        offset = self.history_start * self.up // self.down
+        resampled = scipy.signal.resample_poly(buffered, self.up, self.down, window=self.window)
+        out = resampled[self.next_output - offset : end - offset]
+        self.next_output = end
+
+        keep_from = (self.next_output * self.down - self.margin * self.up) // (self.up * self.down) * self.down
+        keep_from = max(keep_from, self.history_start)
+        self.history = buffered[keep_from - self.history_start :]
+        self.history_start = keep_from
+        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
 
 
 def normalized_similarity(first: str, second: str) -> float:

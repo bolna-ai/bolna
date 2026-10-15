@@ -19,7 +19,7 @@ from .stream_synthesizer import StreamSynthesizer
 from bolna.constants import MAYA_TTS_SUPPORTED_LANGUAGES, MAYA_TTS_SUPPORTED_VOICES
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
-from bolna.helpers.utils import pcm_to_ulaw, pcm_to_wav_bytes, resample
+from bolna.helpers.utils import StreamingPcmResampler, pcm_to_ulaw, pcm_to_wav_bytes, resample
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
 logger = configure_logger(__name__)
@@ -65,6 +65,8 @@ class MayaSynthesizer(StreamSynthesizer):
         self.use_mulaw = kwargs.get("use_mulaw", False)
         self.target_sample_rate = MULAW_SAMPLE_RATE if self.use_mulaw else int(sampling_rate)
         self.sampling_rate = self.target_sample_rate
+        # WS frames are one continuous stream; resampling each alone clicks at every frame edge.
+        self.stream_resampler = StreamingPcmResampler(MAYA_NATIVE_SAMPLE_RATE, self.target_sample_rate)
 
         self.maya_host = os.getenv("MAYA_API_HOST", "tts.mayaresearch.ai")
         self.api_url = f"https://{self.maya_host}/v1/tts"
@@ -110,12 +112,25 @@ class MayaSynthesizer(StreamSynthesizer):
         return "mulaw" if self.use_mulaw else "pcm"
 
     def _process_audio_chunk(self, chunk):
-        """Resample Maya's 24 kHz PCM to the target rate; mu-law encode for telephony."""
+        """Resample a WS frame of Maya's 24 kHz PCM as part of the turn's stream; mu-law for telephony."""
         if not chunk:
             return None
         try:
+            audio = self.stream_resampler.process(chunk)
+        except Exception as e:
+            logger.error(f"Error resampling Maya audio: {e}")
+            return None
+        if not audio:
+            return None
+        return pcm_to_ulaw(audio) if self.use_mulaw else audio
+
+    def convert_whole_clip(self, audio):
+        """Resample a complete 24 kHz clip (HTTP body) in one pass; mu-law for telephony."""
+        if not audio:
+            return None
+        try:
             audio = resample(
-                chunk,
+                audio,
                 self.target_sample_rate,
                 format="pcm",
                 original_sample_rate=MAYA_NATIVE_SAMPLE_RATE,
@@ -168,6 +183,8 @@ class MayaSynthesizer(StreamSynthesizer):
     async def handle_interruption(self):
         """Already-generated frames keep arriving until Maya answers with `cancelled`, so
         audio is dropped over that window."""
+        # The interrupted turn's held-back samples must not lead the next turn.
+        self.stream_resampler.reset()
         try:
             if not self._is_ws_connected():
                 return
@@ -276,6 +293,8 @@ class MayaSynthesizer(StreamSynthesizer):
                         f"Maya end of stream request_id={data.get('request_id')} session_id={data.get('session_id')}"
                     )
                     self._discard_audio = False
+                    # The next turn is a new stream; the held-back tail must not lead it.
+                    self.stream_resampler.reset()
                     yield b"\x00"
                 elif event == "cancelled":
                     # Terminator for a turn we interrupted, sent instead of `end`. Nothing
@@ -283,6 +302,7 @@ class MayaSynthesizer(StreamSynthesizer):
                     # sentinel: handle_interruption() already abandoned the turn.
                     logger.info(f"Maya cancelled request_id={data.get('request_id')}")
                     self._discard_audio = False
+                    self.stream_resampler.reset()
                 elif event == "error":
                     # Not a terminator: an error rejects one frame (a bad config, say) while the
                     # utterance still completes with its own `end`. Emitting a sentinel here
@@ -327,6 +347,7 @@ class MayaSynthesizer(StreamSynthesizer):
             # Sent before returning so every reconnect replays it.
             await websocket.send(json.dumps(self._config_message()))
             self._discard_audio = False
+            self.stream_resampler.reset()
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
@@ -357,7 +378,7 @@ class MayaSynthesizer(StreamSynthesizer):
         """The HTTP body is the same headerless 24 kHz PCM as the WS frames."""
         if not audio:
             return b"\x00"
-        return self._process_audio_chunk(audio) or b"\x00"
+        return self.convert_whole_clip(audio) or b"\x00"
 
     def _get_http_audio_format(self):
         return self._get_audio_format()
@@ -390,7 +411,7 @@ class MayaSynthesizer(StreamSynthesizer):
         audio = await self._generate_http(text)
         if not audio:
             return None
-        return self._process_audio_chunk(audio)
+        return self.convert_whole_clip(audio)
 
     async def synthesize(self, text):
         """WAV-wrapped: callers pass this to audio_to_mulaw8k() with a rate_hint guessed off
