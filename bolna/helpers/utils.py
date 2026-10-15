@@ -403,6 +403,11 @@ def static_node_audio_key(text, provider=None, voice=None, voice_id=None, model=
     return get_md5_hash(f"{identity}|{text}")
 
 
+def static_node_ends_call(node: Optional[dict]) -> bool:
+    """A static node set to end_call hangs up after its message when it has no transitions to route on."""
+    return bool(node) and node.get("function_call") == END_CALL_FUNCTION_PREFIX and not node.get("edges")
+
+
 def is_valid_md5(hash_string):
     return bool(re.fullmatch(r"[0-9a-f]{32}", hash_string))
 

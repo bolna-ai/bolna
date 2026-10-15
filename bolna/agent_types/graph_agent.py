@@ -20,6 +20,7 @@ from bolna.helpers.utils import (
     enrich_context_with_time_variables,
     get_md5_hash,
     select_message_by_language,
+    static_node_ends_call,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
 from bolna.enums import ChatRole, EdgeConditionType, ExpressionOperator, LLMProvider, NodeType, ToolScope
@@ -1596,7 +1597,12 @@ class GraphAgent(BaseAgent):
             return None
         if self.context_data:
             text = update_prompt_with_context(text, self.context_data)
-        return {"static_message": text, "static_audio_hash": get_md5_hash(text)}
+        return {
+            "static_message": text,
+            "static_audio_hash": get_md5_hash(text),
+            # No model runs on a static node, so every play of an end_call node closes the call.
+            HANGUP_AFTER_REPLY: static_node_ends_call(current_node),
+        }
 
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator:
         meta_info = kwargs.get("meta_info", {})
