@@ -1251,11 +1251,10 @@ def soniox_ws_url(host):
     return f"{protocol}://{host}/transcribe-websocket"
 
 
-def build_soniox_config(api_key, model, audio_format, sample_rate, **extras):
-    """Soniox first-frame config (auth rides in it) — shared by transcriber + LID tap.
-    extras merge on top (language_hints, context, endpoint tuning...)."""
+def build_soniox_config(model, audio_format, sample_rate, **extras):
+    """Soniox first-frame config — shared by transcriber + LID tap. Auth rides in the
+    connect-time Authorization header, not here. extras merge on top (language_hints, context, endpoint tuning...)."""
     config = {
-        "api_key": api_key,
         "model": model,
         "audio_format": audio_format,
         "sample_rate": int(sample_rate),
