@@ -3050,15 +3050,6 @@ class TaskManager(BaseManager):
                 ):
                     break
 
-            # Cached clips are a single mark that is always the final chunk, so this shortcut
-            # would skip waiting for the whole message rather than just its tail.
-            if (
-                first_item.get("text_synthesized")
-                and first_item.get("is_final_chunk") is True
-                and first_item.get("type") not in CACHED_SINGLE_MARK_CATEGORIES
-            ):
-                break
-
             # Use entry_time (not time.time()) so the deadline is a fixed point in the
             # future rather than one that recedes with each iteration. Without this,
             # `remaining = sum(durations) + hangup_mark_event_timeout` never reaches 0
