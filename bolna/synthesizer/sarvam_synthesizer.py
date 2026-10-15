@@ -23,6 +23,7 @@ from bolna.helpers.utils import (
 from bolna.constants import (
     SARVAM_LOUDNESS_MAX,
     SARVAM_LOUDNESS_MIN,
+    SARVAM_LOUDNESS_MODELS,
     SARVAM_MODEL_SAMPLING_RATE_MAPPING,
     SARVAM_STREAMING_WAV_HEADER_MODELS,
     SARVAM_TTS_SUPPORTED_LANGUAGES,
@@ -264,7 +265,7 @@ class SarvamSynthesizer(StreamSynthesizer):
             "max_chunk_length": 250,
             "min_buffer_size": self.buffer_size,
         }
-        if self.model == "bulbul:v2":
+        if self.model in SARVAM_LOUDNESS_MODELS:
             data.update({"pitch": self.pitch, "loudness": self.loudness})
         return {"type": "config", "data": data}
 
@@ -340,15 +341,12 @@ class SarvamSynthesizer(StreamSynthesizer):
             "text": text,
             "speaker": self.voice_id,
             "pace": self.pace,
-            "pitch": self.pitch,
-            "loudness": self.loudness,
             "speech_sample_rate": self.sampling_rate,
             "enable_preprocessing": self.enable_preprocessing,
             "model": self.model,
         }
-        if self.model == "bulbul:v3":
-            payload.pop("pitch")
-            payload.pop("loudness")
+        if self.model in SARVAM_LOUDNESS_MODELS:
+            payload.update({"pitch": self.pitch, "loudness": self.loudness})
         return payload
 
     async def _generate_http(self, text):
