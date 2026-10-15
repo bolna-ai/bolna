@@ -47,6 +47,13 @@ async def test_an_http_clip_is_waited_out_not_skipped_as_a_tail():
         await asyncio.wait_for(tm.wait_for_current_message(), timeout=0.2)
 
 
+async def test_a_clip_reporting_zero_duration_is_still_waited_out():
+    # Compressed (mp3) clips report 0s on the web output handler, so duration can't tell a clip from a marker.
+    tm = _wait_tm(_http_clip(duration=0))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(tm.wait_for_current_message(), timeout=0.2)
+
+
 async def test_the_wait_ends_as_soon_as_the_clip_acks():
     tm = _wait_tm(_http_clip())
     waiter = asyncio.create_task(tm.wait_for_current_message())

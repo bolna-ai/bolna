@@ -104,7 +104,7 @@ async def test_without_text_on_the_mark_the_turn_is_all_or_nothing():
     assert _assistant(history) is None  # no partial is recoverable
 
 
-# --------------------------------------------------------- the hangup-drain shortcut
+# --------------------------------------------------------- the hangup playout wait
 
 
 def _wait_tm(mark_data):
@@ -120,15 +120,9 @@ def _wait_tm(mark_data):
     return tm
 
 
-async def test_a_streamed_final_chunk_still_shortcuts_the_hangup_drain():
-    # A streaming synth's final mark is its end-of-stream marker, which carries no audio.
-    tm = _wait_tm({"type": "", "text_synthesized": "tail", "is_final_chunk": True, "duration": 0})
-    await asyncio.wait_for(tm.wait_for_current_message(), timeout=1.0)
-
-
 @pytest.mark.parametrize("category", CACHED_SINGLE_MARK_CATEGORIES)
 async def test_a_cached_single_mark_is_waited_for_at_hangup(category):
-    """Its one mark is always the final chunk, so the shortcut would cut the whole clip off."""
+    """Its one mark is always the final chunk and holds the whole clip, so the hangup must wait it out."""
     tm = _wait_tm({"type": category, "text_synthesized": FULL_TEXT, "is_final_chunk": True, "duration": CLIP_SECONDS})
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(tm.wait_for_current_message(), timeout=0.2)
@@ -211,6 +205,6 @@ def test_other_cached_clips_are_not_stamped():
 
 def test_event_proactive_is_not_a_cached_single_mark_category():
     """It runs on sequence_id -1, which every output handler blanks text_synthesized for, so its
-    mark never carries text and neither the hangup guard nor the trim can act on it."""
+    mark never carries text and the trim cannot act on it."""
     assert "event_proactive" not in CACHED_SINGLE_MARK_CATEGORIES
     assert CACHED_SINGLE_MARK_CATEGORIES == ("static_node",)

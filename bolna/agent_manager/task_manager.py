@@ -3046,16 +3046,6 @@ class TaskManager(BaseManager):
                 ):
                     break
 
-            # Skip only a streaming synth's audio-less end-of-stream mark. An HTTP or cached clip is one
-            # final mark holding the whole reply; static clips stay listed since web mp3 marks report 0s.
-            if (
-                first_item.get("text_synthesized")
-                and first_item.get("is_final_chunk") is True
-                and not first_item.get("duration")
-                and first_item.get("type") not in CACHED_SINGLE_MARK_CATEGORIES
-            ):
-                break
-
             # Use entry_time (not time.time()) so the deadline is a fixed point in the
             # future rather than one that recedes with each iteration. Without this,
             # `remaining = sum(durations) + hangup_mark_event_timeout` never reaches 0
