@@ -27,6 +27,8 @@ class FakeStreamSynth:
         self.meta_info = None
         self.provider_name = "elevenlabs"
         self.first_chunk_generated = False
+        # No open turn in these scenarios — mirrors the real attribute cleared on eos.
+        self.current_turn_start_time = None
 
     async def receiver(self):
         for item in self.recv_items:

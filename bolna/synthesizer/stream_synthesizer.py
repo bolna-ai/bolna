@@ -276,6 +276,21 @@ class StreamSynthesizer(BaseSynthesizer):
             self._stamp_mark_id(self.meta_info)
             yield create_ws_data_packet(audio, self.meta_info)
 
+        # The receiver ended without yielding the eos sentinel — e.g. the
+        # provider socket closed mid-reply (#1126). If a turn is still open,
+        # emit a synthetic end-of-stream so downstream can settle the reply
+        # instead of leaving the agent marked as speaking forever.
+        if self.current_turn_start_time is not None:
+            meta = dict(self.text_queue.popleft() if self.text_queue else (self.meta_info or {}))
+            meta["format"] = self._get_audio_format()
+            meta["end_of_synthesizer_stream"] = True
+            if self.last_text_sent:
+                meta["end_of_llm_stream"] = True
+            self.first_chunk_generated = False
+            self._record_turn_latency()
+            self._stamp_mark_id(meta)
+            yield create_ws_data_packet(b"\x00", meta)
+
         if self.connection_error:
             raise Exception(self.connection_error)
 
