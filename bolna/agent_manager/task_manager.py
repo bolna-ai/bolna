@@ -3097,9 +3097,11 @@ class TaskManager(BaseManager):
                 for _digit in dtmf_digits:
                     self.dtmf_events.append({"digit": _digit, "ts_ms": _dtmf_ts})
 
-                # Key presses follow the same gate as speech, so they cannot cut a goodbye that speech cannot.
-                if self._should_ignore_transcriber_input():
-                    logger.info(f"DTMF ignored while the call is hanging up or transferring: {dtmf_digits}")
+                # A key press cannot cut a goodbye that speech is not allowed to interrupt.
+                if (
+                    self.hangup_triggered or self._end_call_in_progress
+                ) and self._hangup_interruptible_window is not True:
+                    logger.info(f"DTMF ignored while the call is hanging up: {dtmf_digits}")
                     continue
 
                 dtmf_message = DTMF_MESSAGE_PREFIX + dtmf_digits

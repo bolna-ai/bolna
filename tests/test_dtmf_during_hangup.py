@@ -42,3 +42,11 @@ async def test_a_key_press_interrupts_a_goodbye_the_caller_may_talk_over():
     await _press(tm, "1")
 
     tm._handle_transcriber_output.assert_awaited_once()
+
+
+async def test_a_key_press_during_a_transfer_still_reaches_the_llm():
+    tm = _tm(hangup_triggered=False, interruptible_window=False)
+    tm.has_transfer = True
+    await _press(tm, "1")
+
+    tm._handle_transcriber_output.assert_awaited_once()
