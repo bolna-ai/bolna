@@ -130,34 +130,25 @@ def _synth(current=(1,)):
     return synth
 
 
-def _wire(sent):
-    """Frames as their text, then "<flush>" or "<close>" when the frame carries one."""
-    wire = []
-    for message in sent:
-        if message.get("text", "").strip():
-            wire.append(message["text"].strip())
-        if message.get("flush"):
-            wire.append("<flush>")
-        if message.get("close_context"):
-            wire.append("<close>")
-    return wire
+def _spoken(synth):
+    """Sentences sent, each checked to carry its own flush."""
+    texts = [m for m in synth.websocket.sent if m.get("text", "").strip()]
+    assert all(m.get("flush") for m in texts)
+    return [m["text"].strip() for m in texts]
 
 
-async def test_each_sentence_goes_out_as_one_frame_followed_by_a_flush():
+async def test_each_sentence_goes_out_as_one_flushed_frame():
     synth = _synth()
     await synth.sender("Perfect, link अभी WhatsApp पर भेज देते हैं. आपका offer सिर्फ अगले कुछ", 1)
     await synth.sender("hours के लिए है। क्या मैं कुछ और", 1)
     await synth.sender("बताऊँ?", 1, end_of_llm_stream=True)
 
-    assert _wire(synth.websocket.sent) == [
+    assert _spoken(synth) == [
         "Perfect, link अभी WhatsApp पर भेज देते हैं.",
-        "<flush>",
         "आपका offer सिर्फ अगले कुछ hours के लिए है।",
-        "<flush>",
         "क्या मैं कुछ और बताऊँ?",
-        "<flush>",
-        "<close>",
     ]
+    assert synth.websocket.sent[-1]["close_context"]
 
 
 async def test_a_superseded_turns_unsent_text_is_dropped():
@@ -166,7 +157,7 @@ async def test_a_superseded_turns_unsent_text_is_dropped():
     synth.task_manager_instance.current = {2}
     await synth.sender("Your refund was processed yesterday.", 2, end_of_llm_stream=True)
 
-    assert _wire(synth.websocket.sent) == ["Your refund was processed yesterday.", "<flush>", "<close>"]
+    assert _spoken(synth) == ["Your refund was processed yesterday."]
 
 
 async def test_a_live_turns_unsent_text_is_spoken_before_the_follow_up():
@@ -174,13 +165,7 @@ async def test_a_live_turns_unsent_text_is_spoken_before_the_follow_up():
     await synth.sender("Sure, let me check the order status for you", 1)
     await synth.sender("Your refund was processed yesterday.", 2, end_of_llm_stream=True)
 
-    assert _wire(synth.websocket.sent) == [
-        "Sure, let me check the order status for you",
-        "<flush>",
-        "Your refund was processed yesterday.",
-        "<flush>",
-        "<close>",
-    ]
+    assert _spoken(synth) == ["Sure, let me check the order status for you", "Your refund was processed yesterday."]
 
 
 async def test_first_audio_latency_is_measured_from_the_first_push_even_when_it_is_held():
@@ -199,4 +184,4 @@ async def test_interruption_drops_the_unsent_text():
     synth.context_id = "ctx-next"
     await synth.sender("Okay, what would you like to know?", 1, end_of_llm_stream=True)
 
-    assert _wire(synth.websocket.sent) == ["Okay, what would you like to know?", "<flush>", "<close>"]
+    assert _spoken(synth) == ["Okay, what would you like to know?"]
