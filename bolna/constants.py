@@ -444,7 +444,10 @@ TTS_CONTROL_MODEL_PREFIXES = {
     SynthesizerProvider.DEEPGRAM: {"speed": ("aura-2",)},
 }
 TTS_MODEL_CONTROL_LIMITS = {
-    SynthesizerProvider.SARVAM: {"bulbul:v3": {"speed": (0.5, 2.0)}},
+    SynthesizerProvider.SARVAM: {
+        "bulbul:v3": {"speed": (0.5, 2.0)},
+        "bulbul:v4-flash": {"speed": (0.5, 2.0)},
+    },
 }
 # provider_config keys that change how the audio sounds, so cached audio (welcome, static-node clips) keys on them.
 TTS_AUDIO_SETTINGS = {
