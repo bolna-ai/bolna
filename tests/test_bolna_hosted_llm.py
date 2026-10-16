@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bolna.agent_types.graph_agent import GraphAgent
+from bolna.llms.azure_llm import AzureLLM
 from bolna.llms.openai_llm import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 
@@ -65,12 +66,13 @@ def test_graph_agent_keeps_routing_and_hops_off_the_hosted_endpoint(monkeypatch)
         patch("bolna.agent_types.graph_agent.OpenAiLLM", openai_llm),
         patch("bolna.agent_types.graph_agent.SUPPORTED_LLM_PROVIDERS", {"bolna": conversation}),
     ):
-        GraphAgent(config)
+        agent = GraphAgent(config)
 
     assert conversation.call_args.kwargs["base_url"] == BASE_URL
     assert conversation.call_args.kwargs["llm_key"] == HOSTED_KEY
+    assert isinstance(agent.voicemail_llm, AzureLLM)
     others = [call.kwargs for call in openai_llm.call_args_list]
-    assert len(others) == 3
+    assert len(others) == 2
     for kwargs in others:
         assert "base_url" not in kwargs
         assert kwargs.get("llm_key") != HOSTED_KEY
