@@ -496,6 +496,7 @@ class TaskManager(BaseManager):
         self._hangup_processing = False
         self.dtmf_events: list[dict] = []
         self.non_fatal_llm_error_events: list[dict] = []
+        self.non_fatal_synthesizer_error_events: list[dict] = []
         self._agent_end_timestamps: dict = {}
         self.hangup_message_queued = False
         self._end_of_conversation_in_progress = False
@@ -4094,6 +4095,12 @@ class TaskManager(BaseManager):
             )
         finally:
             self.record_non_fatal_llm_errors(meta_info, generation_errors)
+
+    def record_non_fatal_synthesizer_error(self, error):
+        """An error the synthesizer recovered from, e.g. a rejected pronunciation dictionary it dropped."""
+        self.non_fatal_synthesizer_error_events.append(
+            {**error, "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2)}
+        )
 
     def record_non_fatal_llm_errors(self, meta_info, errors):
         """Runs as each generation ends, so a follow-up's events precede its parent's: sort by sequence_id."""
@@ -9511,6 +9518,7 @@ class TaskManager(BaseManager):
                     "voicemail_check_count": self.voicemail_handler.check_count,
                     "dtmf_events": list(self.dtmf_events),
                     "non_fatal_llm_error_events": list(self.non_fatal_llm_error_events),
+                    "non_fatal_synthesizer_error_events": list(self.non_fatal_synthesizer_error_events),
                     "component_error": self.component_error_event,
                     "language_switch_events": list(self.language_switch_events),
                     "transfer_call_events": list(self.transfer_call_events),

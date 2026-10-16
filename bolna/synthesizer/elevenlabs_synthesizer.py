@@ -103,6 +103,22 @@ class ElevenlabsBase(StreamSynthesizer):
             )
         return valid[:ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES]
 
+    def _drop_rejected_dictionaries(self, *details):
+        """True when an ElevenLabs error rejects our dictionaries, e.g. one deleted after the save.
+
+        They're dropped and recorded, so the call speaks on without them."""
+        text = " ".join(str(detail) for detail in details if detail)
+        if not self.pronunciation_dictionary_locators or not re.search(r"pronunciation|dictionar", text, re.I):
+            return False
+        dropped = [locator["pronunciation_dictionary_id"] for locator in self.pronunciation_dictionary_locators]
+        self.pronunciation_dictionary_locators = []
+        logger.error(f"ElevenLabs rejected pronunciation dictionaries {dropped}, continuing without them: {text}")
+        if self.task_manager_instance is not None:
+            self.task_manager_instance.record_non_fatal_synthesizer_error(
+                {"error_type": "pronunciation_dictionary_rejected", "error": text, "dictionaries": dropped}
+            )
+        return True
+
     def _get_audio_format(self):
         return "mulaw" if self.wire_format == "ulaw_8000" else "wav"
 
@@ -365,6 +381,8 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
 
                 ctx = data.get("contextId")
                 if ctx in self.context_ids_to_ignore:
+                    continue
+                if data.get("error") and self._drop_rejected_dictionaries(data.get("error"), data.get("message")):
                     continue
 
                 if "audio" in data and data["audio"] and self.ws_send_time is not None:
@@ -770,6 +788,13 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
                 consecutive_errors = 0
 
                 if data.get("error"):
+                    if self._drop_rejected_dictionaries(data.get("error"), data.get("message")):
+                        # They ride on the socket's first message, so redial; end any turn that was speaking on it.
+                        await self.handle_interruption()
+                        if not self._turn_eos_emitted:
+                            self._turn_eos_emitted = True
+                            yield b"\x00", ""
+                        continue
                     logger.error(f"ElevenLabs v3 error: {data.get('error')} - {data.get('message')}")
                     self.connection_error = data.get("message") or data.get("error")
                     return

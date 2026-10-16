@@ -1,6 +1,7 @@
 """Provider pronunciation dictionaries reach every message that needs them, and only on models
 that honour them: ElevenLabs locators and Cartesia pronunciation_dict_id. No network."""
 
+import asyncio
 import json
 from unittest.mock import MagicMock
 
@@ -429,3 +430,80 @@ def test_bolna_copies_share_one_key_across_regions():
         "elevenlabs", india, RULES
     )
     assert pronunciation_dictionary_key("elevenlabs", {"model": "eleven_flash_v2_5"}, RULES, on_platform_key=True) == ""
+
+
+# ---------------------------------------------------------------------------
+# a dictionary ElevenLabs rejects mid-call (e.g. deleted after the save)
+# ---------------------------------------------------------------------------
+
+REJECTION = {"error": "invalid_request", "message": "Pronunciation dictionary 'dict-1' was not found."}
+
+
+class FrameWS(FakeWS):
+    """A socket that hands the receiver queued frames, then waits."""
+
+    def __init__(self, frames):
+        super().__init__()
+        self.frames = [json.dumps(frame) for frame in frames]
+
+    async def recv(self):
+        if self.frames:
+            return self.frames.pop(0)
+        await asyncio.sleep(3600)
+
+    async def close(self):
+        self.state = State.CLOSED
+
+
+def _recording(model="eleven_turbo_v2_5"):
+    synth = _elevenlabs(model, pronunciation_dictionary_locators=[LOCATOR])
+    synth.task_manager_instance = MagicMock()
+    return synth, synth.task_manager_instance.record_non_fatal_synthesizer_error
+
+
+async def test_dialogue_socket_redials_without_a_rejected_dictionary(fake_connect):
+    # The v3 receiver used to return on any error frame, leaving TTS dead for the rest of the call.
+    synth, record = _recording("eleven_v3_conversational")
+    synth.websocket = FrameWS([REJECTION])
+    synth._turn_eos_emitted = False  # a turn was speaking on that socket
+
+    receiver = synth.receiver()
+    assert await asyncio.wait_for(anext(receiver), 1) == (b"\x00", "")
+    await asyncio.wait_for(synth._reconnect_task, 1)
+
+    assert synth.connection_error is None
+    assert fake_connect[-1].sent[0] == {"voices": ["voice-id"], "voice_settings": {"stability": 0.5}}
+    assert record.call_args.args[0]["dictionaries"] == ["dict-1"]
+    await receiver.aclose()
+
+
+async def test_other_dialogue_errors_still_end_the_stream():
+    synth, record = _recording("eleven_v3_conversational")
+    synth.websocket = FrameWS([{"error": "quota_exceeded", "message": "Quota exceeded"}])
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(synth.receiver()), 1)
+    assert synth.connection_error == "Quota exceeded"
+    record.assert_not_called()
+
+
+async def test_after_a_rejection_the_next_turn_opens_without_the_dictionary():
+    synth, record = _recording()
+    synth.websocket = FrameWS([REJECTION])
+    receiver = synth.receiver()
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(anext(receiver), 0.2)
+
+    await _speak_turn(synth, "Hello there.", 1)
+    assert not any("pronunciation_dictionary_locators" in m for m in synth.websocket.sent)
+    record.assert_called_once()
+
+
+def test_the_task_manager_records_recovered_synthesizer_errors():
+    from types import SimpleNamespace
+
+    from bolna.agent_manager.task_manager import TaskManager
+
+    task_manager = SimpleNamespace(conversation_start_init_ts=0, non_fatal_synthesizer_error_events=[])
+    TaskManager.record_non_fatal_synthesizer_error(task_manager, {"error_type": "pronunciation_dictionary_rejected"})
+    (event,) = task_manager.non_fatal_synthesizer_error_events
+    assert event["error_type"] == "pronunciation_dictionary_rejected" and event["ts_ms"] > 0
