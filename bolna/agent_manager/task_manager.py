@@ -130,6 +130,7 @@ from bolna.helpers.utils import (
 )
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
+from ..helpers.tts_audio_monitor import TtsAudioMonitor
 from ..helpers.observable_variable import ObservableVariable
 from bolna.models import S2SConfig, WebSearchConfig, tts_render_settings
 from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
@@ -575,6 +576,7 @@ class TaskManager(BaseManager):
 
             self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
         self.__setup_output_handlers(turn_based_conversation, output_queue)
+        self.tts_audio_monitor = TtsAudioMonitor(self.sampling_rate)
 
         self.first_message_task_new = asyncio.create_task(self.message_task_new())
 
@@ -7641,7 +7643,8 @@ class TaskManager(BaseManager):
                                 # Non-streaming output
                                 logger.info("Stream not enabled, sending entire audio")
                                 # TODO handle is audio playing over here
-                                await self.tools["output"].handle(message)
+                                if await self.tools["output"].handle(message):
+                                    self.__observe_tts_audio(message)
                                 if meta_info.get("end_of_synthesizer_stream", False):
                                     self._turn_audio_flushed.set()
 
@@ -7933,6 +7936,19 @@ class TaskManager(BaseManager):
             await asyncio.sleep(0.1)
         self.handle_accumulated_message_task = None
 
+    def __observe_tts_audio(self, message):
+        try:
+            self.tts_audio_monitor.observe(message["meta_info"], message.get("data"))
+        except Exception as e:
+            logger.warning(f"TTS audio monitor skipped a chunk: {e}")
+
+    def __tts_audio_quality(self, chunk_marks):
+        try:
+            return self.tts_audio_monitor.summary(chunk_marks)
+        except Exception as e:
+            logger.warning(f"TTS audio monitor summary failed: {e}")
+            return None
+
     # Currently this loop only closes in case of interruption
     # but it shouldn't be the case.
     async def __process_output_loop(self):
@@ -7992,6 +8008,7 @@ class TaskManager(BaseManager):
                             if sequence_id is not None:
                                 self._sent_audio_sequences.add(sequence_id)
                             self._commit_staged_assistant_history(sequence_id)
+                            self.__observe_tts_audio(message)
                         # Track when agent audio first starts flowing for this sequence.
                         # Only fire on real audio bytes — BOS/EOS control packets are strings
                         # and fire before _synthesize() sets tts_start_ms, causing inversion.
@@ -9540,6 +9557,7 @@ class TaskManager(BaseManager):
                     "transcriber_error_events": list(self.transcriber_error_events),
                     "transcriber_reconnect_count": getattr(self.tools.get("transcriber"), "reconnect_count", 0),
                     "blocked_audio_events": list(self.blocked_audio_events),
+                    "tts_audio_quality": self.__tts_audio_quality(output["latency_dict"]["synthesizer_chunk_marks"]),
                     "welcome_message_played_ts": (
                         round(
                             self.tools["input"].welcome_message_played_ts - self.conversation_start_init_ts,
