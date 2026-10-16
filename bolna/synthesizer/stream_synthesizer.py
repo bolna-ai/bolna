@@ -31,9 +31,16 @@ logger = configure_logger(__name__)
 # Maximum consecutive connection failures before giving up
 MAX_CONNECTION_FAILURES = 3
 
+# Stands in for the end-of-stream of a turn whose socket closed before sending it.
+_LOST_TURN = object()
+
 
 class StreamSynthesizer(BaseSynthesizer):
     """Base class for all WebSocket-streaming synthesizers."""
+
+    # A turn whose socket closes before its end-of-stream is ended by _generate_ws_loop.
+    # Set True when receiver() settles such turns itself (it drains closed sockets, say).
+    settles_lost_turns = False
 
     def __init__(self, stream=True, provider_name="stream", task_manager_instance=None, buffer_size=400, **kwargs):
         super().__init__(
@@ -140,6 +147,9 @@ class StreamSynthesizer(BaseSynthesizer):
     async def _send_json(self, payload):
         """Send a JSON payload over the WebSocket. Sets connection_error on failure."""
         try:
+            # The open turn's audio now depends on this socket; losing it loses the turn.
+            if self.current_turn_start_time is not None:
+                self.current_turn_socket = self.websocket
             await self.websocket.send(json.dumps(payload))
         except Exception as e:
             logger.error(f"Error sending to {self.provider_name}: {e}")
@@ -232,13 +242,35 @@ class StreamSynthesizer(BaseSynthesizer):
             logger.error(f"Error in {self.provider_name} generate: {e}", exc_info=True)
             raise
 
+    def _turn_lost_with_socket(self):
+        """True when the open turn's socket has closed without delivering its end-of-stream."""
+        ws = self.current_turn_socket
+        return self.has_unsettled_turn_on(ws) and getattr(ws, "state", None) is websockets.protocol.State.CLOSED
+
+    async def _receive(self):
+        """receiver(), plus an end-of-stream for a turn whose socket closed before sending one.
+
+        The close is seen when receiver() ends (ConnectionClosed while in recv), or on resuming it
+        after a yield (closed meanwhile; receivers skip a closed socket, so its frames never come)."""
+        async for item in self.receiver():
+            yield item
+            if not self.settles_lost_turns and self._turn_lost_with_socket():
+                logger.error(f"{self.provider_name} WebSocket closed mid-turn, ending the turn")
+                yield _LOST_TURN
+        if not self.settles_lost_turns and self._turn_lost_with_socket():
+            logger.error(f"{self.provider_name} WebSocket dropped mid-turn, ending the turn")
+            yield _LOST_TURN
+
     async def _generate_ws_loop(self):
         """Core WebSocket streaming loop. Rarely needs overriding."""
-        async for raw_item in self.receiver():
+        async for raw_item in self._receive():
             if self.connection_error:
                 raise Exception(self.connection_error)
 
-            audio, extra_meta = self._unpack_receiver_message(raw_item)
+            if raw_item is _LOST_TURN:
+                audio, extra_meta = b"\x00", {}
+            else:
+                audio, extra_meta = self._unpack_receiver_message(raw_item)
 
             # Pop meta_info from the text_queue when available
             if self.text_queue:
