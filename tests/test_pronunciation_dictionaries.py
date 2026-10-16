@@ -221,8 +221,9 @@ async def test_each_turn_context_opens_with_the_dictionaries():
     # The dictionaries ride on the context's first text, with no extra message before it.
     first_for_context = next(m for m in synth.websocket.sent if m.get("context_id") == first_context)
     assert first_for_context == {
-        "text": "Welcome ",
+        "text": "Welcome to Bolna. ",
         "context_id": first_context,
+        "flush": True,
         "pronunciation_dictionary_locators": [LOCATOR],
     }
 
@@ -235,8 +236,7 @@ async def test_turns_without_dictionaries_send_exactly_what_they_did_before():
 
     ctx = synth.current_turn_context_id
     assert synth.websocket.sent == [
-        {"text": "Hello ", "context_id": ctx},
-        {"text": "there. ", "context_id": ctx},
+        {"text": "Hello there. ", "context_id": ctx, "flush": True},
         {"text": "", "context_id": ctx, "flush": True},
         {"context_id": ctx, "close_context": True},
     ]
@@ -245,11 +245,11 @@ async def test_turns_without_dictionaries_send_exactly_what_they_did_before():
 async def test_a_reconnect_opens_the_context_again(fake_connect):
     synth = _elevenlabs(pronunciation_dictionary_locators=[LOCATOR])
     synth.websocket = FakeWS()
-    synth._on_push({"sequence_id": 1}, "Hello")
-    await synth.sender("Hello", 1)
+    synth._on_push({"sequence_id": 1}, "Hello. How")
+    await synth.sender("Hello. How", 1)
 
     synth.websocket = await synth.establish_connection()
-    await synth.sender("again", 1)
+    await synth.sender("are you? Fine", 1)
 
     inits = [m for m in synth.websocket.sent if "pronunciation_dictionary_locators" in m]
     assert len(inits) == 1, "the new socket must see the context opened with the dictionaries"
