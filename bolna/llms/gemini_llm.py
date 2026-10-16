@@ -384,7 +384,9 @@ class GeminiLLM(BaseLLM):
                                 yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
                                 buffer = ""
 
-                            if not self.gave_out_prefunction_call_message:
+                            # Text the model spoke before the call already covers the wait, and a filler
+                            # pushed after it is a second end of stream that plays over it.
+                            if not self.gave_out_prefunction_call_message and not answer.strip():
                                 pre_msg_config = self.api_params.get(tool_name, {}).get("pre_call_message")
                                 detected_lang = meta_info.get("detected_language") if meta_info else None
                                 active_lang = detected_lang or self.language
