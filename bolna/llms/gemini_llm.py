@@ -303,7 +303,7 @@ class GeminiLLM(BaseLLM):
 
         answer, buffer = "", ""
         self.started_streaming = False
-        self.gave_out_prefunction_call_message = False
+        gave_pre_call_msg = False
         accumulated_thought_parts: list[str] = []
         # Gemini 3 streams thought_signature as a standalone Part before the functionCall Part.
         pending_thought_signature: bytes | None = None
@@ -384,12 +384,13 @@ class GeminiLLM(BaseLLM):
                                 yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
                                 buffer = ""
 
-                            if not self.gave_out_prefunction_call_message:
+                            # Text spoken before the call already covers the wait; a filler after it would play over it.
+                            if not gave_pre_call_msg and not answer.strip():
                                 pre_msg_config = self.api_params.get(tool_name, {}).get("pre_call_message")
                                 detected_lang = meta_info.get("detected_language") if meta_info else None
                                 active_lang = detected_lang or self.language
                                 pre_msg = compute_function_pre_call_message(active_lang, tool_name, pre_msg_config)
-                                self.gave_out_prefunction_call_message = True
+                                gave_pre_call_msg = True
                                 if pre_msg:
                                     yield LLMStreamChunk(
                                         data=pre_msg,
