@@ -1,4 +1,8 @@
+from dataclasses import dataclass, field
+
 import numpy as np
+
+from bolna.helpers.utils import ulaw_to_pcm
 
 FRAME_MS = 20
 QUIET_RMS = 200
@@ -7,20 +11,10 @@ DEAD_AIR_MS = 600
 MAX_PAUSES_PER_REPLY = 16
 
 
-def _mulaw_table():
-    u = ~np.arange(256, dtype=np.uint8)
-    sign, exponent, mantissa = u & 0x80, (u >> 4) & 0x07, u & 0x0F
-    magnitude = ((mantissa.astype(np.int32) << 3) + 0x84) << exponent
-    return np.where(sign != 0, 0x84 - magnitude, magnitude - 0x84).astype(np.int16)
-
-
-_MULAW_TO_PCM = _mulaw_table()
-
-
 def _samples(data, audio_format):
     """int16 samples of an outgoing audio chunk, or None for a format that can't be read sample by sample (mp3)."""
     if audio_format in ("mulaw", "ulaw"):
-        return _MULAW_TO_PCM[np.frombuffer(data, dtype=np.uint8)]
+        return np.frombuffer(ulaw_to_pcm(data), dtype=np.int16)
     if audio_format in ("pcm", "wav"):
         if data[:4] == b"RIFF":
             start = data.find(b"data", 12)
@@ -29,16 +23,14 @@ def _samples(data, audio_format):
     return None
 
 
+@dataclass(slots=True)
 class _Reply:
-    __slots__ = ("frames", "carry", "quiet_frames", "spoke", "pauses", "unanalyzed_chunks")
-
-    def __init__(self):
-        self.frames = 0
-        self.carry = np.empty(0, dtype=np.int16)
-        self.quiet_frames = 0
-        self.spoke = False
-        self.pauses = []
-        self.unanalyzed_chunks = 0
+    frames: int = 0
+    carry: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int16))
+    quiet_frames: int = 0
+    spoke: bool = False
+    pauses: list = field(default_factory=list)
+    unanalyzed_chunks: int = 0
 
 
 class TtsAudioMonitor:
