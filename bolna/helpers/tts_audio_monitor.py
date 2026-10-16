@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from bolna.constants import AUDIO_STREAM_END_SENTINELS, UNCOMPRESSED_AUDIO_FORMATS
 from bolna.helpers.utils import ulaw_to_pcm
 
 FRAME_MS = 20
@@ -12,15 +13,15 @@ MAX_PAUSES_PER_REPLY = 16
 
 
 def _samples(data, audio_format):
-    """int16 samples of an outgoing audio chunk, or None for a format that can't be read sample by sample (mp3)."""
+    """int16 samples of an outgoing audio chunk, or None for a compressed format (mp3)."""
+    if audio_format not in UNCOMPRESSED_AUDIO_FORMATS:
+        return None
     if audio_format in ("mulaw", "ulaw"):
         return np.frombuffer(ulaw_to_pcm(data), dtype=np.int16)
-    if audio_format in ("pcm", "wav"):
-        if data[:4] == b"RIFF":
-            start = data.find(b"data", 12)
-            data = data[start + 8 :] if start != -1 else b""
-        return np.frombuffer(data[: len(data) - len(data) % 2], dtype=np.int16)
-    return None
+    if data[:4] == b"RIFF":
+        start = data.find(b"data", 12)
+        data = data[start + 8 :] if start != -1 else b""
+    return np.frombuffer(data[: len(data) - len(data) % 2], dtype=np.int16)
 
 
 @dataclass(slots=True)
@@ -42,7 +43,7 @@ class TtsAudioMonitor:
 
     def observe(self, meta_info, data):
         sequence_id = meta_info.get("sequence_id")
-        if sequence_id is None or sequence_id < 0 or not isinstance(data, bytes) or len(data) <= 2:
+        if sequence_id is None or sequence_id < 0 or not isinstance(data, bytes) or data in AUDIO_STREAM_END_SENTINELS:
             return
         reply = self.replies.setdefault(sequence_id, _Reply())
         samples = _samples(data, meta_info.get("format"))
