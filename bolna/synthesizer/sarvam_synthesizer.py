@@ -5,6 +5,7 @@ import os
 import time
 import traceback
 import uuid
+from collections import deque
 
 import aiohttp
 import websockets
@@ -33,9 +34,6 @@ logger = configure_logger(__name__)
 
 
 class SarvamSynthesizer(StreamSynthesizer):
-    # No per-turn cancel: an abandoned, already-flushed turn still ends with its `final`.
-    delivers_eos_after_interruption = True
-
     def __init__(
         self,
         voice_id,
@@ -68,6 +66,9 @@ class SarvamSynthesizer(StreamSynthesizer):
         # Built on first raw-PCM chunk, once the stream header has confirmed the source rate.
         self.stream_resampler = None
         self.stream_resampler_rate = None
+        # (socket, sequence_id) per flush sent. Sarvam has no per-turn cancel, so each flush ends in a
+        # `final`, an abandoned turn's included, and the oldest entry owns the next one.
+        self.flushed_sequences = deque()
         self.api_url = "https://api.sarvam.ai/text-to-speech"
         self.ws_url = f"wss://api.sarvam.ai/text-to-speech/ws?model={model}&send_completion_event=true"
 
@@ -88,6 +89,17 @@ class SarvamSynthesizer(StreamSynthesizer):
 
     def _get_audio_format(self):
         return "wav"
+
+    def _unpack_receiver_message(self, item):
+        return item if isinstance(item, tuple) else (item, {})
+
+    def take_flush_owner(self, socket):
+        """Sequence whose flush this `final` on `socket` answers. Flushes on a replaced socket never get one."""
+        while self.flushed_sequences:
+            flushed_socket, sequence_id = self.flushed_sequences.popleft()
+            if flushed_socket is socket:
+                return sequence_id
+        return None
 
     def _process_audio_chunk(self, chunk):
         """WS chunk. Raw PCM after the stream header is one continuous stream, resampled as such;
@@ -174,6 +186,7 @@ class SarvamSynthesizer(StreamSynthesizer):
             if end_of_llm_stream:
                 self.last_text_sent = True
                 try:
+                    self.flushed_sequences.append((self.websocket, sequence_id))
                     await self._send_json({"type": "flush"})
                 except Exception as e:
                     logger.info(f"Error sending end-of-stream signal: {e}")
@@ -196,8 +209,6 @@ class SarvamSynthesizer(StreamSynthesizer):
                     # still the dead one — once monitor_connection swaps it, this branch is skipped.
                     if self.has_unsettled_turn_on(self.websocket):
                         self.reset_stream_resampler()
-                        # The dead socket owes no more eos; this one settles the open turn.
-                        self.stale_eos_pending = 0
                         yield b"\x00"
                     if self.connection_error:
                         return
@@ -229,8 +240,13 @@ class SarvamSynthesizer(StreamSynthesizer):
 
                 event_type = data.get("data", {}).get("event_type") or data.get("event_type")
                 if event_type == "final":
-                    self.last_text_sent = False
                     self.reset_stream_resampler()
+                    owner = self.take_flush_owner(draining_ws)
+                    if owner is not None and not self.should_synthesize_response(owner):
+                        # An abandoned turn's final: the turn now streaming keeps its flag and its own eos.
+                        yield b"\x00", {"retired_sequence_id": owner}
+                        continue
+                    self.last_text_sent = False
                     yield b"\x00"
                     continue
 
@@ -250,8 +266,6 @@ class SarvamSynthesizer(StreamSynthesizer):
                 if self.has_unsettled_turn_on(draining_ws):
                     logger.error("Sarvam WebSocket dropped mid-turn, ending the turn")
                     self.reset_stream_resampler()
-                    # The dead socket owes no more eos; this one settles the open turn.
-                    self.stale_eos_pending = 0
                     yield b"\x00"
                 await asyncio.sleep(0.05)
             except Exception as e:

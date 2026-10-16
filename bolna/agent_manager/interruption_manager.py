@@ -152,11 +152,8 @@ class InterruptionManager:
         if not self.callee_speaking:
             self.callee_speaking = True
             self.callee_speaking_start_time = time.time()
-            # Not after the previous utterance's own start means it is that utterance's onset, left over.
-            onset_is_current = (
-                user_start_ts_wall is not None
-                and self._last_user_start_ts < user_start_ts_wall <= self.callee_speaking_start_time
-            )
+            # Providers replace the onset at each turn start, so a repeat is a later segment of the same turn.
+            onset_is_current = user_start_ts_wall is not None and user_start_ts_wall <= self.callee_speaking_start_time
             self._last_user_start_ts = user_start_ts_wall if onset_is_current else self.callee_speaking_start_time
             logger.info("User started speaking")
 
@@ -202,7 +199,8 @@ class InterruptionManager:
             self.callee_speaking_start_time = -1  # prevent double-count on duplicate speech-ended signals
 
         if self._open_event is not None and self._open_event.get("user_end_s") is None:
-            self._open_event["user_end_s"] = now_s
+            # Same clock as the event's onset-based start.
+            self._open_event["user_end_s"] = user_stop_ts_wall if user_stop_ts_wall is not None else now_s
             self._open_event = None
 
         logger.info("User speech ended")

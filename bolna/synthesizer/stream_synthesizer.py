@@ -30,15 +30,10 @@ logger = configure_logger(__name__)
 
 # Maximum consecutive connection failures before giving up
 MAX_CONNECTION_FAILURES = 3
-# How long an abandoned turn's eos is still expected; Sarvam's arrived 0.2-2 s after the barge-in.
-STALE_EOS_WINDOW_S = 10
 
 
 class StreamSynthesizer(BaseSynthesizer):
     """Base class for all WebSocket-streaming synthesizers."""
-
-    # Providers without a per-turn cancel still end an abandoned, already-flushed stream with its eos.
-    delivers_eos_after_interruption = False
 
     def __init__(self, stream=True, provider_name="stream", task_manager_instance=None, buffer_size=400, **kwargs):
         super().__init__(
@@ -73,9 +68,6 @@ class StreamSynthesizer(BaseSynthesizer):
         self.current_sequence_chars = 0
         # Socket this turn's text was attempted on; only that socket's loss settles the turn.
         self.current_turn_socket = None
-        # Eos sentinels still owed for abandoned, already-flushed turns; they must not close the next turn.
-        self.stale_eos_pending = 0
-        self.stale_eos_deadline = None
 
     # ------------------------------------------------------------------
     # Subclass hooks (override these)
@@ -169,12 +161,13 @@ class StreamSynthesizer(BaseSynthesizer):
         text = message.get("data")
         self.current_text = text
         self.synthesized_characters += len(text) if text else 0
-        self.current_sequence_chars += len(text) if text else 0
         self.meta_info = copy.deepcopy(meta_info)
         meta_info["text"] = text
 
         # Stamp turn start on first push of a new turn
         self._stamp_turn_start(meta_info)
+        # After the stamp, which may close an abandoned turn and zero the count.
+        self.current_sequence_chars += len(text) if text else 0
 
         # Pre-push hook (e.g. context_id); Cartesia may defer end_of_llm_stream, so read it after.
         self._on_push(meta_info, text)
@@ -250,9 +243,16 @@ class StreamSynthesizer(BaseSynthesizer):
 
             audio, extra_meta = self._unpack_receiver_message(raw_item)
 
-            # An abandoned turn's eos: nothing downstream owns it, and it must not take the next turn's meta.
-            if audio == b"\x00" and self.consume_stale_eos():
-                logger.info(f"{self.provider_name}: dropped an abandoned turn's eos")
+            # An abandoned turn's eos goes out under its own retired sequence, so the downstream guard
+            # settles it, without taking the next turn's meta.
+            if audio == b"\x00" and extra_meta.get("retired_sequence_id") is not None:
+                logger.info(f"{self.provider_name}: eos for abandoned seq={extra_meta['retired_sequence_id']}")
+                retired_meta = {
+                    "sequence_id": extra_meta["retired_sequence_id"],
+                    "end_of_synthesizer_stream": True,
+                    "format": self._get_audio_format(),
+                }
+                yield create_ws_data_packet(audio, retired_meta)
                 continue
 
             # Pop meta_info from the text_queue when available
@@ -355,17 +355,6 @@ class StreamSynthesizer(BaseSynthesizer):
         except Exception:
             return False
 
-    def consume_stale_eos(self):
-        """True for an eos owed by an abandoned turn. Bounded in time: a provider that never sends it
-        must not cost every later turn its own eos."""
-        if not self.stale_eos_pending:
-            return False
-        if time.perf_counter() > self.stale_eos_deadline:
-            self.stale_eos_pending = 0
-            return False
-        self.stale_eos_pending -= 1
-        return True
-
     def call_relative_now_ms(self):
         call_start_ms = getattr(self.task_manager_instance, "conversation_start_init_ts", None)
         return round(time.time() * 1000 - call_start_ms, 2) if isinstance(call_start_ms, (int, float)) else None
@@ -388,9 +377,6 @@ class StreamSynthesizer(BaseSynthesizer):
         if self.current_turn_ttfb is not None:
             entry["first_result_latency_ms"] = round(self.current_turn_ttfb * 1000)
         self._upsert_turn_latency(entry)
-        if self.delivers_eos_after_interruption and self.last_text_sent:
-            self.stale_eos_pending += 1
-            self.stale_eos_deadline = time.perf_counter() + STALE_EOS_WINDOW_S
         logger.info(f"{self.provider_name}: abandoned open turn seq={self.current_sequence_id}")
         self.reset_turn_state()
 
@@ -417,8 +403,6 @@ class StreamSynthesizer(BaseSynthesizer):
                         break
                 else:
                     self.websocket = result
-                    # A new socket carries none of the old one's eos.
-                    self.stale_eos_pending = 0
                     consecutive_failures = 0
             await asyncio.sleep(1)
 

@@ -40,16 +40,22 @@ def test_without_an_onset_the_interim_arrival_is_kept():
     assert im.user_bot_latencies[0]["user_start_s"] == 101.0
 
 
-def test_the_previous_utterances_onset_is_not_reused():
+def test_a_later_segment_of_the_same_provider_turn_keeps_its_onset():
     im = InterruptionManager()
     with at(101.0):
         im.on_user_speech_started(user_start_ts_wall=100.0)
     with at(101.4):
         im.on_user_speech_ended(user_stop_ts_wall=100.4)
-    with at(105.0):
-        im.on_user_speech_started(user_start_ts_wall=100.0)  # stale: the previous turn's onset
+    with at(101.9):
+        im.on_user_speech_started(user_start_ts_wall=100.0)  # second segment, after the speech end
+    with at(102.1):
+        im.on_user_speech_ended(user_stop_ts_wall=100.4)
+    with at(102.5):
+        im.on_agent_speech_started(sequence_id=1)
 
-    assert im._last_user_start_ts == 105.0
+    (entry,) = im.user_bot_latencies
+    assert entry["user_start_s"] == 100.0
+    assert entry["user_end_s"] == 100.4
 
 
 def test_an_onset_in_the_future_is_ignored():
@@ -83,6 +89,18 @@ def test_a_barge_in_event_records_the_onset():
         im.on_interruption_triggered(asr_turn_id=3)
 
     assert im.interruption_events[-1]["user_start_s"] == 100.2
+
+
+def test_a_barge_in_event_ends_at_the_provider_speech_end():
+    im = InterruptionManager()
+    with at(101.0):
+        im.on_user_speech_started(user_start_ts_wall=100.2)
+        im.on_interruption_triggered(asr_turn_id=3)
+    with at(102.0):
+        im.on_user_speech_ended(user_stop_ts_wall=101.1)  # transcript lands after endpointing
+
+    event = im.interruption_events[-1]
+    assert (event["user_start_s"], event["user_end_s"]) == (100.2, 101.1)
 
 
 def test_a_quick_resume_keeps_its_onset_even_when_the_previous_end_was_estimated_late():
