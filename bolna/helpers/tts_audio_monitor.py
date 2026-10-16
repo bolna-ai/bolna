@@ -86,10 +86,9 @@ class TtsAudioMonitor:
         """One record per reply, counting only what the caller heard: a barge-in clears a reply's unplayed tail."""
         cleared_ms = {}
         for mark in chunk_marks:
-            if mark.get("cleared_on_interrupt") and mark.get("sequence_id") is not None:
-                cleared_ms[mark["sequence_id"]] = (
-                    cleared_ms.get(mark["sequence_id"], 0) + (mark.get("duration") or 0) * 1000
-                )
+            sequence_id = mark.get("sequence_id")
+            if mark.get("cleared_on_interrupt") and sequence_id is not None:
+                cleared_ms[sequence_id] = cleared_ms.get(sequence_id, 0) + (mark.get("duration") or 0) * 1000
         replies = []
         for sequence_id, reply in sorted(self.replies.items()):
             audio_ms = reply.frames * FRAME_MS
