@@ -44,6 +44,15 @@ async def _aiter(items):
         yield item
 
 
+def _chunk(parts=(), text=None):
+    return SimpleNamespace(
+        usage_metadata=None,
+        candidates=[SimpleNamespace(content=SimpleNamespace(parts=list(parts)))],
+        response_id="r1",
+        text=text,
+    )
+
+
 class TestResolveToolName:
     def test_an_exact_key_is_returned_unchanged(self):
         assert resolve_tool_name(TOOL, TOOLS_PARAMS) == TOOL
@@ -86,17 +95,13 @@ class TestGemini:
         )
 
     @staticmethod
-    async def _stream(llm, name="lookup_order", args=None):
+    async def _stream(llm, name="lookup_order", args=None, spoken_first=None):
         call = types.FunctionCall(name=name, args={"order_id": "A-100"} if args is None else args, id="call_1")
         part = types.Part(function_call=call, thought_signature=b"signature")
-        chunk = SimpleNamespace(
-            usage_metadata=None,
-            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]))],
-            response_id="r1",
-            text=None,
-        )
+        chunks = [_chunk(text=spoken_first)] if spoken_first else []
+        chunks.append(_chunk(parts=[part]))
         llm.client = MagicMock()
-        llm.client.aio.models.generate_content_stream = AsyncMock(return_value=_aiter([chunk]))
+        llm.client.aio.models.generate_content_stream = AsyncMock(return_value=_aiter(chunks))
         with patch("bolna.llms.gemini_llm.convert_to_request_log"):
             return [c async for c in llm.generate_stream([{"role": "user", "content": "hi"}], meta_info={})]
 
@@ -115,6 +120,12 @@ class TestGemini:
     async def test_the_filler_is_the_configured_tools_own(self):
         filler = next(c for c in await self._stream(self._llm()) if c.function_name)
         assert (filler.data, filler.function_name) == (FILLER, TOOL)
+
+    async def test_text_spoken_before_the_call_suppresses_the_filler(self):
+        chunks = await self._stream(self._llm(), spoken_first="Sure, sending the link now.")
+
+        assert [c.data for c in chunks if not c.is_function_call] == ["Sure, sending the link now."]
+        assert self._payload(chunks).called_fun == TOOL
 
     async def test_the_required_fields_check_runs_against_the_configured_tool(self, caplog):
         with caplog.at_level(logging.WARNING, logger="bolna.llms.gemini_llm"):
