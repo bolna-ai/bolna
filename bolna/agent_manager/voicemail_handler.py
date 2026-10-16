@@ -105,7 +105,7 @@ class VoicemailHandler:
             "type": "voicemail_check",
             "latency_ms": latency_ms,
             "model": self.llm_model,
-            "provider": "openai",  # TODO: Make dynamic based on provider used
+            "provider": "azure",
             "service_tier": metadata.get("service_tier"),
             "llm_host": metadata.get("llm_host"),
             "sequence_id": meta_info.get("sequence_id"),

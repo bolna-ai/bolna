@@ -14,7 +14,11 @@ from bolna.agent_types.graph_agent import GraphAgent
 from bolna.llms import LiteLLM
 from bolna.models import GraphNode
 
-ENV = {"OPENAI_API_KEY": "platform-openai-key"}
+ENV = {
+    "OPENAI_API_KEY": "platform-openai-key",
+    "AZURE_OPENAI_BASE_URL": "https://platform.azure.example",
+    "AZURE_OPENAI_API_KEY": "platform-azure-key",
+}
 PROVIDERS = ["openai", "azure", "google", "groq"]
 
 
@@ -417,7 +421,7 @@ def _real_agent(**overrides):
         "nodes": [{"id": "start", "prompt": "hi", "edges": []}],
     }
     config.update(overrides)
-    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True):
+    with patch.dict(os.environ, {**ENV, "OPENAI_API_KEY": "sk-test"}, clear=True):
         yield GraphAgent(config)
 
 

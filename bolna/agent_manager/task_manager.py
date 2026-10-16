@@ -506,6 +506,7 @@ class TaskManager(BaseManager):
         self._hangup_cancelled = False
         self._end_call_tool_call_id = None
         self._end_call_hangup_task = None
+        self._trunk_transfer_refused = False
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
         self._turn_eos_forwarded = False
@@ -1548,6 +1549,8 @@ class TaskManager(BaseManager):
                     input_kwargs["ws_context_data"] = self.context_data
                     input_kwargs["agent_config"] = {"tasks": [self.task_config]}
             self.tools["input"] = input_handler_class(**input_kwargs)
+            if isinstance(self.tools["input"], FreeSwitchInputHandler):
+                self._attach_freeswitch_input()
             if (
                 not turn_based_conversation
                 and self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_INPUT_TELEPHONY_HANDLERS
@@ -1560,6 +1563,11 @@ class TaskManager(BaseManager):
             # BaseException") and hides which provider was unsupported — this exact failure
             # masked the missing-freeswitch-handler case when a PyPI bolna shadowed the branch
             raise ValueError(f"Unsupported input provider: {self.task_config['tools_config']['input']['provider']}")
+
+    def _attach_freeswitch_input(self):
+        """/process_transfer needs a call id; the trunk backend keys a transfer on execution_id, so the run id stands in."""
+        recipient_data = (self.context_data or {}).get("recipient_data") or {}
+        self.tools["input"].call_sid = recipient_data.get("call_sid") or self.run_id
 
     async def __await_stream_sid(self, timeout=10.0):
         """Wait for the carrier's stream id and hand it to the output handler.
@@ -4869,6 +4877,22 @@ class TaskManager(BaseManager):
             self.hangup_triggered_at = time.time()
         return
 
+    def _is_trunk_call(self) -> bool:
+        return (self.transfer_call_params or {}).get("provider") == TelephonyProvider.TRUNK.value
+
+    def _transfer_provider(self) -> str:
+        """The provider /process_transfer dispatches on; a trunk call's io_provider is only its audio transport."""
+        return TelephonyProvider.TRUNK.value if self._is_trunk_call() else self.tools["input"].io_provider
+
+    @staticmethod
+    def _transfer_unsettled(body: str) -> bool:
+        """The backend may have dialled the target before failing, so the media node settles the call."""
+        try:
+            parsed = json.loads(body)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(parsed, dict) and parsed.get("unsettled") is True
+
     async def _execute_transfer_call_webhook(self, called_fun, url, param, resp, meta_info):
         """POST the transfer payload to the telephony webhook and record transfer_start/end.
 
@@ -4885,7 +4909,7 @@ class TaskManager(BaseManager):
         call_transfer_number = None
         payload = {
             "call_sid": call_sid,
-            "provider": self.tools["input"].io_provider,
+            "provider": self._transfer_provider(),
             "stream_sid": self.stream_sid,
             "from_number": from_number,
             "execution_id": self.run_id,
@@ -4925,7 +4949,7 @@ class TaskManager(BaseManager):
                 "turn_id": meta_info.get("turn_id"),
                 "sequence_id": meta_info.get("sequence_id"),
                 "transfer_number": payload.get("call_transfer_number"),
-                "provider": self.tools["input"].io_provider,
+                "provider": self._transfer_provider(),
             }
         )
 
@@ -5037,6 +5061,9 @@ class TaskManager(BaseManager):
                         status_code=response.status,
                         content_type=response.headers.get("Content-Type"),
                     )
+                    if self._is_trunk_call() and response.status >= 400 and not self._transfer_unsettled(response_text):
+                        # Nothing was dialled, so no ringback holds the caller and the watchdog takes over again.
+                        self._trunk_transfer_refused = True
                     self.transfer_call_events.append(
                         {
                             "type": "transfer_end",
@@ -8140,6 +8167,10 @@ class TaskManager(BaseManager):
             logger.info("Silence repeat generation cancelled by interruption")
             return
 
+    def _trunk_transfer_ringing(self) -> bool:
+        """A trunk transfer rings with the fork still attached; the media node ends the call if it fails."""
+        return self.has_transfer and self._is_trunk_call() and not self._trunk_transfer_refused
+
     def _should_stall_hangup(self, audio_playing, time_since_last_spoken_ai_word, time_since_user_last_spoke):
         """Hang up when the call has made no forward progress at all: no audio playing and both
         sides silent past the hard cap. Runs above the audio/pipeline gate so it still applies
@@ -8202,11 +8233,12 @@ class TaskManager(BaseManager):
 
     async def __check_for_completion(self):
         logger.info(f"Starting task to check for completion")
-        # Exotel and sip-trunk have no carrier-side stream timeout, so this is their only cap.
+        # Exotel, sip-trunk and trunk have no carrier-side stream timeout, so this is their only cap.
         # A chat session is not a call and is never capped.
         is_call = (
             self.is_web_based_call
             or self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_INPUT_TELEPHONY_HANDLERS
+            or self._is_trunk_call()
         )
         call_terminate = int((self.task_config.get("task_config") or {}).get("call_terminate") or 0) if is_call else 0
         while True:
@@ -8242,6 +8274,10 @@ class TaskManager(BaseManager):
                         logger.info(
                             f"Waiting for hangup mark event ({time_since_hangup:.1f}s / {self.hangup_mark_event_timeout}s)"
                         )
+                continue
+
+            # Nothing below may fire mid-transfer: no synthetic turn over the ringback, no hangup.
+            if self._trunk_transfer_ringing():
                 continue
 
             # An in-flight LLM task (including a tool-call API request + follow-up generation
