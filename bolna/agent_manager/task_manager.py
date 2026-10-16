@@ -131,7 +131,6 @@ from bolna.helpers.utils import (
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.tts_audio_monitor import TtsAudioMonitor
-from .. import __version__ as BOLNA_VERSION
 from ..helpers.observable_variable import ObservableVariable
 from bolna.models import S2SConfig, WebSearchConfig, tts_render_settings
 from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
@@ -9558,7 +9557,6 @@ class TaskManager(BaseManager):
                     "transcriber_error_events": list(self.transcriber_error_events),
                     "transcriber_reconnect_count": getattr(self.tools.get("transcriber"), "reconnect_count", 0),
                     "blocked_audio_events": list(self.blocked_audio_events),
-                    "bolna_version": BOLNA_VERSION,
                     "tts_audio_quality": self.__tts_audio_quality(output["latency_dict"]["synthesizer_chunk_marks"]),
                     "welcome_message_played_ts": (
                         round(
