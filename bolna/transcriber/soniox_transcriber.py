@@ -149,9 +149,8 @@ class SonioxTranscriber(BaseTranscriber):
         return context or None
 
     def _build_config(self):
-        """First WebSocket frame: auth + stream config (Soniox carries the api_key here, not a header)."""
+        """First WebSocket frame: stream config (the api_key rides in the connect-time header)."""
         return build_soniox_config(
-            self.api_key,
             self.model,
             self.soniox_audio_format,
             self.sampling_rate,
@@ -173,7 +172,11 @@ class SonioxTranscriber(BaseTranscriber):
             ws_url = self.get_soniox_ws_url()
             logger.info(f"Connecting to Soniox websocket: {ws_url}")
             soniox_ws = await asyncio.wait_for(
-                websockets.connect(ws_url, ssl=get_ssl_context(ws_url)),
+                websockets.connect(
+                    ws_url,
+                    additional_headers={"Authorization": f"Bearer {self.api_key}"},
+                    ssl=get_ssl_context(ws_url),
+                ),
                 timeout=10.0,
             )
             await soniox_ws.send(json.dumps(self._build_config()))
