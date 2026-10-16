@@ -336,6 +336,8 @@ class OpenAITranscriber(BaseTranscriber):
                         self._turn_start_epoch_ms = timestamp_ms()
                         self.current_turn_interim_details = []
                         self.is_transcript_sent_for_processing = False
+                        # Speech onset on the same clock as the commit time used for the speech end.
+                        self.meta_info["user_start_ts_wall"] = self.audio_submission_time
                         logger.info(f"Speech detected, starting turn {self.current_turn_id}")
                         await self.push_to_transcriber_queue(create_ws_data_packet("speech_started", self.meta_info))
                 else:
@@ -477,6 +479,7 @@ class OpenAITranscriber(BaseTranscriber):
                         self._final_transcript_event.clear()
                         self._audio_appended_since_commit = False
                         self.audio_submission_time = time.time()
+                        self.meta_info["user_start_ts_wall"] = self.audio_submission_time
                         logger.info(f"Speech detected (server VAD), starting turn {self.current_turn_id}")
                         yield create_ws_data_packet("speech_started", self.meta_info)
 
