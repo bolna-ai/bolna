@@ -12,5 +12,6 @@ from .openai_transcriber import OpenAITranscriber
 from .soniox_transcriber import SonioxTranscriber
 from .gemini_transcriber import GeminiTranscriber
 from .realtime_transcriber import RealtimeTranscriber
+from .funasr_transcriber import FunASRTranscriber
 from .transcriber_pool import TranscriberPool
 from bolna.lid import LIDProvider, SarvamLID, SonioxLID

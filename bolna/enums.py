@@ -94,6 +94,7 @@ class TranscriberProvider(str, Enum):
     GEMINI = "gemini"
     # Our self-hosted ASR, over the OpenAI Realtime transcription protocol.
     BOLNA = "bolna"
+    FUNASR = "funasr"
 
     @classmethod
     def all_values(cls):
