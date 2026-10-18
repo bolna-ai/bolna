@@ -193,9 +193,13 @@ class BaseSynthesizer:
         splitters = (".", ",", "?", "!", ";", ":", "—", "-", "(", ")", "[", "]", "}", " ")
 
         buffer = ""
-        for char in text:
+        for i, char in enumerate(text):
             buffer += char
             if char in splitters:
+                # a splitter inside a token (1,499.50, 10:30, a.b@c.com) is not a boundary
+                next_char = text[i + 1] if i + 1 < len(text) else ""
+                if char != " " and next_char and not next_char.isspace():
+                    continue
                 if buffer != " ":
                     yield buffer.strip() + " "
                 buffer = ""
