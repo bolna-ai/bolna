@@ -4789,6 +4789,10 @@ class TaskManager(BaseManager):
         if self._hangup_cancelled:
             logger.info("end node: hangup was cancelled by a barge-in, not arming the teardown")
             return
+        # The playout wait also returns when the caller hangs up mid-reply; that hangup is theirs, not ours.
+        if self._caller_disconnected():
+            logger.info("end node: caller hung up during the closing reply, not arming the teardown")
+            return
         logger.info("end node: closing reply delivered, ending the call")
         self.__arm_end_call_teardown()
 
