@@ -89,7 +89,7 @@ from bolna.enums import (
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
-from bolna.helpers.language_switcher import LanguageSwitcher
+from bolna.helpers.jev_language_switcher import build_language_switcher
 from bolna.transcriber.transcriber_pool import TranscriberPool
 from bolna.synthesizer.synthesizer_pool import SynthesizerPool
 from bolna.helpers.utils import (
@@ -1870,8 +1870,8 @@ class TaskManager(BaseManager):
                         lid_config["sarvam_model"] = lid_model
                     switch_enabled = self.__language_switch_enabled()
                     if switch_enabled:
-                        # language_switch_llm (from the azure flag) overrides the model; absent → default.
-                        self.language_switcher = LanguageSwitcher(
+                        # language_switch_llm (azure or jev flag) overrides the model; absent → default.
+                        self.language_switcher = build_language_switcher(
                             available_labels=list(transcribers.keys()),
                             run_id=self.run_id,
                             model=self.task_config.get("tools_config", {}).get("language_switch_llm"),
@@ -9736,6 +9736,12 @@ class TaskManager(BaseManager):
                             await aux_llm.close()
                         except Exception as e:
                             logger.error(f"Error closing language detector LLM: {e}")
+                close_switcher = getattr(self.language_switcher, "aclose", None)
+                if close_switcher is not None:
+                    try:
+                        await close_switcher()
+                    except Exception as e:
+                        logger.error(f"Error closing language switcher: {e}")
                 for obs in self.observable_variables.values():
                     obs._observers.clear()
                 self.observable_variables.clear()
