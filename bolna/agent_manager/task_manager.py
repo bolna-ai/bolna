@@ -6673,6 +6673,16 @@ class TaskManager(BaseManager):
             detector_idle_s = pool.lid_buffer_age()
             if detector_idle_s is None or detector_idle_s < settle_ms / 1000:
                 await asyncio.sleep(settle_ms / 1000)
+                # Call cleanup can run during the settle and clear conversation_history, which is read below.
+                if (
+                    self.conversation_ended
+                    or self.conversation_history is None
+                    or self._should_ignore_transcriber_input()
+                ):
+                    logger.info(
+                        "LanguageSwitcher: hangup/transfer/teardown in progress — abandoning switch (post-settle)"
+                    )
+                    return None
 
         buffered_max_segment_s = pool.lid_buffer_max_segment_seconds()
         # Peek confidence + segments before take_lid_transcript() drains the buffer.
@@ -6829,7 +6839,7 @@ class TaskManager(BaseManager):
             emit_lid_decision("no_decision")
             return
         # decide() can take seconds; a hangup/transfer may have started meanwhile — re-check
-        if self.conversation_ended or self._should_ignore_transcriber_input():
+        if self.conversation_ended or self.conversation_history is None or self._should_ignore_transcriber_input():
             logger.info("LanguageSwitcher: hangup/transfer/teardown in progress — abandoning switch (post-decide)")
             emit_lid_decision("gated:hangup")
             return None
@@ -6995,7 +7005,11 @@ class TaskManager(BaseManager):
                     await asyncio.sleep(audio_gap_s)
                     # The gap is an await like any other: teardown may have started during it,
                     # and a switch applied now would flip the pools under a goodbye.
-                    if self.conversation_ended or self._should_ignore_transcriber_input():
+                    if (
+                        self.conversation_ended
+                        or self.conversation_history is None
+                        or self._should_ignore_transcriber_input()
+                    ):
                         logger.info("LanguageSwitcher: hangup/transfer during audio gap — abandoning switch")
                         emit_lid_decision("gated:hangup", inflight_activity=activity)
                         return None
@@ -7015,6 +7029,9 @@ class TaskManager(BaseManager):
         )
         await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
         emit_lid_decision("switched", switched_to=target, context_note=context_note, inflight_activity=activity)
+        if self.conversation_history is None:
+            # Call cleanup ran during the switch: no history to correct and no caller left to answer.
+            return None
 
         # Put the caller's actual words into conversation history. Turn-boundary path:
         # the locked-pool ASR garbled this turn, so replace it with the unbiased
