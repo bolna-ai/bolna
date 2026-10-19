@@ -503,7 +503,7 @@ def update_prompt_with_context(prompt, context_data, lang_code=None):
     # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
     recipient_data = {k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS}
     if lang_code and recipient_data.get(lang_code):
-        recipient_data = recipient_data.update(recipient_data[lang_code])
+        recipient_data.update(recipient_data[lang_code])
     return render_prompt(prompt, recipient_data)
 
 
