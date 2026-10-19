@@ -219,6 +219,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         provider = kwargs.get("provider")
         self_hosted = provider in (LLMProvider.CUSTOM.value, LLMProvider.BOLNA.value)
         is_custom = provider == LLMProvider.CUSTOM.value
+        self._self_hosted = self_hosted
         if self_hosted:
             if kwargs.get("extra_body"):
                 self.model_args["extra_body"] = kwargs["extra_body"]
@@ -313,6 +314,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         if self.trigger_function_call:
             _tools = self._parse_tools(tools)
+            # Self-hosted servers still render offered tools under tool_choice "none" and may stream a call as text.
+            if self._self_hosted and tool_choice == "none":
+                _tools = []
             if _tools:  # omit tools when none are visible this turn (an empty array is a 400)
                 model_args["tools"] = _tools
                 model_args["tool_choice"] = tool_choice or "auto"

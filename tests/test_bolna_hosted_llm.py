@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bolna.agent_types.graph_agent import GraphAgent
+from bolna.constants import END_CALL_TOOL_DEFINITION
 from bolna.llms.azure_llm import AzureLLM
 from bolna.llms.openai_llm import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -19,6 +20,15 @@ MESSAGES = [{"role": "user", "content": "hi"}]
 
 def _hosted_llm(**kwargs):
     return OpenAiLLM(model=MODEL, provider="bolna", base_url=BASE_URL, llm_key=HOSTED_KEY, **kwargs)
+
+
+async def _sent_request(llm, tool_choice=None):
+    llm.async_client = MagicMock()
+    llm.async_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("stop"))
+    with pytest.raises(RuntimeError):
+        async for _ in llm._generate_stream_chat(MESSAGES, tool_choice=tool_choice):
+            pass
+    return llm.async_client.chat.completions.create.call_args.kwargs
 
 
 def test_provider_runs_on_openai_compatible_client():
@@ -38,15 +48,31 @@ class TestClient:
         assert _hosted_llm(use_responses_api=True).use_responses_api is False
 
     async def test_request_carries_no_openai_only_fields(self):
-        llm = _hosted_llm()
-        llm.async_client = MagicMock()
-        llm.async_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("stop"))
-        with pytest.raises(RuntimeError):
-            async for _ in llm._generate_stream_chat(MESSAGES):
-                pass
-        sent = llm.async_client.chat.completions.create.call_args.kwargs
+        sent = await _sent_request(_hosted_llm())
         assert sent["model"] == MODEL
         assert "service_tier" not in sent
+
+
+@pytest.mark.parametrize(
+    "provider, tool_choice, offers_tools",
+    [
+        ("bolna", "none", False),
+        ("custom", "none", False),
+        ("bolna", None, True),
+        ("openai", "none", True),
+    ],
+)
+async def test_tool_choice_none_offers_no_tools_to_a_self_hosted_server(provider, tool_choice, offers_tools):
+    llm = OpenAiLLM(
+        model=MODEL,
+        provider=provider,
+        base_url=BASE_URL,
+        llm_key=HOSTED_KEY,
+        api_tools={"tools": [END_CALL_TOOL_DEFINITION], "tools_params": {"end_call": {}}},
+    )
+    sent = await _sent_request(llm, tool_choice)
+    assert ("tools" in sent) is offers_tools
+    assert ("tool_choice" in sent) is offers_tools
 
 
 def test_graph_agent_keeps_routing_and_hops_off_the_hosted_endpoint(monkeypatch):
