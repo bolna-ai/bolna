@@ -54,15 +54,15 @@ class TestClient:
 
 
 @pytest.mark.parametrize(
-    "provider, tool_choice, offers_tools",
+    "provider, tool_choice, sent_tool_choice",
     [
-        ("bolna", "none", False),
-        ("custom", "none", False),
-        ("bolna", None, True),
-        ("openai", "none", True),
+        ("bolna", "none", None),
+        ("bolna", None, "auto"),
+        ("custom", "none", "none"),
+        ("openai", "none", "none"),
     ],
 )
-async def test_tool_choice_none_offers_no_tools_to_a_self_hosted_server(provider, tool_choice, offers_tools):
+async def test_tool_choice_none_offers_the_hosted_model_no_tools(provider, tool_choice, sent_tool_choice):
     llm = OpenAiLLM(
         model=MODEL,
         provider=provider,
@@ -71,8 +71,8 @@ async def test_tool_choice_none_offers_no_tools_to_a_self_hosted_server(provider
         api_tools={"tools": [END_CALL_TOOL_DEFINITION], "tools_params": {"end_call": {}}},
     )
     sent = await _sent_request(llm, tool_choice)
-    assert ("tools" in sent) is offers_tools
-    assert ("tool_choice" in sent) is offers_tools
+    assert sent.get("tool_choice") == sent_tool_choice
+    assert ("tools" in sent) is (sent_tool_choice is not None)
 
 
 def test_graph_agent_keeps_routing_and_hops_off_the_hosted_endpoint(monkeypatch):

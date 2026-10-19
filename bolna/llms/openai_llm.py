@@ -178,6 +178,7 @@ class OpenAIWSConnection:
 class OpenAiLLM(OpenAICompatibleLLM):
     _base_url = None
     _base_url_validated = False
+    _provider = None
 
     def __init__(
         self,
@@ -219,7 +220,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         provider = kwargs.get("provider")
         self_hosted = provider in (LLMProvider.CUSTOM.value, LLMProvider.BOLNA.value)
         is_custom = provider == LLMProvider.CUSTOM.value
-        self._self_hosted = self_hosted
+        self._provider = provider
         if self_hosted:
             if kwargs.get("extra_body"):
                 self.model_args["extra_body"] = kwargs["extra_body"]
@@ -312,11 +313,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
         if not is_reasoning_model(self.model):
             model_args["stop"] = ["User:"]
 
-        if self.trigger_function_call:
+        # The Bolna-hosted server renders offered tools even under tool_choice "none", and its model streams the call as text.
+        if self.trigger_function_call and not (self._provider == LLMProvider.BOLNA.value and tool_choice == "none"):
             _tools = self._parse_tools(tools)
-            # Self-hosted servers still render offered tools under tool_choice "none" and may stream a call as text.
-            if self._self_hosted and tool_choice == "none":
-                _tools = []
             if _tools:  # omit tools when none are visible this turn (an empty array is a 400)
                 model_args["tools"] = _tools
                 model_args["tool_choice"] = tool_choice or "auto"
