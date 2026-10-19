@@ -1995,7 +1995,7 @@ class TaskManager(BaseManager):
 
                     if self.turn_based_conversation:
                         cfg["audio_format"] = "mp3"
-                        cfg["stream"] = True if self.enforce_streaming else False
+                    cfg["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
 
                     cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
                     leg_kwargs = self.__pool_leg_kwargs(synthesizer_kwargs, "synthesizer_key", provider_name)
@@ -2041,9 +2041,7 @@ class TaskManager(BaseManager):
             self.synthesizer_render_settings = tts_render_settings(self.synthesizer_provider, provider_config)
             if self.turn_based_conversation:
                 synth_config["audio_format"] = "mp3"  # Hard code mp3 if we're connected through dashboard
-                synth_config["stream"] = (
-                    True if self.enforce_streaming else False
-                )  # Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
+            synth_config["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
 
             # Telephony providers expect mulaw@8000Hz — force use_mulaw regardless of the
             # server-side kwarg (it defaults to False and only covers some synths), mirroring
@@ -9237,7 +9235,7 @@ class TaskManager(BaseManager):
                             traceback.print_exc()
 
                     self.output_task = asyncio.create_task(self.__process_output_loop())
-                    if not self.turn_based_conversation or self.enforce_streaming:
+                    if streams_pipeline(self.turn_based_conversation, self.enforce_streaming):
                         self.hangup_task = asyncio.create_task(self.__check_for_completion())
 
                         if self.should_backchannel:
