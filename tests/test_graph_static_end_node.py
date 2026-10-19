@@ -130,6 +130,20 @@ async def test_a_long_clip_plays_out_after_the_generation_returns():
     tm.process_call_hangup.assert_awaited_once()
 
 
+async def test_a_caller_hanging_up_during_the_clip_is_not_recorded_as_our_hangup():
+    tm = _tm()
+    tm.hangup_detail = None
+    tm._synthesize = AsyncMock()
+
+    await tm._TaskManager__play_static_clip({"meta_info": {}}, ends_call=True)
+    tm.tools["input"].input_stream_ended = True
+    tm._turn_audio_flushed.set()
+    await asyncio.sleep(0.1)
+
+    tm.process_call_hangup.assert_not_awaited()
+    assert tm.hangup_detail is None
+
+
 async def test_text_chat_hangs_up_without_waiting_on_audio():
     tm = _tm(turn_based=True)
     tm._synthesize = AsyncMock()
