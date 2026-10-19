@@ -793,7 +793,7 @@ class TaskManager(BaseManager):
             if self.check_user_online_message_config and self.context_data:
                 if isinstance(self.check_user_online_message_config, dict):
                     self.check_user_online_message_config = {
-                        lang: update_prompt_with_context(msg, self.context_data)
+                        lang: update_prompt_with_context(msg, self.context_data, lang)
                         for lang, msg in self.check_user_online_message_config.items()
                     }
                 else:
@@ -2274,6 +2274,7 @@ class TaskManager(BaseManager):
                 self.context_data,
                 self.timezone,
                 self.is_web_based_call,
+                self.language
             )
 
             notes = ""
@@ -2302,6 +2303,7 @@ class TaskManager(BaseManager):
                     self.context_data,
                     self.timezone,
                     self.is_web_based_call,
+                    lang_code
                 )
                 notes = ""
                 if self._is_conversation_task() and self.use_fillers:

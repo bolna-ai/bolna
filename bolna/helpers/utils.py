@@ -497,11 +497,13 @@ def enrich_context_with_time_variables(context_data, timezone):
         recipient_data["current_year"] = now.year
 
 
-def update_prompt_with_context(prompt, context_data):
+def update_prompt_with_context(prompt, context_data, lang_code=None):
     if not context_data or not isinstance(context_data.get("recipient_data"), dict):
         return render_prompt(prompt, {})
     # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
     recipient_data = {k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS}
+    if lang_code and recipient_data.get(lang_code):
+        recipient_data = recipient_data.update(recipient_data[lang_code])
     return render_prompt(prompt, recipient_data)
 
 
@@ -1312,7 +1314,7 @@ def clean_gemini_schema(schema):
 
 
 def structure_system_prompt(
-    system_prompt, run_id, assistant_id, call_sid, context_data, timezone, is_web_based_call=False
+    system_prompt, run_id, assistant_id, call_sid, context_data, timezone, is_web_based_call=False, language=None
 ):
     final_prompt = system_prompt
     default_variables = {"agent_id": assistant_id, "execution_id": run_id}
