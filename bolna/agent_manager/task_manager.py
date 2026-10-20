@@ -5350,9 +5350,6 @@ class TaskManager(BaseManager):
         similarity = normalized_similarity(staged["content"], previous_text)
         if similarity < DUPLICATE_RESPONSE_SIMILARITY:
             return False
-        # Only a re-finalized utterance is a duplicate: the same reply to a *new* user turn is a
-        # real answer, and suppressing it leaves silence and no transcript line. Unknown → unchanged.
-        current_user_input = staged.get("user_input")
         # A caller who spoke with nothing in flight has heard or cut off the previous reply, so an
         # identical answer is a real one, even when their words repeat ("hello?", "repeat please").
         if staged.get("answers_fresh_turn"):
@@ -5365,6 +5362,9 @@ class TaskManager(BaseManager):
                 similarity,
             )
             return False
+        # Only a re-finalized utterance is a duplicate: the same reply to a *new* user turn is a
+        # real answer, and suppressing it leaves silence and no transcript line. Unknown → unchanged.
+        current_user_input = staged.get("user_input")
         if current_user_input and self._last_spoken_user_input:
             if not restates_previous_text(
                 self._last_spoken_user_input, current_user_input, DUPLICATE_RESPONSE_SIMILARITY
