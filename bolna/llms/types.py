@@ -31,6 +31,13 @@ class LatencyData(BaseModel):
 
 
 class FunctionCallPayload(BaseModel):
+    """A tool invocation with separate execution settings and model arguments.
+
+    Put model-generated values in ``arguments``, including names such as ``url``.
+    Top-level fields come from tool configuration or call bookkeeping. Consumers
+    constructing this payload directly must use the mapping instead of extra fields.
+    """
+
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
     url: Optional[str] = None

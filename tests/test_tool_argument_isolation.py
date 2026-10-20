@@ -143,19 +143,15 @@ async def test_model_arguments_cannot_replace_execution_fields(provider, field):
     assert not payload.model_extra
 
 
-@pytest.mark.parametrize("provider", PROVIDERS)
-@pytest.mark.parametrize("method", ["POST", "GET"])
-@pytest.mark.parametrize("graph", [False, True])
-@pytest.mark.parametrize("template", ["markers", "legacy"])
-async def test_only_configured_endpoint_receives_credentials_and_arguments(
-    provider, template, graph, method, monkeypatch
-):
+@pytest.fixture
+async def tool_endpoints(monkeypatch):
     received = []
 
     async def record(request):
         received.append(
             (
                 request.method,
+                request.host,
                 request.path,
                 request.headers.get("Authorization"),
                 request.headers.get("X-Configured"),
@@ -167,61 +163,113 @@ async def test_only_configured_endpoint_receives_credentials_and_arguments(
     app = web.Application()
     app.router.add_route("*", "/{path}", record)
     runner = web.AppRunner(app)
+    other_app = web.Application()
+    other_app.router.add_route("*", "/{path}", record)
+    other_runner = web.AppRunner(other_app)
     await runner.setup()
     try:
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        base = f"http://127.0.0.1:{runner.addresses[0][1]}"
-        args = {**COLLISIONS, "url": base + "/caller-link"}
-        param = (
-            {key: {"$var": key} for key in args}
-            if template == "markers"
-            else {key: f"%({key})s" for key in args if isinstance(args[key], str)}
-        )
-        config = {
-            "url": base + "/configured",
-            "method": method,
-            "param": param,
-            "api_token": "Bearer dummy-token",
-            "headers": {"X-Configured": "yes"},
-        }
-        payload = await build_payload(provider, config, args)
-        history = ConversationHistory()
-        history.append_user("save this")
-        tm = SimpleNamespace(
-            run_id="local-test",
-            kwargs={},
-            hangup_triggered=False,
-            conversation_ended=False,
-            conversation_config={},
-            conversation_history=history,
-            llm_config={"model": "offline"},
-            wait_for_current_message=AsyncMock(),
-            _caller_disconnected=lambda: False,
-            _TaskManager__is_graph_agent=lambda: graph,
-            context_data={},
-            tools={"llm_agent": SimpleNamespace(context_data={})},
-            _extract_api_call_runtime_args=TaskManager._extract_api_call_runtime_args,
-            _start_api_call_detail=MagicMock(return_value={}),
-            _finalize_api_call_detail=MagicMock(),
-            _spawn_followup_meta_info=lambda value: dict(value),
-            _TaskManager__do_llm_generation=AsyncMock(),
-        )
+        configured_site = web.TCPSite(runner, "127.0.0.1", 0)
+        await configured_site.start()
+        configured_host = f"127.0.0.1:{runner.addresses[0][1]}"
+        await other_runner.setup()
+        other_site = web.TCPSite(other_runner, "127.0.0.1", 0)
+        await other_site.start()
+        other_host = f"127.0.0.1:{other_runner.addresses[0][1]}"
+        assert configured_host != other_host
         monkeypatch.setattr("bolna.helpers.function_calling_helpers._ALLOWLISTED_HOSTS", frozenset({"127.0.0.1"}))
-        await TaskManager._TaskManager__execute_function_call(tm, next_step="synthesizer", **payload.model_dump())
-        expected = {key: args[key] for key in param}
-        # execution_id is bound to this call rather than trusting the generated value.
-        expected["execution_id"] = tm.run_id
-        if method == "GET":
-            expected = {key: str(value) for key, value in expected.items()}
-        assert received == [(method, "/configured", "Bearer dummy-token", "yes", expected)]
-        assert tm._start_api_call_detail.call_args.kwargs["url"] == config["url"]
-        assert tm._TaskManager__do_llm_generation.await_args.args[1]["turn_id"] == META["turn_id"]
-        assert history.get_copy()[-1]["tool_call_id"] == payload.tool_call_id
-        if graph:
-            assert tm.context_data == tm.tools["llm_agent"].context_data == {"ok": True}
+        yield SimpleNamespace(
+            configured_url=f"http://{configured_host}/configured",
+            configured_host=configured_host,
+            argument_url=f"http://{other_host}/caller-link",
+            received=received,
+        )
     finally:
+        await other_runner.cleanup()
         await runner.cleanup()
+
+
+def request_config(endpoints, template, method):
+    args = {**COLLISIONS, "url": endpoints.argument_url}
+    param = (
+        {key: {"$var": key} for key in args}
+        if template == "markers"
+        else {key: f"%({key})s" for key in args if isinstance(args[key], str)}
+    )
+    return args, {
+        "url": endpoints.configured_url,
+        "method": method,
+        "param": param,
+        "api_token": "Bearer dummy-token",
+        "headers": {"X-Configured": "yes"},
+    }
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+@pytest.mark.parametrize("method", ["POST", "GET"])
+@pytest.mark.parametrize("graph", [False, True])
+@pytest.mark.parametrize("template", ["markers", "legacy"])
+async def test_only_configured_endpoint_receives_credentials_and_arguments(
+    provider, template, graph, method, tool_endpoints
+):
+    args, config = request_config(tool_endpoints, template, method)
+    payload = await build_payload(provider, config, args)
+    history = ConversationHistory()
+    history.append_user("save this")
+    tm = SimpleNamespace(
+        run_id="local-test",
+        kwargs={},
+        hangup_triggered=False,
+        conversation_ended=False,
+        conversation_config={},
+        conversation_history=history,
+        llm_config={"model": "offline"},
+        wait_for_current_message=AsyncMock(),
+        _caller_disconnected=lambda: False,
+        _TaskManager__is_graph_agent=lambda: graph,
+        context_data={},
+        tools={"llm_agent": SimpleNamespace(context_data={})},
+        _extract_api_call_runtime_args=TaskManager._extract_api_call_runtime_args,
+        _start_api_call_detail=MagicMock(return_value={}),
+        _finalize_api_call_detail=MagicMock(),
+        _spawn_followup_meta_info=lambda value: dict(value),
+        _TaskManager__do_llm_generation=AsyncMock(),
+    )
+    await TaskManager._TaskManager__execute_function_call(tm, next_step="synthesizer", **payload.model_dump())
+    expected = {key: args[key] for key in config["param"]}
+    # execution_id is bound to this call rather than trusting the generated value.
+    expected["execution_id"] = tm.run_id
+    if method == "GET":
+        expected = {key: str(value) for key, value in expected.items()}
+    assert tool_endpoints.received == [
+        (method, tool_endpoints.configured_host, "/configured", "Bearer dummy-token", "yes", expected)
+    ]
+    assert payload.arguments == args
+    assert json.loads(history.get_copy()[-2]["tool_calls"][0]["function"]["arguments"]) == args
+    assert tm._start_api_call_detail.call_args.kwargs["url"] == config["url"]
+    assert tm._TaskManager__do_llm_generation.await_args.args[1]["turn_id"] == META["turn_id"]
+    assert history.get_copy()[-1]["tool_call_id"] == payload.tool_call_id
+    if graph:
+        assert tm.context_data == tm.tools["llm_agent"].context_data == {"ok": True}
+
+
+@pytest.mark.parametrize("method", ["POST", "GET"])
+@pytest.mark.parametrize("template", ["markers", "legacy"])
+async def test_speech_to_speech_caller_keeps_arguments_separate_from_http_settings(method, template, tool_endpoints):
+    args, config = request_config(tool_endpoints, template, method)
+    tm = SimpleNamespace(
+        run_id="local-test",
+        _start_api_call_detail=MagicMock(return_value={}),
+        _finalize_api_call_detail=MagicMock(),
+    )
+    result = await TaskManager._s2s_call_api_tool(tm, TOOL, args, config, dict(META))
+    assert json.loads(result) == {"ok": True}
+    expected = {key: args[key] for key in config["param"]}
+    if method == "GET":
+        expected = {key: str(value) for key, value in expected.items()}
+    assert tool_endpoints.received == [
+        (method, tool_endpoints.configured_host, "/configured", "Bearer dummy-token", "yes", expected)
+    ]
+    assert tm._finalize_api_call_detail.call_args.kwargs["status_code"] == 200
 
 
 @pytest.mark.parametrize(
