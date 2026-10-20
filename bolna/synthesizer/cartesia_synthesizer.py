@@ -228,6 +228,19 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 response = await self.websocket.recv()
                 data = json.loads(response)
 
+                error = data.get("error")
+                if data.get("type") == "error" and self.pronunciation_dict_id and "pronunciation" in str(error).lower():
+                    # e.g. deleted after the save: later messages go without it, and this turn ends on the frame's done.
+                    logger.error(f"Cartesia rejected pronunciation dictionary {self.pronunciation_dict_id}: {error}")
+                    if self.task_manager_instance is not None:
+                        self.task_manager_instance.record_non_fatal_synthesizer_error(
+                            {
+                                "error_type": "pronunciation_dictionary_rejected",
+                                "error": error,
+                                "dictionaries": [self.pronunciation_dict_id],
+                            }
+                        )
+                    self.pronunciation_dict_id = None
                 if data.get("context_id") in self.context_ids_to_ignore:
                     continue
 

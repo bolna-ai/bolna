@@ -461,9 +461,10 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                 consecutive_errors = 0  # successful recv — reset the error backoff
 
                 ctx = data.get("contextId")
-                if ctx in self.context_ids_to_ignore:
-                    continue
+                # Before the ignore check: a rejection that lands on an interrupted context still has to drop them.
                 if data.get("error") and self._drop_rejected_dictionaries(data.get("error"), data.get("message")):
+                    continue
+                if ctx in self.context_ids_to_ignore:
                     continue
 
                 if "audio" in data and data["audio"] and self.ws_send_time is not None:

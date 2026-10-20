@@ -436,7 +436,13 @@ def test_bolna_copies_share_one_key_across_regions():
 # a dictionary ElevenLabs rejects mid-call (e.g. deleted after the save)
 # ---------------------------------------------------------------------------
 
-REJECTION = {"error": "invalid_request", "message": "Pronunciation dictionary 'dict-1' was not found."}
+# As ElevenLabs sent it for a missing dictionary; both sockets then close with 1008 about 0.9s later.
+REJECTION = {
+    "message": "Pronunciation dictionary dict-1 (version: ver-1) not found. Please make sure that your account can "
+    "access all the pronunciation dictionaries.",
+    "error": "invalid_pronunciation_dictionary_locators",
+    "code": 1008,
+}
 
 
 class FrameWS(FakeWS):
@@ -496,6 +502,50 @@ async def test_after_a_rejection_the_next_turn_opens_without_the_dictionary():
     await _speak_turn(synth, "Hello there.", 1)
     assert not any("pronunciation_dictionary_locators" in m for m in synth.websocket.sent)
     record.assert_called_once()
+
+
+async def test_a_rejection_on_an_interrupted_context_still_drops_the_dictionaries():
+    synth, record = _recording()
+    synth.context_ids_to_ignore.add("ctx-old")
+    synth.websocket = FrameWS([{**REJECTION, "contextId": "ctx-old"}])
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(anext(synth.receiver()), 0.2)
+
+    assert synth.pronunciation_dictionary_locators == []
+    record.assert_called_once()
+
+
+# As Cartesia sent it for a deleted dictionary: it rejects each message that carried it, and the socket stays open.
+CARTESIA_REJECTION = {
+    "type": "error",
+    "context_id": "ctx-1",
+    "status_code": 404,
+    "done": True,
+    "error": "Pronunciation dictionary not found: The requested pronunciation dictionary could not be found.",
+}
+
+
+def _cartesia_turn(frames):
+    synth = _cartesia(pronunciation_dict_id="pdict_1")
+    synth.websocket = FrameWS(frames)
+    synth.context_id = "ctx-1"
+    return synth, synth.task_manager_instance.record_non_fatal_synthesizer_error
+
+
+async def test_cartesia_drops_a_rejected_dictionary_for_the_rest_of_the_call():
+    synth, record = _cartesia_turn([CARTESIA_REJECTION])
+    # The turn that hit it ends on the frame's done, as before; later turns speak without it.
+    assert await asyncio.wait_for(anext(synth.receiver()), 1) == b"\x00"
+    assert synth.pronunciation_dict_id is None
+    assert "pronunciation_dict_id" not in synth.form_payload("Hello")
+    assert record.call_args.args[0]["dictionaries"] == ["pdict_1"]
+
+
+async def test_other_cartesia_errors_still_end_the_turn():
+    synth, record = _cartesia_turn([{**CARTESIA_REJECTION, "error": "Invalid voice"}])
+    assert await asyncio.wait_for(anext(synth.receiver()), 1) == b"\x00"
+    assert synth.pronunciation_dict_id == "pdict_1"
+    record.assert_not_called()
 
 
 def test_the_task_manager_records_recovered_synthesizer_errors():
