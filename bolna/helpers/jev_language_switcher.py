@@ -1,8 +1,9 @@
 """Jev (TypeSafe System One) as the language-switch judge.
 
 Jev answers narrow typed questions about the caller's turn, and `decide_from_answers` applies the rules
-of LANGUAGE_SWITCH_SYSTEM_PROMPT to those answers in code. The result has the same fields as
-LanguageSwitcher.decide(), so the gates and the switch path downstream are unchanged.
+of LANGUAGE_SWITCH_SYSTEM_PROMPT to those answers in code (`decide_explicit_from_answers` does the same for
+EXPLICIT_LANGUAGE_SWITCH_SYSTEM_PROMPT). The result has the same fields as LanguageSwitcher.decide(), so the
+gates and the switch path downstream are unchanged.
 """
 
 import asyncio
@@ -38,6 +39,9 @@ DATA_STRONG = 0.75
 DRIFT_MIN_SECONDS = 1.0
 DRIFT_MIN_TURNS = 1
 ENGLISH_FRAME_MIN = 0.6
+SELECT_MIN = 0.5
+YES_MIN = 0.6
+CLEAR_MARGIN = 0.3
 
 LANGS = {
     "en": dict(
@@ -271,6 +275,85 @@ def _refuses_question(code: str) -> dict:
     }
 
 
+READ_BOTH = (
+    "`turn.transcript` and `turn.live_transcript` are two recognizers' text for the same speech. The live one is "
+    "locked to the agent's current language and often gets short replies right when the other garbles them, so a "
+    "language name or request in either one counts."
+)
+
+SAYS_YES = {
+    "type": "noul",
+    "instructions": "Is the caller's reply in `turn.transcript` or `turn.live_transcript` a yes or an agreement to "
+    "`agent_turn`?",
+    "criteria": {
+        "true": {"what": "Yes, okay, sure, haan, ji, ho, avunu, aamaa, or any agreement, in any language"},
+        "false": {"what": "No, a refusal, a question, or a reply about something else"},
+    },
+}
+
+
+def _agent_offer_question(codes: list) -> dict:
+    return {
+        "type": "choice",
+        "instructions": {
+            "question": "Does `agent_turn` ask the caller to choose or confirm the language of the conversation?",
+            "how_to_decide": [
+                "Judge the meaning of the whole agent turn, in any language or script.",
+                "Offering one language, or asking whether to continue in or switch to one language, is that language.",
+                "Asking which language the caller prefers, or offering two or more languages, is several.",
+                "Anything else, including a turn that is merely spoken in some language, is none.",
+            ],
+        },
+        "criteria": {
+            "none": {"what": "No question or offer about which language to use"},
+            "several": {"what": "Asks which language to use, or offers two or more languages"},
+            **{code: {"what": f"Offers, or asks to confirm, only {LANGS[code]['name']}"} for code in codes},
+        },
+    }
+
+
+def _explicit_wants_question(code: str) -> dict:
+    lang = LANGS[code]
+    return {
+        "type": "noul",
+        "instructions": {
+            "question": f"Does the caller ask the agent to talk in {lang['name']}, or ask whether it can speak "
+            f"{lang['name']}?",
+            "how_to_read": READ_BOTH,
+            "language_name_can_be_written_as": lang["names"],
+        },
+        "criteria": {
+            "true": f"Asks to talk / speak / reply / switch in {lang['name']}, asks whether the agent can speak or "
+            f"understand {lang['name']}, or says the name {lang['name']} two or more times with nothing else",
+            "false": f"Does not ask for {lang['name']}: names it in passing, quotes someone, says they can't speak "
+            "it, or doesn't name it",
+        },
+    }
+
+
+def _selects_question(code: str) -> dict:
+    lang = LANGS[code]
+    return {
+        "type": "noul",
+        "instructions": {
+            "question": f"Does the caller's reply choose {lang['name']} in answer to the language question in "
+            "`agent_turn`?",
+            "how_to_read": READ_BOTH,
+            "language_name_can_be_written_as": lang["names"],
+        },
+        "criteria": {
+            "true": f"Answers the agent's language question by choosing {lang['name']}: the name alone is enough, "
+            f"or an ordinal ('the second one') that points to {lang['name']} in `agent_turn`",
+            "false": f"Does not choose {lang['name']}, picks another language, rejects it, or `agent_turn` asked "
+            "no language question",
+        },
+    }
+
+
+def _reading_both(question: dict) -> dict:
+    return {**question, "instructions": {**question["instructions"], "how_to_read": READ_BOTH}}
+
+
 def jev_code(label: str) -> str:
     """The LANGS code for an agent label; the backend writes Odia as `od`."""
     base = (label or "").split("-")[0].lower()
@@ -294,6 +377,14 @@ def script_of(text: str) -> str:
 def names_language(text: str, code: str) -> bool:
     lowered = unicodedata.normalize("NFC", str(text)).lower()
     return any(name.strip().lower() in lowered for name in LANGS[code]["names"].split(",") if name.strip())
+
+
+def refuses_language(a: dict, code: str, text: str) -> bool:
+    # A refusal must also outscore any request for the same language: asking for a language while saying
+    # you can't follow the agent scores both, and the request is what the caller means.
+    refusal = a.get(f"refuses_{code}", 0)
+    request = max(a.get(f"wants_{code}", 0), a.get(f"selects_{code}", 0))
+    return refusal >= REFUSAL_MIN and refusal >= request and names_language(text, code)
 
 
 def data_tokens(text: str) -> tuple[int, int]:
@@ -326,6 +417,29 @@ def build_jev_request(model_id: str, transcript: str, labels: list) -> dict:
     return {"model": model_id, "state": {"turn": {"transcript": transcript}}, "questions": questions}
 
 
+def build_jev_explicit_request(
+    model_id: str, transcript: str, live_transcript: str, agent_turn: str, labels: list
+) -> dict:
+    # Explicit requests hinge on the agent's question and on short replies the unbiased recognizer
+    # can garble, so this state carries both transcripts and the agent turn.
+    codes = list(dict.fromkeys(jev_code(label) for label in labels))
+    questions = {"language": LANGUAGE_QUESTION, "english_frame": ENGLISH_FRAME}
+    if script_of(transcript) == "devanagari":
+        questions["hindi_or_marathi"] = HINDI_OR_MARATHI
+    turn = {"transcript": transcript, "live_transcript": live_transcript}
+    state = {"turn": turn}
+    if agent_turn:
+        state["agent_turn"] = agent_turn
+        questions["agent_offer"] = _agent_offer_question(codes)
+        questions["says_yes"] = SAYS_YES
+    for code in codes:
+        questions[f"wants_{code}"] = _explicit_wants_question(code)
+        questions[f"refuses_{code}"] = _reading_both(_refuses_question(code))
+        if agent_turn:
+            questions[f"selects_{code}"] = _selects_question(code)
+    return {"model": model_id, "state": state, "questions": questions}
+
+
 def flatten_answers(answers: dict) -> dict:
     """Raw /v1/systemone answers → nouls as floats, choices as {choice, confidence, probabilities}."""
     flat = {}
@@ -353,13 +467,8 @@ def _recent_after_last_switch(recent_turns) -> list:
     return recent
 
 
-def decide_from_answers(
-    a: dict, transcript: str, live_transcript: str, active_label: str, labels: list, recent_turns=None
-) -> dict:
-    """Apply the switch rules in order: 3a, 1, 7, 4a, 8, 6. `a` is the output of flatten_answers."""
-    label_of = {jev_code(label): label for label in labels}
-    active = jev_code(active_label)
-    supported = list(label_of)
+def _spoken_language(a: dict, transcript: str) -> tuple:
+    """Jev's language answer, corrected by the English-frame check, the transcript's script and Hindi vs Marathi."""
     lang, lang_p = a["language"]["choice"], a["language"]["confidence"]
     script = script_of(transcript)
     if a.get("english_frame", 0) >= ENGLISH_FRAME_MIN:
@@ -368,10 +477,21 @@ def decide_from_answers(
         lang = SCRIPT_TO_LANG[script]
     if lang in ("hi", "mr") and "hindi_or_marathi" in a:
         lang, lang_p = a["hindi_or_marathi"]["choice"], a["hindi_or_marathi"]["confidence"]
+    return lang, lang_p
+
+
+def decide_from_answers(
+    a: dict, transcript: str, live_transcript: str, active_label: str, labels: list, recent_turns=None
+) -> dict:
+    """Apply the switch rules in order: 3a, 1, 7, 4a, 8, 6. `a` is the output of flatten_answers."""
+    label_of = {jev_code(label): label for label in labels}
+    active = jev_code(active_label)
+    supported = list(label_of)
+    lang, lang_p = _spoken_language(a, transcript)
     detected = label_of.get(lang, lang) if lang != "other" else ""
 
     def refused(code):
-        return a.get(f"refuses_{code}", 0) >= REFUSAL_MIN and names_language(transcript, code)
+        return refuses_language(a, code, transcript)
 
     def out(target, confidence, explicit, why):
         return {
@@ -419,14 +539,69 @@ def decide_from_answers(
     return out(None, 0, False, "filler or borrowed word, stay")
 
 
+def decide_explicit_from_answers(
+    a: dict, transcript: str, live_transcript: str, active_label: str, labels: list
+) -> dict:
+    """Explicit-only contract: switch only on a request, a capability question, or an answer to the agent's
+    language question; the language being spoken never switches. Fills request_status / request_source."""
+    label_of = {jev_code(label): label for label in labels}
+    lang, lang_p = _spoken_language(a, transcript)
+    heard = f"{transcript} {live_transcript or ''}"
+
+    def refused(code):
+        return refuses_language(a, code, heard)
+
+    def scored(prefix, minimum):
+        return {c: a[f"{prefix}_{c}"] for c in label_of if a.get(f"{prefix}_{c}", 0) >= minimum and not refused(c)}
+
+    offer = (a.get("agent_offer") or {}).get("choice", "none")
+    picked, source = {}, "none"
+    if offer != "none":
+        picked = scored("selects", SELECT_MIN)
+        if not picked and offer in label_of and a.get("says_yes", 0) >= YES_MIN and not refused(offer):
+            picked = {offer: a["says_yes"]}
+        source = "agent_prompted_selection" if picked else "none"
+    if not picked:
+        picked = scored("wants", REQUEST_MIN)
+        source = "direct_request" if picked else "none"
+
+    def out(status, code=None, confidence=0.0, why=""):
+        target = label_of[code] if status == "switch" else None
+        return {
+            "detected_language": label_of.get(lang, lang) if lang != "other" else "",
+            "detection_confidence": round(lang_p, 3),
+            "explicit_request": status in ("switch", "already_active"),
+            "requested_language": label_of[code] if code else None,
+            "target_language": target,
+            "target_confidence": round(confidence, 3) if target else 0.0,
+            "request_status": status,
+            "request_source": source if code else "none",
+            "reasoning": f"jev: {why}",
+        }
+
+    ranked = sorted(picked.items(), key=lambda item: item[1], reverse=True)
+    if not ranked:
+        if offer == "several" and a.get("says_yes", 0) >= YES_MIN:
+            return out("ambiguous", why="yes to several offered languages")
+        return out("no_request", why="no language request")
+    if len(ranked) > 1 and ranked[0][1] - ranked[1][1] < CLEAR_MARGIN:
+        return out("ambiguous", why="more than one language named")
+    code, score = ranked[0]
+    name = LANGS[code]["name"]
+    if code == jev_code(active_label):
+        return out("already_active", code, why=f"asked for {name}, already active")
+    verb = "chose" if source == "agent_prompted_selection" else "asked for"
+    return out("switch", code, score, f"caller {verb} {name}")
+
+
 class JevLanguageSwitcher(LanguageSwitcher):
     """LanguageSwitcher backed by Jev; after repeated Jev failures the call continues on the default LLM judge."""
 
-    def __init__(self, available_labels, run_id=None, model=None):
+    def __init__(self, available_labels, run_id=None, model=None, explicit_only=False):
         # super().__init__ is skipped on purpose: it builds the LiteLLM judge, needed here only on fallback.
         self.available_labels = list(available_labels or [])
         self.run_id = run_id
-        self.explicit_only = False
+        self.explicit_only = bool(explicit_only)
         self.model = model or f"{JEV_MODEL_PREFIX}{DEFAULT_JEV_MODEL}"
         self._jev_model_id = self.model.removeprefix(JEV_MODEL_PREFIX)
         self.latency_ms = None
@@ -485,20 +660,26 @@ class JevLanguageSwitcher(LanguageSwitcher):
             return None
         self.last_usage = None
         transcript = detector_transcript.strip()
-        payload = build_jev_request(self._jev_model_id, transcript, self.available_labels)
+        live = (active_transcript or "").strip()
+        if self.explicit_only:
+            agent_turn = (last_agent_turn or "").strip()
+            payload = build_jev_explicit_request(
+                self._jev_model_id, transcript, live, agent_turn, self.available_labels
+            )
+        else:
+            payload = build_jev_request(self._jev_model_id, transcript, self.available_labels)
         start_time = time.time()
         log_meta = self._log_request(detector_transcript, start_time)
         try:
             body = await self._post(payload)
             self._tally_usage(body.get("usage"))
-            result = decide_from_answers(
-                flatten_answers(body["answers"]),
-                transcript,
-                active_transcript,
-                active_label,
-                self.available_labels,
-                recent_turns,
-            )
+            answers = flatten_answers(body["answers"])
+            if self.explicit_only:
+                result = decide_explicit_from_answers(answers, transcript, live, active_label, self.available_labels)
+            else:
+                result = decide_from_answers(
+                    answers, transcript, active_transcript, active_label, self.available_labels, recent_turns
+                )
         except asyncio.CancelledError:
             self._log_response({"error": "cancelled"}, log_meta, start_time)
             raise
@@ -541,16 +722,14 @@ class JevLanguageSwitcher(LanguageSwitcher):
 
 
 def build_language_switcher(available_labels, run_id=None, model=None, explicit_only=False):
-    """Jev judge for a `typesafe/` model on an ambient agent whose languages are all in LANGS; else the LLM judge."""
+    """Jev judge for a `typesafe/` model on an agent whose languages are all in LANGS; else the LLM judge."""
     if model and model.startswith(JEV_MODEL_PREFIX):
-        if explicit_only:
-            reason = "explicit-only agent"
-        elif not os.getenv("TYPESAFE_API_KEY", "").strip():
+        if not os.getenv("TYPESAFE_API_KEY", "").strip():
             reason = "TYPESAFE_API_KEY not set"
         elif not supports_labels(available_labels):
             reason = f"labels {list(available_labels or [])} outside {sorted(LANGS)}"
         else:
-            return JevLanguageSwitcher(available_labels, run_id=run_id, model=model)
+            return JevLanguageSwitcher(available_labels, run_id=run_id, model=model, explicit_only=explicit_only)
         logger.warning(f"Jev judge '{model}' not used ({reason}) — using the default LLM judge")
         model = None
     return LanguageSwitcher(available_labels=available_labels, run_id=run_id, model=model, explicit_only=explicit_only)

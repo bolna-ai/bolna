@@ -8,9 +8,11 @@ import pytest
 from bolna.helpers.jev_language_switcher import (
     LANGS,
     JevLanguageSwitcher,
+    build_jev_explicit_request,
     build_jev_request,
     build_language_switcher,
     data_tokens,
+    decide_explicit_from_answers,
     decide_from_answers,
     flatten_answers,
 )
@@ -107,6 +109,17 @@ CASES = [
         None,
         None,
         "refused Hindi",
+    ),
+    (
+        "request-outweighs-a-weak-refusal",
+        "Can you speak Hindi? I don't understand you.",
+        "",
+        "en",
+        ["en", "hi", "ta", "te"],
+        {**_answers("hi"), "wants_hi": 0.96, "refuses_hi": 0.55},
+        None,
+        "hi",
+        "asked for Hindi",
     ),
     (
         "refusal-without-name-ignored",
@@ -266,9 +279,124 @@ def test_flatten_answers_reads_the_api_shape():
     assert flat["language"] == {"choice": "en", "confidence": 0.9, "probabilities": {"en": 0.93}}
 
 
-def _switcher(monkeypatch, labels=("hi", "en")):
+def _explicit(lang="en", offer=None, yes=0.05, wants=(), selects=(), refuses=None):
+    a = {"language": {"choice": lang, "confidence": 0.9, "probabilities": {lang: 0.9}}, "english_frame": 0.05}
+    if offer:
+        a["agent_offer"] = {"choice": offer, "confidence": 0.9, "probabilities": {}}
+        a["says_yes"] = yes
+    for code in LANGS:
+        a[f"wants_{code}"] = 0.9 if code in wants else 0.02
+        a[f"selects_{code}"] = 0.9 if code in selects else 0.02
+        a[f"refuses_{code}"] = 0.9 if code == refuses else 0.02
+    return a
+
+
+EXPLICIT_CASES = [
+    (
+        "live-only-selection-switches",
+        "Okay.",
+        "Odia.",
+        "en",
+        ["en", "od"],
+        _explicit(offer="several", selects=("or",)),
+        ("switch", "od", "agent_prompted_selection"),
+    ),
+    (
+        "yes-to-one-offered-language-switches",
+        "Yes.",
+        "yes",
+        "en",
+        ["en", "hi"],
+        _explicit(offer="hi", yes=0.95),
+        ("switch", "hi", "agent_prompted_selection"),
+    ),
+    (
+        "yes-to-several-languages-is-ambiguous",
+        "Yes.",
+        "yes",
+        "en",
+        ["en", "hi"],
+        _explicit(offer="several", yes=0.95),
+        ("ambiguous", None, "none"),
+    ),
+    (
+        "live-only-request-switches",
+        "Hmm.",
+        "Please talk in Hindi.",
+        "en",
+        ["en", "hi"],
+        _explicit(wants=("hi",)),
+        ("switch", "hi", "direct_request"),
+    ),
+    (
+        "choosing-the-active-language",
+        "Okay.",
+        "Hindi.",
+        "hi",
+        ["en", "hi"],
+        _explicit(offer="several", selects=("hi",)),
+        ("already_active", None, "agent_prompted_selection"),
+    ),
+    (
+        "named-refusal-stays",
+        "मुझे हिंदी नहीं आती",
+        "मुझे हिंदी नहीं आती",
+        "en",
+        ["en", "hi"],
+        _explicit(lang="hi", wants=("hi",), refuses="hi"),
+        ("no_request", None, "none"),
+    ),
+    (
+        "speaking-another-language-stays",
+        "मेरा order कहाँ है?",
+        "",
+        "en",
+        ["en", "hi"],
+        _explicit(lang="hi"),
+        ("no_request", None, "none"),
+    ),
+    (
+        "two-languages-is-ambiguous",
+        "Hindi or English, either is fine.",
+        "",
+        "en",
+        ["en", "hi"],
+        _explicit(lang="hi", wants=("hi", "en")),
+        ("ambiguous", None, "none"),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "transcript, live, active, labels, answers, expected",
+    [case[1:] for case in EXPLICIT_CASES],
+    ids=[case[0] for case in EXPLICIT_CASES],
+)
+def test_explicit_rules_follow_the_explicit_prompt(transcript, live, active, labels, answers, expected):
+    result = decide_explicit_from_answers(answers, transcript, live, active, labels)
+    assert (result["request_status"], result["target_language"], result["request_source"]) == expected
+    assert result["explicit_request"] is (expected[0] in ("switch", "already_active"))
+
+
+def test_explicit_request_sends_both_transcripts_and_the_agent_turn():
+    body = build_jev_explicit_request("jev-1.13.0", "Okay.", "Hindi.", "Hindi or English?", ["hi", "en"])
+    questions = body["questions"]
+    assert body["state"] == {
+        "turn": {"transcript": "Okay.", "live_transcript": "Hindi."},
+        "agent_turn": "Hindi or English?",
+    }
+    assert {"language", "agent_offer", "says_yes", "wants_hi", "selects_hi", "refuses_en"} <= set(questions)
+    assert "has_clause" not in questions
+    assert set(questions["agent_offer"]["criteria"]) == {"none", "several", "hi", "en"}
+    assert "how_to_read" in questions["refuses_hi"]["instructions"]
+
+    no_turn = build_jev_explicit_request("jev-1.13.0", "Hindi please", "", "", ["hi", "en"])["questions"]
+    assert "agent_offer" not in no_turn and "selects_hi" not in no_turn and "wants_hi" in no_turn
+
+
+def _switcher(monkeypatch, labels=("hi", "en"), explicit_only=False):
     monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
-    return JevLanguageSwitcher(list(labels), model=JEV_MODEL)
+    return JevLanguageSwitcher(list(labels), model=JEV_MODEL, explicit_only=explicit_only)
 
 
 def _raw(answers):
@@ -299,6 +427,18 @@ async def test_decide_maps_jev_answers_and_tallies_usage(monkeypatch):
     assert switcher.usage_totals["requests"] == 1
     assert switcher.models_used == [JEV_MODEL]
     assert switcher.latency_ms is not None
+
+
+async def test_explicit_decide_returns_the_explicit_verdict(monkeypatch):
+    switcher = _switcher(monkeypatch, labels=("en", "od"), explicit_only=True)
+    switcher._post = AsyncMock(return_value={"answers": _raw(_explicit(offer="several", selects=("or",)))})
+    with patch(REQUEST_LOG):
+        result = await switcher.decide("Okay.", "Odia.", "en", None, "Which language would you like?")
+    assert (result["request_status"], result["target_language"]) == ("switch", "od")
+    assert result["explicit_request"] is True
+    state = switcher._post.await_args.args[0]["state"]
+    assert state["agent_turn"] == "Which language would you like?"
+    assert state["turn"]["live_transcript"] == "Odia."
 
 
 async def test_decide_skips_jev_without_a_detector_transcript(monkeypatch):
@@ -336,14 +476,12 @@ def test_jev_judge_is_chosen_only_when_it_can_judge_the_call(monkeypatch):
     with patch("bolna.helpers.language_switcher.LiteLLM"):
         monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
         assert isinstance(build_language_switcher(["hi", "en", "od"], model=JEV_MODEL), JevLanguageSwitcher)
+        explicit = build_language_switcher(["hi", "en"], model=JEV_MODEL, explicit_only=True)
+        assert isinstance(explicit, JevLanguageSwitcher) and explicit.explicit_only
 
-        for kwargs in (
-            {"available_labels": ["hi", "en"], "explicit_only": True},
-            {"available_labels": ["hi", "fr"]},
-        ):
-            judge = build_language_switcher(model=JEV_MODEL, **kwargs)
-            assert not isinstance(judge, JevLanguageSwitcher)
-            assert not judge.model.startswith("typesafe/")
+        judge = build_language_switcher(["hi", "fr"], model=JEV_MODEL)
+        assert not isinstance(judge, JevLanguageSwitcher)
+        assert not judge.model.startswith("typesafe/")
 
         monkeypatch.delenv("TYPESAFE_API_KEY")
         assert not isinstance(build_language_switcher(["hi", "en"], model=JEV_MODEL), JevLanguageSwitcher)
