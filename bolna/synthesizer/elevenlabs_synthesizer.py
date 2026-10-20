@@ -124,7 +124,7 @@ class ElevenlabsBase(StreamSynthesizer):
         if self.caching:
             self.cache = InmemoryScalarCache()
 
-        self.elevenlabs_host = os.getenv("ELEVENLABS_API_HOST", "api.elevenlabs.io")
+        self.elevenlabs_host = kwargs.get("elevenlabs_host") or os.getenv("ELEVENLABS_API_HOST", "api.elevenlabs.io")
         # Set from the x-trace-id response header on connect; both sockets log against it.
         self.ws_trace_id = None
         if self.use_mulaw:
