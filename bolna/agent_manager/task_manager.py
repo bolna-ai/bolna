@@ -131,6 +131,7 @@ from bolna.helpers.utils import (
 )
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
+from ..helpers.tts_audio_monitor import TtsAudioMonitor
 from ..helpers.observable_variable import ObservableVariable
 from bolna.models import S2SConfig, WebSearchConfig, tts_render_settings
 from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
@@ -340,6 +341,11 @@ def trailing_utterance_text(segments, gap_seconds=4.0):
             tail_lang = tail_lang or lang
         prev_start = (ts - (seg.get("audio_s") or 0.0)) if ts is not None else None
     return " ".join(reversed(tail)).strip()
+
+
+def streams_pipeline(turn_based_conversation, enforce_streaming):
+    """Live calls always stream; turn-based chats stream only when enforced."""
+    return enforce_streaming or not turn_based_conversation
 
 
 class TaskManager(BaseManager):
@@ -578,6 +584,7 @@ class TaskManager(BaseManager):
 
             self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
         self.__setup_output_handlers(turn_based_conversation, output_queue)
+        self.tts_audio_monitor = TtsAudioMonitor(self.sampling_rate)
 
         self.first_message_task_new = asyncio.create_task(self.message_task_new())
 
@@ -645,10 +652,9 @@ class TaskManager(BaseManager):
         # Tasks
         self.extracted_data = None
         self.summarized_data = None
-        self.stream = (
-            self.task_config["tools_config"]["synthesizer"] is not None
-            and self.task_config["tools_config"]["synthesizer"]["stream"]
-        ) and (self.enforce_streaming or not self.turn_based_conversation)
+        self.stream = self.task_config["tools_config"]["synthesizer"] is not None and streams_pipeline(
+            self.turn_based_conversation, self.enforce_streaming
+        )
 
         self.is_local = False
         self.llm_config = None
@@ -1847,8 +1853,7 @@ class TaskManager(BaseManager):
                         elif provider in (WEB_BASED_CALL_PROVIDER, TelephonyProvider.FREESWITCH.value):
                             cfg["encoding"] = "linear16"
                             cfg["sampling_rate"] = 16000
-                        if self.turn_based_conversation:
-                            cfg["stream"] = True if self.enforce_streaming else False
+                        cfg["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
 
                         if "provider" in cfg:
                             cls = SUPPORTED_TRANSCRIBER_PROVIDERS.get(cfg["provider"])
@@ -1933,11 +1938,12 @@ class TaskManager(BaseManager):
                     transcriber_config["model"] in SUPPORTED_TRANSCRIBER_MODELS.keys()
                     or transcriber_config["provider"] in SUPPORTED_TRANSCRIBER_PROVIDERS.keys()
                 ):
-                    if self.turn_based_conversation:
-                        transcriber_config["stream"] = True if self.enforce_streaming else False
-                        logger.info(
-                            f"transcriber stream={transcriber_config['stream']} enforce_streaming={self.enforce_streaming}"
-                        )
+                    transcriber_config["stream"] = streams_pipeline(
+                        self.turn_based_conversation, self.enforce_streaming
+                    )
+                    logger.info(
+                        f"transcriber stream={transcriber_config['stream']} enforce_streaming={self.enforce_streaming}"
+                    )
                     if "provider" in transcriber_config:
                         transcriber_class = SUPPORTED_TRANSCRIBER_PROVIDERS.get(transcriber_config["provider"])
                     else:
@@ -1992,7 +1998,7 @@ class TaskManager(BaseManager):
 
                     if self.turn_based_conversation:
                         cfg["audio_format"] = "mp3"
-                        cfg["stream"] = True if self.enforce_streaming else False
+                    cfg["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
 
                     cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
                     leg_kwargs = self.__pool_leg_kwargs(synthesizer_kwargs, "synthesizer_key", provider_name)
@@ -2044,9 +2050,7 @@ class TaskManager(BaseManager):
             )
             if self.turn_based_conversation:
                 synth_config["audio_format"] = "mp3"  # Hard code mp3 if we're connected through dashboard
-                synth_config["stream"] = (
-                    True if self.enforce_streaming else False
-                )  # Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
+            synth_config["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
 
             # Telephony providers expect mulaw@8000Hz — force use_mulaw regardless of the
             # server-side kwarg (it defaults to False and only covers some synths), mirroring
@@ -4801,6 +4805,10 @@ class TaskManager(BaseManager):
 
         if self._hangup_cancelled:
             logger.info("end node: hangup was cancelled by a barge-in, not arming the teardown")
+            return
+        # The playout wait also returns when the caller hangs up mid-reply; that hangup is theirs, not ours.
+        if self._caller_disconnected():
+            logger.info("end node: caller hung up during the closing reply, not arming the teardown")
             return
         logger.info("end node: closing reply delivered, ending the call")
         self.__arm_end_call_teardown()
@@ -7664,7 +7672,8 @@ class TaskManager(BaseManager):
                                 # Non-streaming output
                                 logger.info("Stream not enabled, sending entire audio")
                                 # TODO handle is audio playing over here
-                                await self.tools["output"].handle(message)
+                                if await self.tools["output"].handle(message):
+                                    self.__observe_tts_audio(message)
                                 if meta_info.get("end_of_synthesizer_stream", False):
                                     self._turn_audio_flushed.set()
 
@@ -7957,6 +7966,19 @@ class TaskManager(BaseManager):
             await asyncio.sleep(0.1)
         self.handle_accumulated_message_task = None
 
+    def __observe_tts_audio(self, message):
+        try:
+            self.tts_audio_monitor.observe(message["meta_info"], message.get("data"))
+        except Exception as e:
+            logger.warning(f"TTS audio monitor skipped a chunk: {e}")
+
+    def __tts_audio_quality(self, chunk_marks):
+        try:
+            return self.tts_audio_monitor.summary(chunk_marks)
+        except Exception as e:
+            logger.warning(f"TTS audio monitor summary failed: {e}")
+            return None
+
     # Currently this loop only closes in case of interruption
     # but it shouldn't be the case.
     async def __process_output_loop(self):
@@ -8016,6 +8038,7 @@ class TaskManager(BaseManager):
                             if sequence_id is not None:
                                 self._sent_audio_sequences.add(sequence_id)
                             self._commit_staged_assistant_history(sequence_id)
+                            self.__observe_tts_audio(message)
                         # Track when agent audio first starts flowing for this sequence.
                         # Only fire on real audio bytes — BOS/EOS control packets are strings
                         # and fire before _synthesize() sets tts_start_ms, causing inversion.
@@ -9236,7 +9259,7 @@ class TaskManager(BaseManager):
                             traceback.print_exc()
 
                     self.output_task = asyncio.create_task(self.__process_output_loop())
-                    if not self.turn_based_conversation or self.enforce_streaming:
+                    if streams_pipeline(self.turn_based_conversation, self.enforce_streaming):
                         self.hangup_task = asyncio.create_task(self.__check_for_completion())
 
                         if self.should_backchannel:
@@ -9565,6 +9588,7 @@ class TaskManager(BaseManager):
                     "transcriber_error_events": list(self.transcriber_error_events),
                     "transcriber_reconnect_count": getattr(self.tools.get("transcriber"), "reconnect_count", 0),
                     "blocked_audio_events": list(self.blocked_audio_events),
+                    "tts_audio_quality": self.__tts_audio_quality(output["latency_dict"]["synthesizer_chunk_marks"]),
                     "welcome_message_played_ts": (
                         round(
                             self.tools["input"].welcome_message_played_ts - self.conversation_start_init_ts,
