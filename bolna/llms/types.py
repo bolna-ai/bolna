@@ -1,6 +1,6 @@
 from typing import Any, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from bolna.enums import ToolScope
 
@@ -31,7 +31,7 @@ class LatencyData(BaseModel):
 
 
 class FunctionCallPayload(BaseModel):
-    model_config = ConfigDict(extra="allow", protected_namespaces=())
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
     url: Optional[str] = None
     method: Optional[str] = None
@@ -45,6 +45,8 @@ class FunctionCallPayload(BaseModel):
     tool_call_id: str = ""
     textual_response: Optional[str] = None
     resp: Any = None
+    # Model-generated data must never share the execution configuration namespace.
+    arguments: dict = Field(default_factory=dict)
 
 
 class LLMStreamChunk(BaseModel):

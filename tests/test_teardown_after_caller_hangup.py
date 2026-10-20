@@ -154,7 +154,7 @@ async def _call_switch_language(task_manager):
         {"turn_id": 1, "sequence_id": 1},
         "llm",
         "switch_language",
-        language="hi",
+        arguments={"language": "hi"},
         tool_call_id="tc-1",
         model_response=[],
     )

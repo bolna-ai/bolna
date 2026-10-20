@@ -1098,6 +1098,8 @@ class TaskManager(BaseManager):
 
     @staticmethod
     def _extract_api_call_runtime_args(resp):
+        if "arguments" in resp:
+            return copy.deepcopy(resp["arguments"])
         excluded_keys = {"model_response", "textual_response"}
         return {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded_keys}
 
@@ -1129,8 +1131,8 @@ class TaskManager(BaseManager):
             params + the common call-state fields.
         Never blocks or fails the main tool call: background task, errors swallowed.
         """
-        excluded = {"model_response", "textual_response", "tool_call_id", "resp"}
-        llm_args = {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded}
+        # Callers pass model arguments only, separate from tool-call metadata.
+        llm_args = copy.deepcopy(resp)
 
         # Default missing %(name)s placeholders to "" so one absent field doesn't crash the
         # whole substitution and wipe the payload.
@@ -1140,7 +1142,7 @@ class TaskManager(BaseManager):
             substitution_args = {name: "" for name in re.findall(r"%\((\w+)\)s", template_str)}
             substitution_args.update(llm_args)
             try:
-                prepared = prepare_api_request(webhook_param, None, None, **substitution_args)
+                prepared = prepare_api_request(webhook_param, None, None, arguments=substitution_args)
                 if prepared.get("api_params") is not None:
                     params = prepared["api_params"]
             except Exception as exc:
@@ -3443,16 +3445,28 @@ class TaskManager(BaseManager):
                     )
 
     async def __execute_function_call(
-        self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp
+        self,
+        url,
+        method,
+        param,
+        api_token,
+        headers,
+        model_args,
+        meta_info,
+        next_step,
+        called_fun,
+        arguments=None,
+        **resp,
     ):
         self.check_if_user_online = False
         function_call_log = None
         turn_id = meta_info.get("turn_id")
         response_uid = meta_info.get("response_uid")
 
-        if "execution_id" in resp and resp["execution_id"] != self.run_id:
-            logger.warning(f"Correcting LLM-generated execution_id: '{resp['execution_id']}' -> '{self.run_id}'")
-            resp["execution_id"] = self.run_id
+        arguments = copy.deepcopy(arguments or {})
+        resp["arguments"] = arguments
+        if "execution_id" in arguments:
+            arguments["execution_id"] = self.run_id
 
         if called_fun.startswith(END_CALL_FUNCTION_PREFIX):
             # Lock out barge-in before the goodbye is generated, otherwise an interruption
@@ -3462,7 +3476,7 @@ class TaskManager(BaseManager):
             self._end_call_tool_call_id = resp.get("tool_call_id", "")
             if self.interruptible_hangup_message:
                 self._hangup_interruptible_window = True
-            reason = resp.get("reason", "")
+            reason = arguments.get("reason", "")
 
             logger.info(f"end_call tool invoked, reason: {reason}")
             convert_to_request_log(
@@ -3603,7 +3617,7 @@ class TaskManager(BaseManager):
             transfer_pre_call_webhook_url = tool_conf.get("pre_call_webhook_url")
             if transfer_pre_call_webhook_url:
                 # call_transfer_number is config, not an LLM arg — inject it for the template.
-                webhook_resp = dict(resp)
+                webhook_resp = dict(arguments)
                 try:
                     transfer_param = json.loads(param) if isinstance(param, str) else (param or {})
                     if transfer_param.get("call_transfer_number"):
@@ -3622,7 +3636,7 @@ class TaskManager(BaseManager):
 
         # switch_language tool handler (injected in BOTH flows): waits for in-flight
         if called_fun == "switch_language":
-            language_label = resp.get("language", "")
+            language_label = arguments.get("language", "")
 
             # If the requested language is already active, skip handoff and switch entirely
             if language_label == self.language:
@@ -3752,7 +3766,7 @@ class TaskManager(BaseManager):
 
         if called_fun == WEB_SEARCH_FUNCTION_NAME and self.web_search_config is not None:
             convert_to_request_log(
-                json.dumps({"query": resp.get("query", "")}),
+                json.dumps({"query": arguments.get("query", "")}),
                 meta_info,
                 None,
                 LogComponent.FUNCTION_CALL,
@@ -3761,7 +3775,7 @@ class TaskManager(BaseManager):
                 tool_name=called_fun,
             )
             search_task = asyncio.create_task(
-                self._run_web_search(resp.get("query", ""), meta_info, resp.get("tool_call_id", ""))
+                self._run_web_search(arguments.get("query", ""), meta_info, resp.get("tool_call_id", ""))
             )
             try:
                 await self.wait_for_current_message()
@@ -3813,7 +3827,7 @@ class TaskManager(BaseManager):
         pre_call_webhook_url = tool_conf.get("pre_call_webhook_url")
         if pre_call_webhook_url:
             self.fire_pre_call_webhook(
-                pre_call_webhook_url, called_fun, resp, meta_info, tool_conf.get("pre_call_webhook_param")
+                pre_call_webhook_url, called_fun, arguments, meta_info, tool_conf.get("pre_call_webhook_param")
             )
             # Give the fire-and-forget dispatch a head start so the pre-call webhook
             # reaches the backend before the tool's main request proceeds.
@@ -3821,7 +3835,7 @@ class TaskManager(BaseManager):
 
         runtime_args = self._extract_api_call_runtime_args(resp)
         try:
-            prepared_request = prepare_api_request(param, api_token, headers, **runtime_args)
+            prepared_request = prepare_api_request(param, api_token, headers, arguments=runtime_args)
         except Exception as exc:
             logger.warning(f"Could not prepare structured function call request for logging: {exc}")
             prepared_request = {
@@ -3851,7 +3865,7 @@ class TaskManager(BaseManager):
                 run_id=self.run_id,
                 return_response_metadata=True,
                 called_fun=called_fun,
-                **resp,
+                arguments=arguments,
             )
         except asyncio.CancelledError:
             self._finalize_api_call_detail(function_call_log, error="cancelled")
@@ -4356,7 +4370,7 @@ class TaskManager(BaseManager):
 
                 if trigger_function_call:
                     self.function_call_in_flight = True  # so a parallel LID switch won't truncate it
-                    # model_extra is the model-produced arguments; the declared fields carry the
+                    # Only the argument mapping contains model-produced data; execution fields carry the
                     # tool's api_token, its auth headers and the whole conversation history.
                     logger.info(
                         "Triggering function call %s url=%s method=%s seq=%s turn=%s args=%s",
@@ -4365,7 +4379,7 @@ class TaskManager(BaseManager):
                         data.method,
                         meta_info.get("sequence_id"),
                         meta_info.get("turn_id"),
-                        data.model_extra,
+                        data.arguments,
                     )
                     # Stamp total_stream_duration_ms before early return — function call chunk carries the final latency
                     if latency:
@@ -4928,7 +4942,7 @@ class TaskManager(BaseManager):
 
         if param is not None:
             logger.info(f"Gotten response {resp}")
-            payload = {**payload, **resp}
+            payload = {**payload, **self._extract_api_call_runtime_args(resp)}
 
         if self.tools["input"].io_provider != "default":
             payload["call_sid"] = self.tools["input"].get_call_sid()
@@ -9096,7 +9110,11 @@ class TaskManager(BaseManager):
                 # lives; the model's own arguments go in as the response, same as the llm
                 # path. Passing the arguments as both leaves the webhook no destination.
                 await self._execute_transfer_call_webhook(
-                    tool_name, params.get("url"), params.get("param"), args, meta_info
+                    tool_name,
+                    params.get("url"),
+                    params.get("param"),
+                    {"arguments": args, "tool_call_id": event.call_id},
+                    meta_info,
                 )
                 result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
         elif tool_name == WEB_SEARCH_FUNCTION_NAME and self.web_search_config is not None:
@@ -9170,7 +9188,7 @@ class TaskManager(BaseManager):
                 run_id=self.run_id,
                 return_response_metadata=True,
                 called_fun=tool_name,
-                **args,
+                arguments=args,
             )
         except asyncio.CancelledError:
             self._finalize_api_call_detail(call_log, error="cancelled")
