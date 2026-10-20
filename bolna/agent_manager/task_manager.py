@@ -342,6 +342,11 @@ def trailing_utterance_text(segments, gap_seconds=4.0):
     return " ".join(reversed(tail)).strip()
 
 
+def streams_pipeline(turn_based_conversation, enforce_streaming):
+    """Live calls always stream; turn-based chats stream only when enforced."""
+    return enforce_streaming or not turn_based_conversation
+
+
 class TaskManager(BaseManager):
     # Class-level default on purpose: __process_output_loop reads this for EVERY call (including
     # single-language ones), so an instance-only assignment that ever landed in a conditional
@@ -644,10 +649,9 @@ class TaskManager(BaseManager):
         # Tasks
         self.extracted_data = None
         self.summarized_data = None
-        self.stream = (
-            self.task_config["tools_config"]["synthesizer"] is not None
-            and self.task_config["tools_config"]["synthesizer"]["stream"]
-        ) and (self.enforce_streaming or not self.turn_based_conversation)
+        self.stream = self.task_config["tools_config"]["synthesizer"] is not None and streams_pipeline(
+            self.turn_based_conversation, self.enforce_streaming
+        )
 
         self.is_local = False
         self.llm_config = None
@@ -1846,8 +1850,7 @@ class TaskManager(BaseManager):
                         elif provider in (WEB_BASED_CALL_PROVIDER, TelephonyProvider.FREESWITCH.value):
                             cfg["encoding"] = "linear16"
                             cfg["sampling_rate"] = 16000
-                        if self.turn_based_conversation:
-                            cfg["stream"] = True if self.enforce_streaming else False
+                        cfg["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
 
                         if "provider" in cfg:
                             cls = SUPPORTED_TRANSCRIBER_PROVIDERS.get(cfg["provider"])
@@ -1932,11 +1935,12 @@ class TaskManager(BaseManager):
                     transcriber_config["model"] in SUPPORTED_TRANSCRIBER_MODELS.keys()
                     or transcriber_config["provider"] in SUPPORTED_TRANSCRIBER_PROVIDERS.keys()
                 ):
-                    if self.turn_based_conversation:
-                        transcriber_config["stream"] = True if self.enforce_streaming else False
-                        logger.info(
-                            f"transcriber stream={transcriber_config['stream']} enforce_streaming={self.enforce_streaming}"
-                        )
+                    transcriber_config["stream"] = streams_pipeline(
+                        self.turn_based_conversation, self.enforce_streaming
+                    )
+                    logger.info(
+                        f"transcriber stream={transcriber_config['stream']} enforce_streaming={self.enforce_streaming}"
+                    )
                     if "provider" in transcriber_config:
                         transcriber_class = SUPPORTED_TRANSCRIBER_PROVIDERS.get(transcriber_config["provider"])
                     else:
@@ -1991,7 +1995,7 @@ class TaskManager(BaseManager):
 
                     if self.turn_based_conversation:
                         cfg["audio_format"] = "mp3"
-                        cfg["stream"] = True if self.enforce_streaming else False
+                    cfg["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
 
                     cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
                     leg_kwargs = self.__pool_leg_kwargs(synthesizer_kwargs, "synthesizer_key", provider_name)
@@ -2037,9 +2041,7 @@ class TaskManager(BaseManager):
             self.synthesizer_render_settings = tts_render_settings(self.synthesizer_provider, provider_config)
             if self.turn_based_conversation:
                 synth_config["audio_format"] = "mp3"  # Hard code mp3 if we're connected through dashboard
-                synth_config["stream"] = (
-                    True if self.enforce_streaming else False
-                )  # Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
+            synth_config["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
 
             # Telephony providers expect mulaw@8000Hz — force use_mulaw regardless of the
             # server-side kwarg (it defaults to False and only covers some synths), mirroring
@@ -9233,7 +9235,7 @@ class TaskManager(BaseManager):
                             traceback.print_exc()
 
                     self.output_task = asyncio.create_task(self.__process_output_loop())
-                    if not self.turn_based_conversation or self.enforce_streaming:
+                    if streams_pipeline(self.turn_based_conversation, self.enforce_streaming):
                         self.hangup_task = asyncio.create_task(self.__check_for_completion())
 
                         if self.should_backchannel:
