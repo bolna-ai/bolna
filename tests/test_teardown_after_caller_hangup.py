@@ -8,11 +8,12 @@ the tools and raised KeyError on the input handler.
 import asyncio
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from bolna.agent_manager.task_manager import TaskManager
+from bolna.enums import HangupReason
 from bolna.helpers.mark_event_meta_data import MarkEventMetaData
 from bolna.input_handlers.default import DefaultInputHandler
 
@@ -132,6 +133,45 @@ async def test_a_tool_call_is_not_sent_after_the_caller_hung_up():
     trigger_api.assert_not_awaited()
 
 
+async def test_a_caller_hanging_up_during_the_end_call_goodbye_is_not_recorded_as_our_hangup():
+    task_manager, input_handler = _task_manager_with_pending_goodbye()
+    task_manager.run_id = "run-1"
+    task_manager.check_if_user_online = True
+    task_manager.interruptible_hangup_message = False
+    task_manager._hangup_interruptible_window = False
+    task_manager._hangup_cancelled = False
+    task_manager._end_call_in_progress = False
+    task_manager.hangup_detail = None
+    task_manager.conversation_history = MagicMock()
+    task_manager._enter_hangup_state = MagicMock()
+    task_manager.process_call_hangup = AsyncMock()
+
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+        end_call = asyncio.create_task(
+            task_manager._TaskManager__execute_function_call(
+                None,
+                None,
+                None,
+                None,
+                None,
+                {},
+                {"turn_id": 1, "sequence_id": 1},
+                "llm",
+                "end_call",
+                tool_call_id="tc-1",
+                textual_response="Thank you, bye.",
+                model_response=[],
+            )
+        )
+        await asyncio.sleep(0.05)
+        input_handler._end_input_stream("plivo")
+        await asyncio.wait_for(end_call, timeout=1)
+    await asyncio.sleep(0)
+
+    task_manager.process_call_hangup.assert_not_awaited()
+    assert task_manager.hangup_detail is None
+
+
 def _task_manager_asked_to_switch_language(language_switcher):
     task_manager, input_handler = _task_manager_with_pending_goodbye()
     task_manager.run_id = "run-1"
@@ -190,3 +230,85 @@ async def test_the_language_is_not_switched_when_the_caller_hangs_up_during_the_
     assert handoffs == ["One moment, switching to Hindi"]
     task_manager.switch_language.assert_not_awaited()
     task_manager._TaskManager__do_llm_generation.assert_not_awaited()
+
+
+def _task_manager_ending_the_call(reason, caller_on_line):
+    task_manager, input_handler = _task_manager_with_pending_goodbye()
+    if not caller_on_line:
+        input_handler._end_input_stream("plivo")
+    input_handler.stop_handler = AsyncMock()
+    task_manager.hangup_detail = reason
+    task_manager._caller_on_line_at_hangup = False
+    task_manager._end_of_conversation_in_progress = False
+    task_manager.hangup_triggered = True
+    task_manager.hangup_message_queued = False
+    task_manager.turn_based_conversation = False
+    task_manager.llm_task = None
+    task_manager.wait_for_current_message = AsyncMock()
+    task_manager.voicemail_handler = SimpleNamespace(cancel_task=lambda: None)
+    return task_manager
+
+
+AGENT_DECIDED = [HangupReason.END_CALL_TOOL, HangupReason.LLM_PROMPTED_HANGUP]
+
+
+@pytest.mark.parametrize("reason", AGENT_DECIDED)
+async def test_an_agent_reason_is_dropped_when_the_caller_hung_up_before_we_did(reason):
+    task_manager = _task_manager_ending_the_call(reason, caller_on_line=False)
+
+    await task_manager._TaskManager__process_end_of_conversation()
+    task_manager._settle_hangup_detail()
+
+    assert task_manager.hangup_detail is None
+
+
+@pytest.mark.parametrize("reason", AGENT_DECIDED)
+async def test_an_agent_reason_stands_when_we_hung_up_on_a_caller_still_on_the_line(reason):
+    task_manager = _task_manager_ending_the_call(reason, caller_on_line=True)
+
+    await task_manager._TaskManager__process_end_of_conversation()
+    task_manager._settle_hangup_detail()
+
+    assert task_manager.hangup_detail == reason
+
+
+@pytest.mark.parametrize("reason", AGENT_DECIDED)
+async def test_a_caller_hanging_up_during_the_hangup_message_is_not_recorded_as_our_hangup(reason):
+    # The caller's hangup ends the run, so our teardown never commits to disconnecting.
+    task_manager = _task_manager_ending_the_call(reason, caller_on_line=False)
+    task_manager.hangup_message_queued = True
+
+    task_manager._settle_hangup_detail()
+
+    assert task_manager.hangup_detail is None
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        HangupReason.INACTIVITY_TIMEOUT,
+        HangupReason.VOICEMAIL_DETECTED,
+        HangupReason.MAX_DURATION_REACHED,
+        HangupReason.TRANSCRIBER_ERROR,
+    ],
+)
+async def test_a_reason_about_the_call_itself_is_kept_when_the_caller_hung_up_first(reason):
+    task_manager = _task_manager_ending_the_call(reason, caller_on_line=False)
+
+    await task_manager._TaskManager__process_end_of_conversation()
+    task_manager._settle_hangup_detail()
+
+    assert task_manager.hangup_detail == reason
+
+
+@pytest.mark.parametrize("reason", AGENT_DECIDED)
+async def test_an_agent_reason_stands_when_our_own_hangup_closed_the_stream_first(reason):
+    # sip-trunk sends HANGUP the moment the hangup message has played, so Asterisk can close
+    # the media stream before our teardown gets to look at it.
+    task_manager = _task_manager_ending_the_call(reason, caller_on_line=False)
+    task_manager.tools["output"] = MagicMock(hangup_sent=MagicMock(return_value=True))
+
+    await task_manager._TaskManager__process_end_of_conversation()
+    task_manager._settle_hangup_detail()
+
+    assert task_manager.hangup_detail == reason
