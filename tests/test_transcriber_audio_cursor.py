@@ -20,6 +20,7 @@ import pytest
 from bolna.helpers.utils import create_ws_data_packet
 from bolna.transcriber import deepgram_transcriber
 from bolna.transcriber.deepgram_transcriber import DeepgramTranscriber
+from bolna.transcriber.transcriber_pool import TranscriberPool
 
 MULAW_BYTES_PER_SECOND = 8000
 # sip_trunk._listen merges 4 x 20 ms ulaw frames before ingest_audio -> 80 ms per send.
@@ -146,11 +147,11 @@ async def test_lookup_resolves_to_the_packet_that_carried_the_audio(monkeypatch,
     assert error_ms <= packet_seconds * 1000
 
 
-async def test_connection_start_time_lands_at_the_real_stream_start(monkeypatch):
-    """INVARIANT: connection_start_time is the wall clock at which the stream began. It is
-    derived by subtracting the audio submitted so far, so it is only right when that total is
-    the audio really submitted. user_stop_ts_wall, and every user-bot latency built on it,
-    inherits whatever bias this carries."""
+async def test_stream_start_maps_to_the_real_stream_start(monkeypatch):
+    """INVARIANT: stream position 0 maps to the wall clock at which the stream began. The map is
+    built from the duration each send is booked for, so it is only right when that is the audio
+    really submitted. user_start/user_stop_ts_wall, and every user-bot latency built on them,
+    inherit whatever bias this carries."""
     clock = _Clock()
     transcriber = _make_transcriber(monkeypatch, clock)
     stream_start_s = clock.seconds()
@@ -160,8 +161,8 @@ async def test_connection_start_time_lands_at_the_real_stream_start(monkeypatch)
     ws = _FakeWS(clock, messages=[json.dumps({"type": "SpeechStarted"})])
     _ = [packet async for packet in transcriber.receiver(ws)]
 
-    assert transcriber.connection_start_time is not None
-    assert abs(transcriber.connection_start_time - stream_start_s) <= 0.080
+    assert transcriber.audio_position_wall_time(0.0) is not None
+    assert abs(transcriber.audio_position_wall_time(0.0) - stream_start_s) <= 0.080
 
 
 @pytest.mark.parametrize(
@@ -243,7 +244,7 @@ async def test_reconnect_restarts_the_stream_position(monkeypatch):
 
     assert transcriber.audio_frame_timestamps[0][0] == 0.0
     assert transcriber._find_audio_send_timestamp(0.04) is not None
-    assert abs(transcriber.connection_start_time - second_stream_start_s) <= 0.080
+    assert abs(transcriber.audio_position_wall_time(0.0) - second_stream_start_s) <= 0.080
 
 
 @pytest.mark.parametrize(
@@ -267,3 +268,108 @@ async def test_web_calls_are_booked_for_the_two_hundred_milliseconds_they_carry(
 
     assert transcriber.audio_frame_timestamps[0][:2] == (0.0, 0.200)
     assert transcriber.audio_frame_timestamps[1][:2] == (0.200, 0.400)
+
+
+# TranscriberPool._KEEPALIVE_INTERVAL: a standby leg hears 100 ms of silence every 4 s.
+KEEPALIVE_GAP_S = 4.0 - 0.1
+
+
+class StandbyWS(_FakeWS):
+    """The wall clock keeps running between standby keepalives; Deepgram's audio clock does not."""
+
+    def __init__(self, clock, keepalive_bytes, **kwargs):
+        super().__init__(clock, **kwargs)
+        self._keepalive_bytes = keepalive_bytes
+
+    async def send(self, data):
+        await super().send(data)
+        if isinstance(data, (bytes, bytearray)) and len(data) == self._keepalive_bytes:
+            self._clock.advance_seconds(KEEPALIVE_GAP_S)
+
+
+def queue_keepalives(transcriber, count):
+    silence = TranscriberPool._silence_frame(transcriber.encoding, int(transcriber.sampling_rate))
+    for _ in range(count):
+        transcriber.input_queue.put_nowait({"data": silence, "meta_info": {}, "keepalive": True})
+    transcriber.input_queue.put_nowait(create_ws_data_packet(None, {"eos": True}))
+
+
+def spoken_reply(transcript, first_start, last_end):
+    return json.dumps(
+        {
+            "type": "Results",
+            "channel": {
+                "alternatives": [
+                    {
+                        "transcript": transcript,
+                        "words": [
+                            {"word": "it's", "start": first_start, "end": first_start + 0.3},
+                            {"word": "ctc", "start": last_end - 0.4, "end": last_end},
+                        ],
+                    }
+                ]
+            },
+            "is_final": True,
+            "speech_final": True,
+            "start": first_start,
+            "duration": last_end - first_start,
+            "metadata": {"request_id": "test-request"},
+        }
+    )
+
+
+async def test_a_switched_in_standby_leg_times_speech_when_it_wasspoken_reply(monkeypatch):
+    """A multilingual pool's standby leg hears 100 ms of silence every 4 s, so its stream positions
+    run far behind the wall clock until the switch. One stream-start anchor taken on standby put
+    every later speech end seconds before the caller even started (user_end < user_start). Each
+    position has to map through the send time of the frame that carried it."""
+    clock = _Clock()
+    transcriber = _make_transcriber(monkeypatch, clock, provider="vobiz")
+    keepalive = TranscriberPool._silence_frame(transcriber.encoding, int(transcriber.sampling_rate))
+    bytes_per_second = (1 if transcriber.encoding == "mulaw" else 2) * int(transcriber.sampling_rate)
+    ws = StandbyWS(clock, len(keepalive), bytes_per_second=bytes_per_second)
+
+    # Standby: Deepgram answers once it holds about a second of keepalive audio.
+    queue_keepalives(transcriber, 10)
+    await transcriber.sender_stream(ws)
+    standby_reply = json.dumps(
+        {
+            "type": "Results",
+            "channel": {"alternatives": [{"transcript": ""}]},
+            "is_final": False,
+            "speech_final": False,
+            "start": 0.0,
+            "duration": 1.0,
+        }
+    )
+    _ = [packet async for packet in transcriber.receiver(_FakeWS(clock, messages=[standby_reply]))]
+    queue_keepalives(transcriber, 1)
+    await transcriber.sender_stream(ws)
+    standby_audio_s = 11 * 0.1
+
+    # Switched in: live audio from here, real-time pace.
+    switch_s = clock.seconds()
+    # The telephony handlers send 200 ms per packet: twice a 100 ms keepalive.
+    await _stream(transcriber, ws, [keepalive * 2] * 50)
+
+    # The caller speaks 5.0-7.0 s after the switch.
+    reply = spoken_reply("it's twenty lps ctc", standby_audio_s + 5.0, standby_audio_s + 7.0)
+    speech_started = json.dumps({"type": "SpeechStarted"})
+    packets = [packet async for packet in transcriber.receiver(_FakeWS(clock, messages=[speech_started, reply]))]
+    by_type = {p["data"].get("type"): p["meta_info"] for p in packets if isinstance(p["data"], dict)}
+    user_start = by_type["interim_transcript_received"]["user_start_ts_wall"]
+    user_end = by_type["transcript"]["user_stop_ts_wall"]
+
+    assert abs(user_start - (switch_s + 5.0)) <= 0.25
+    assert abs(user_end - (switch_s + 7.0)) <= 0.25
+
+
+async def test_a_pool_keepalive_is_booked_at_the_audio_it_carries(monkeypatch):
+    """A keepalive is 100 ms of silence whatever the leg's telephony frame constant; booking it at
+    200 ms moved every later position on a standby leg 0.1 s per keepalive."""
+    transcriber = _make_transcriber(monkeypatch, _Clock(), provider="vobiz")
+
+    keepalive = TranscriberPool._silence_frame(transcriber.encoding, int(transcriber.sampling_rate))
+
+    assert transcriber._audio_frame_seconds(len(keepalive)) == 0.200
+    assert transcriber._audio_frame_seconds(len(keepalive), measured=True) == 0.100
