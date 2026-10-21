@@ -407,7 +407,9 @@ class TaskManager(BaseManager):
         # User utterance behind that turn — lets the gate tell a re-finalized ASR turn from a new
         # one the LLM happened to answer identically.
         self._last_spoken_user_input = None
-        self._pending_user_input = None  # (turn_id, text) of the turn being answered
+        # (turn_id, text, fresh) of the turn being answered. fresh means nothing was in flight when
+        # the caller's final arrived, so the reply answers new speech rather than regenerating one.
+        self._pending_user_input = None
 
         self.task_config = task
 
@@ -2894,10 +2896,11 @@ class TaskManager(BaseManager):
         ):
             followup_meta_info.pop(key, None)
         # A follow-up answers its parent's caller utterance; without it the duplicate gate can't
-        # tell a barge-in after a tool call from a re-finalized turn and silences the reply.
+        # tell a barge-in after a tool call from a re-finalized turn and silences the reply. It continues
+        # the parent's reply rather than answering new speech, so restating that reply is still a duplicate.
         pending_user = self._pending_user_input
         if pending_user and pending_user[0] == meta_info.get("turn_id"):
-            self._pending_user_input = (followup_meta_info["turn_id"], pending_user[1])
+            self._pending_user_input = (followup_meta_info["turn_id"], pending_user[1], False)
         logger.info(
             "BOLNA_TRACE_META followup seq=%s turn=%s response_uid=%s group_uid=%s parent_response_uid=%s request_id=%s parent_seq=%s parent_turn=%s",
             followup_meta_info.get("sequence_id"),
@@ -4284,8 +4287,6 @@ class TaskManager(BaseManager):
                     if routing_tail is None:
                         self._log_routing_response(routing_info, routing_usage, meta_info)
 
-                    is_silence_trigger = routing_info.get("is_silence_trigger", False)
-
                     current_node = self.tools["llm_agent"].get_node_by_id(routing_info["current_node"])
                     if current_node:
                         self.repeat_after_silence_seconds = current_node.get("repeat_after_silence_seconds")
@@ -4299,17 +4300,16 @@ class TaskManager(BaseManager):
                     turn_id = meta_info.get("turn_id")
                     response_uid = meta_info.get("response_uid")
 
-                    if not is_silence_trigger:
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": static_text,
-                                "turn_id": turn_id,
-                                "response_uid": response_uid,
-                            }
-                        )
-                        self._stage_assistant_history(meta_info, static_text)
-                        self.conversation_history.sync_interim(messages)
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": static_text,
+                            "turn_id": turn_id,
+                            "response_uid": response_uid,
+                        }
+                    )
+                    self._stage_assistant_history(meta_info, static_text)
+                    self.conversation_history.sync_interim(messages)
 
                     convert_to_request_log(
                         message=static_text,
@@ -4325,7 +4325,6 @@ class TaskManager(BaseManager):
                     meta_info["text"] = static_text
                     meta_info["cached"] = True
                     meta_info["message_category"] = "static_node"
-                    meta_info["is_silence_trigger"] = is_silence_trigger
                     ws_packet = create_ws_data_packet(static_hash, meta_info=meta_info, is_md5_hash=True)
                     await self.__play_static_clip(ws_packet, ends_call=llm_message.get(HANGUP_AFTER_REPLY, False))
                     return
@@ -5257,12 +5256,14 @@ class TaskManager(BaseManager):
         if sequence_id is None or not content or not str(content).strip():
             return
         pending_user = self._pending_user_input
+        answered = pending_user if pending_user and pending_user[0] == turn_id else None
         self._pending_assistant_history[sequence_id] = {
             "content": content,
             "turn_id": turn_id,
             "response_uid": response_uid,
             "message_category": meta_info.get("message_category"),
-            "user_input": pending_user[1] if pending_user and pending_user[0] == turn_id else None,
+            "user_input": answered[1] if answered else None,
+            "answers_fresh_turn": answered[2] if answered else False,
         }
         logger.info(
             "BOLNA_TRACE_TM stage_assistant_history seq=%s turn=%s response_uid=%s text_len=%s",
@@ -5300,6 +5301,18 @@ class TaskManager(BaseManager):
             return False
         similarity = normalized_similarity(staged["content"], previous_text)
         if similarity < DUPLICATE_RESPONSE_SIMILARITY:
+            return False
+        # A caller who spoke with nothing in flight has heard or cut off the previous reply, so an
+        # identical answer is a real one, even when their words repeat ("hello?", "repeat please").
+        if staged.get("answers_fresh_turn"):
+            logger.info(
+                "BOLNA_TRACE_TM duplicate_reply_fresh_user_turn seq=%s turn=%s previous_turn=%s "
+                "similarity=%.2f, speaking it: nothing was in flight when the caller spoke",
+                sequence_id,
+                turn_id,
+                previous_turn_id,
+                similarity,
+            )
             return False
         # Only a re-finalized utterance is a duplicate: the same reply to a *new* user turn is a
         # real answer, and suppressing it leaves silence and no transcript line. Unknown → unchanged.
@@ -5538,7 +5551,7 @@ class TaskManager(BaseManager):
             transcriber_message, asr_turn_id=asr_id_to_int(meta_info.get("asr_turn_id"))
         )
         if meta_info.get("turn_id") is not None:
-            self._pending_user_input = (meta_info.get("turn_id"), transcriber_message)
+            self._pending_user_input = (meta_info.get("turn_id"), transcriber_message, not overlapped)
         logger.info(
             "BOLNA_TRACE_TM append_user seq=%s turn=%s response_uid=%s history_len=%s text=%r",
             meta_info.get("sequence_id"),
@@ -7718,9 +7731,7 @@ class TaskManager(BaseManager):
     def _stamp_cached_clip_text(self, meta_info):
         """Give the mark its text so an interrupted clip can be trimmed. Cached-send branch
         only: the cache-miss path re-synthesizes live and would stamp every chunk. See INIT.md."""
-        if meta_info.get("message_category") not in CACHED_SINGLE_MARK_CATEGORIES or meta_info.get(
-            "is_silence_trigger"
-        ):
+        if meta_info.get("message_category") not in CACHED_SINGLE_MARK_CATEGORIES:
             return
         meta_info["text_synthesized"] = meta_info.get("text", "")
 
