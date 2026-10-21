@@ -80,6 +80,65 @@ def _assistant_content(history):
     return next(m["content"] for m in reversed(history.messages) if m["role"] == "assistant")
 
 
+AZURE_SENTENCES = (
+    "Our showroom is open from nine to seven.",
+    "You can book a test drive online.",
+    "Would Saturday morning work for you?",
+)
+
+
+def _make_azure_tm():
+    """Azure streams each sentence as many audio packets and puts its text only on the last one.
+    The first sentence has played and been ACKed; the other two were sent ahead of playout."""
+    tm = TaskManager.__new__(TaskManager)
+    history = ConversationHistory()
+    history.append_user("when is the showroom open")
+    history.append_assistant(" ".join(AZURE_SENTENCES), turn_id=8, response_uid="r8")
+    tm.conversation_history = history
+    tm.tools = {"input": _InputStub()}
+    tm._turn_msg_map = {}
+
+    marks = MarkEventMetaData()
+    sent_ts = time.time() - 30
+    for index, sentence in enumerate(AZURE_SENTENCES):
+        for packet in range(10):
+            last = packet == 9
+            mark_id = f"s{index}p{packet}"
+            marks.update_data(
+                mark_id,
+                {
+                    "type": "",
+                    "turn_id": 8,
+                    "response_uid": "r8",
+                    "sequence_id": 8,
+                    "duration": 0.036 if last else 0.3,
+                    "text_synthesized": f"{sentence} " if last else "",
+                    "sent_ts": sent_ts,
+                },
+            )
+            sent_ts += 0.02
+            if index == 0:
+                marks.record_heard_text(marks.fetch_data(mark_id), f"{sentence} " if last else "")
+    tm.mark_event_meta_data = marks
+    return tm, history, marks
+
+
+async def test_azure_barge_in_credits_no_sentence_whose_audio_has_not_finished():
+    tm, history, marks = _make_azure_tm()
+    clear_ts = marks.get_last_ack_ts_for_turn(8) + 1.5  # half of the second sentence's 2.7s of audio
+    marks.clear_data()
+    await tm.sync_history(marks.fetch_cleared_mark_event_data().items(), clear_ts)
+    assert _assistant_content(history) == AZURE_SENTENCES[0]
+
+
+async def test_azure_barge_in_credits_a_sentence_once_all_its_audio_played():
+    tm, history, marks = _make_azure_tm()
+    clear_ts = marks.get_last_ack_ts_for_turn(8) + 3.0  # past the second sentence, into the third
+    marks.clear_data()
+    await tm.sync_history(marks.fetch_cleared_mark_event_data().items(), clear_ts)
+    assert _assistant_content(history) == " ".join(AZURE_SENTENCES[:2])
+
+
 async def test_credits_unacked_tail_that_finished_playing():
     tm, history, marks = _make_tm()
     teardown_ts = marks.get_last_ack_ts_for_turn(8) + 20  # well past the 9.6s tail

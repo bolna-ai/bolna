@@ -2537,7 +2537,9 @@ class TaskManager(BaseManager):
                 partial_text = chunk["text"][:char_count]
                 if partial_text and char_count < len(chunk["text"]):
                     words = self._trim_partial_to_complete_words(partial_text)
-                    boundary_space = partial_text[:1] if played_text and words and partial_text[:1].isspace() else ""
+                    boundary_space = (
+                        partial_text[:1] if any(played_text) and words and partial_text[:1].isspace() else ""
+                    )
                     partial_text = boundary_space + words
                 if partial_text:
                     played_text.append(partial_text)
@@ -2545,13 +2547,17 @@ class TaskManager(BaseManager):
         return "".join(played_text)
 
     @staticmethod
-    def _pending_text_chunks(mark_events_data, turn_id):
-        """Unacked audio marks of turn_id that carry text, in send order."""
+    def _pending_audio_chunks(mark_events_data, turn_id):
+        """Unacked audio marks of turn_id in send order. A mark without text still takes its playing time:
+        Azure puts a sentence's text only on its last packet."""
         return [
-            {"text": text, "duration": mark_data.get("duration", 0), "sent_ts": mark_data.get("sent_ts") or 0}
+            {
+                "text": mark_data.get("text_synthesized") or "",
+                "duration": mark_data.get("duration", 0),
+                "sent_ts": mark_data.get("sent_ts") or 0,
+            }
             for _, mark_data in mark_events_data
-            if (text := mark_data.get("text_synthesized"))
-            and mark_data.get("type") not in NON_EVIDENCE_MARK_TYPES
+            if mark_data.get("type") not in NON_EVIDENCE_MARK_TYPES
             and (turn_id is None or mark_data.get("turn_id") == turn_id)
         ]
 
@@ -2631,8 +2637,9 @@ class TaskManager(BaseManager):
             if response_heard:
                 logger.info(f"response_heard (last 10 chars): {response_heard[-10:]}")
 
-            pending_chunks = self._pending_text_chunks(mark_events_data, target_turn_id)
-            if pending_chunks:
+            pending_chunks = self._pending_audio_chunks(mark_events_data, target_turn_id)
+            first_pending_text = next((chunk["text"] for chunk in pending_chunks if chunk["text"]), "")
+            if first_pending_text:
                 played_from = self._unacked_playback_start(pending_chunks, target_turn_id, bool(response_heard))
                 if played_from is not None:
                     played_for = self._unacked_audio_played(pending_chunks, played_from, interruption_processed_at)
@@ -2642,10 +2649,10 @@ class TaskManager(BaseManager):
                             f"sync_history: crediting unacked tail ({played_for:.2f}s played, {len(tail_text)} chars)"
                         )
                         response_heard = self._join_heard_tail(
-                            response_heard, tail_text, target_turn_id, pending_chunks[0]["text"]
+                            response_heard, tail_text, target_turn_id, first_pending_text
                         )
 
-            if not response_heard and not pending_chunks:
+            if not response_heard and not first_pending_text:
                 pending_marks = [{"mark_id": k, "mark_data": v} for k, v in mark_events_data]
                 # No text_synthesized on marks (streaming synths). Group pending
                 # marks by turn_id and use audio duration to determine play state.
