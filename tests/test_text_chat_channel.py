@@ -62,6 +62,20 @@ def test_setup_text_chat_builds_no_transcriber_or_synthesizer():
     assert llm_config["buffer_size"] == 40
 
 
+def test_setup_text_chat_starts_in_the_agents_language():
+    tm = make_chat_tm()
+    tm.tools = {}
+    tm.task_config = {"tools_config": {"transcriber": {"provider": "deepgram", "language": "hi"}}}
+    tm._TaskManager__setup_text_chat()
+    assert tm.language == "hi"
+
+    tm.task_config = {
+        "tools_config": {"transcriber": {"multilingual": {"hi": {}, "en": {}}, "active": "en", "language": "hi"}}
+    }
+    tm._TaskManager__setup_text_chat()
+    assert tm.language == "en"
+
+
 # --- output -----------------------------------------------------------------------------------------------------
 
 
