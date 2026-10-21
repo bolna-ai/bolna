@@ -76,6 +76,8 @@ _VOICE_IDS = {}  # (host, lowercased display name) -> voice id
 
 
 class KalpaSynthesizer(StreamSynthesizer):
+    settles_lost_turns = True  # receiver() ends each utterance lost with its socket
+
     def __init__(
         self,
         voice=None,
