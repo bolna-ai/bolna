@@ -21,6 +21,7 @@ import traceback
 from collections import deque
 
 import websockets
+from websockets.frames import OK_CLOSE_CODES
 
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
@@ -384,11 +385,32 @@ class StreamSynthesizer(BaseSynthesizer):
     # monitor_connection() — shared reconnect loop
     # ------------------------------------------------------------------
 
+    def server_rejection(self, ws):
+        """The reason the provider gave for closing `ws` with an error code, or None."""
+        protocol = getattr(ws, "protocol", None)
+        frame = getattr(protocol, "close_rcvd", None)
+        if frame is None or frame.code in OK_CLOSE_CODES or protocol.close_rcvd_then_sent is False:
+            return None
+        return f"{self.provider_name} closed the connection ({frame.code}): {frame.reason}"
+
     async def monitor_connection(self):
         consecutive_failures = 0
+        # A provider that keeps closing fresh sockets with an error code is rejecting the call.
+        consecutive_rejections = 0
+        rejected_ws = None
 
         while consecutive_failures < MAX_CONNECTION_FAILURES:
             if not self._is_ws_connected():
+                rejection = self.server_rejection(self.websocket)
+                if rejection is None:
+                    consecutive_rejections = 0
+                elif self.websocket is not rejected_ws:
+                    rejected_ws = self.websocket
+                    consecutive_rejections += 1
+                    logger.warning(rejection)
+                    if consecutive_rejections >= MAX_CONNECTION_FAILURES:
+                        self.connection_error = self.connection_error or rejection
+                        break
                 logger.info(f"Re-establishing {self.provider_name} connection...")
                 result = await self.establish_connection()
                 if result is None:
@@ -404,6 +426,8 @@ class StreamSynthesizer(BaseSynthesizer):
                 else:
                     self.websocket = result
                     consecutive_failures = 0
+            else:
+                consecutive_rejections = 0
             await asyncio.sleep(1)
 
     # ------------------------------------------------------------------

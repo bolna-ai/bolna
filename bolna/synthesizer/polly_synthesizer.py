@@ -6,7 +6,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from contextlib import AsyncExitStack
 from dotenv import load_dotenv
 
-from .base_synthesizer import BaseSynthesizer
+from .base_synthesizer import BaseSynthesizer, raise_if_rejected
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import convert_audio_to_wav
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
@@ -88,6 +88,8 @@ class PollySynthesizer(BaseSynthesizer):
                 )
             except (BotoCoreError, ClientError) as error:
                 logger.error(error)
+                if isinstance(error, ClientError):
+                    raise_if_rejected("Polly", error.response.get("ResponseMetadata", {}).get("HTTPStatusCode"), error)
                 return None
             else:
                 return await response["AudioStream"].read()

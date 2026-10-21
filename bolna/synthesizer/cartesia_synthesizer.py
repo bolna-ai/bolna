@@ -9,6 +9,7 @@ import base64
 import websockets
 from websockets.exceptions import InvalidHandshake
 
+from .base_synthesizer import REJECTED_STATUSES, raise_if_rejected
 from .stream_synthesizer import StreamSynthesizer
 from bolna.constants import CARTESIA_VOLUME_MAX, CARTESIA_VOLUME_MIN, CARTESIA_VOLUME_MODELS
 from bolna.helpers.logger_config import configure_logger
@@ -220,6 +221,12 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 if data.get("context_id") in self.context_ids_to_ignore:
                     continue
 
+                if data.get("type") == "error" and data.get("status_code") in REJECTED_STATUSES:
+                    logger.error(f"Cartesia rejected the stream: {data}")
+                    self.connection_error = (
+                        f"Cartesia rejected the request ({data['status_code']}): {data.get('error')}"
+                    )
+                    return
                 if "data" in data and data["data"]:
                     yield base64.b64decode(data["data"])
                 elif "done" in data and data["done"]:
@@ -303,5 +310,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 if response.status == 200:
                     return await response.read()
                 else:
-                    logger.error(f"Error: {response.status} - {await response.text()}")
+                    detail = await response.text()
+                    logger.error(f"Error: {response.status} - {detail}")
+                    raise_if_rejected("Cartesia", response.status, detail)
                     return None
