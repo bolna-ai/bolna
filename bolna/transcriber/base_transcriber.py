@@ -4,6 +4,7 @@ import time
 import uuid
 from typing import Callable
 from dotenv import load_dotenv
+from websockets.frames import OK_CLOSE_CODES
 from bolna.helpers.logger_config import configure_logger
 
 load_dotenv()
@@ -51,6 +52,13 @@ class BaseTranscriber:
         """The call's ASR usage: every closed connection plus the one still open. task_manager reads
         this at teardown because after a hangup it stops reading closing packets after the first."""
         return self.closed_connections_billed_s + self._connection_billed_s()
+
+    def record_server_close(self, error, provider: str) -> None:
+        """Keep a close the provider started with an error code as the connection error, unless one is set."""
+        frame = getattr(error, "rcvd", None)
+        if frame is None or frame.code in OK_CLOSE_CODES or error.rcvd_then_sent is False or self.connection_error:
+            return
+        self.connection_error = f"{provider} closed the connection ({frame.code}): {frame.reason}"
 
     def closing_meta(self) -> dict:
         """Meta for the connection's transcriber_connection_closed packet. Closes the billing window, so

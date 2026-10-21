@@ -1120,6 +1120,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     error_code = msg.get("code", "unknown")
                     error_desc = msg.get("description", "No description")
                     logger.error(f"Flux error: {error_code} - {error_desc}")
+                    self.connection_error = f"Deepgram Flux {error_code}: {error_desc}"
 
             except Exception as e:
                 traceback.print_exc()
