@@ -108,7 +108,9 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 self.context_ids_to_ignore.add(self.context_id)
                 interrupt_message = {"context_id": self.context_id, "cancel": True}
                 logger.info(f"handle_interruption: {interrupt_message}")
-                await self.websocket.send(json.dumps(interrupt_message))
+                # A socket still connecting has nothing to cancel; the ignore set above already drops this context.
+                if self._is_ws_connected():
+                    await self.websocket.send(json.dumps(interrupt_message))
                 self.context_id = None
                 # The interrupted context's end-of-stream is now dropped, so the
                 # next turn must be re-detected as new to clear stale queue entries.

@@ -1,5 +1,7 @@
 import asyncio
+import time
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.utils import process_task_cancellation
 
 logger = configure_logger(__name__)
 
@@ -22,14 +24,20 @@ class SynthesizerPool:
     one started; a SENTINEL is pushed so the pool's generate() returns,
     letting __listen_synthesizer's outer while-loop re-enter and pick up
     the new active synth.
+
+    With lazy_legs only the active synth connects at call start. Another leg
+    connects when open() is called (the detector heard its language) or when
+    the call switches to it, and closes again once nothing needs it.
     """
 
-    def __init__(self, synthesizers, active_label, multilingual_config):
+    def __init__(self, synthesizers, active_label, multilingual_config, lazy_legs=False, record_event=None):
         """
         Args:
             synthesizers: dict mapping label -> synthesizer instance.
             active_label: which synthesizer should be active initially.
             multilingual_config: raw multilingual config dict from task_config
+            lazy_legs: connect only the legs in use instead of every leg for the whole call.
+            record_event: optional callback taking a telemetry dict (leg opens, switches, closes).
         """
         self.synthesizers = synthesizers
 
@@ -41,6 +49,17 @@ class SynthesizerPool:
         self._monitor_tasks = {}  # label -> monitor task
         self._multilingual_config = multilingual_config
         self._switch_lock = asyncio.Lock()
+        self.lazy_legs = lazy_legs
+        self.record_event = record_event
+        # label -> pending switch decisions that opened it early; it stays open while any is undecided.
+        self.leg_holders = {}
+        # label -> time.monotonic() of the lazy open, for telemetry.
+        self.leg_opened_at = {}
+        # Lazy legs that have carried the call since they were opened.
+        self.used_labels = set()
+        self.leg_close_tasks = set()
+        # Set by cleanup(): from then on nothing opens or closes a leg underneath it.
+        self.cleaning_up = False
 
     # ------------------------------------------------------------------
     # Properties
@@ -96,11 +115,17 @@ class SynthesizerPool:
     # ------------------------------------------------------------------
 
     async def monitor_connection(self):
-        """Start monitor_connection() on ALL synthesizers (keeps standby WebSockets alive)."""
+        """Start monitor_connection() on ALL synthesizers (keeps standby WebSockets alive); with lazy_legs only on
+        the active one."""
         for label, synth in self.synthesizers.items():
+            if self.is_lazy(label) and label != self.active_label:
+                continue
             task = asyncio.create_task(synth.monitor_connection())
             self._monitor_tasks[label] = task
             logger.info(f"SynthesizerPool: monitor started for '{label}'")
+        if self.is_lazy(self.active_label):
+            self.leg_opened_at[self.active_label] = time.monotonic()
+            self.used_labels.add(self.active_label)
 
         # Start the generate-forwarding task for the active synth
         self._gen_task = asyncio.create_task(self._run_generate(self.active_label))
@@ -131,6 +156,95 @@ class SynthesizerPool:
             yield message
 
     # ------------------------------------------------------------------
+    # Lazy legs
+    # ------------------------------------------------------------------
+
+    def is_lazy(self, label):
+        """Lazily managed legs are the ones whose socket can close and reopen; any other synth (HTTP-only, or one
+        that keeps its socket elsewhere) stays connected for the whole call, as without lazy legs."""
+        return self.lazy_legs and callable(getattr(self.synthesizers[label], "close_connection", None))
+
+    def is_connected(self, label):
+        """True when the leg can synthesize now: its socket is up, or it needs none (HTTP synthesis)."""
+        synth = self.synthesizers[label]
+        is_ws_connected = getattr(synth, "_is_ws_connected", None)
+        if is_ws_connected is None or not getattr(synth, "stream", True):
+            return True
+        return is_ws_connected()
+
+    def open(self, label, holder=None, reason="switch"):
+        """Start connecting a lazy leg ahead of its use. Idempotent; a holder keeps it open until release()."""
+        if self.cleaning_up or label not in self.synthesizers or not self.is_lazy(label):
+            return
+        if holder is not None:
+            self.leg_holders.setdefault(label, set()).add(holder)
+        monitor = self._monitor_tasks.get(label)
+        if monitor is not None and not monitor.done():
+            return
+        synth = self.synthesizers[label]
+        # An earlier connection's failure would make the next sender give up without waiting.
+        if getattr(synth, "connection_error", None) is not None:
+            synth.connection_error = None
+        self._monitor_tasks[label] = asyncio.create_task(synth.monitor_connection())
+        self.leg_opened_at[label] = time.monotonic()
+        self.record({"type": "leg_open", "component": "tts", "language": label, "reason": reason})
+        logger.info(f"SynthesizerPool: opened '{label}' ({reason})")
+
+    def release(self, holder):
+        """Drop a decision's hold on the legs it opened early, closing the ones nothing else needs."""
+        for label, holders in list(self.leg_holders.items()):
+            if holder not in holders:
+                continue
+            holders.discard(holder)
+            if not holders:
+                del self.leg_holders[label]
+                self.close_later(label, reason="not_switched")
+
+    def close_later(self, label, reason):
+        """Close an idle lazy leg in the background; never the active leg or one a decision still holds."""
+        if self.cleaning_up or not self.is_lazy(label) or label == self.active_label or self.leg_holders.get(label):
+            return
+        task = asyncio.create_task(self.close_leg(label, reason))
+        self.leg_close_tasks.add(task)
+        task.add_done_callback(self.leg_close_tasks.discard)
+
+    async def close_leg(self, label, reason):
+        # Re-checked here: a switch or a new early open may have claimed the leg since close_later.
+        if label == self.active_label or self.leg_holders.get(label):
+            return
+        monitor = self._monitor_tasks.pop(label, None)
+        if monitor is None:
+            return
+        opened_at = self.leg_opened_at.pop(label, None)
+        used = label in self.used_labels
+        self.used_labels.discard(label)
+        # Stop reconnects before dropping the socket; close_connection detaches it before its first await.
+        monitor.cancel()
+        close_connection = getattr(self.synthesizers[label], "close_connection", None)
+        if close_connection is not None:
+            await close_connection()
+        await process_task_cancellation(monitor, f"SynthesizerPool monitor for '{label}'")
+        self.record(
+            {
+                "type": "leg_close",
+                "component": "tts",
+                "language": label,
+                "reason": reason,
+                "open_s": round(time.monotonic() - opened_at, 3) if opened_at is not None else None,
+                "used": used,
+            }
+        )
+        logger.info(f"SynthesizerPool: closed '{label}' ({reason})")
+
+    def record(self, event):
+        if self.record_event is None:
+            return
+        try:
+            self.record_event(event)
+        except Exception as e:
+            logger.warning(f"SynthesizerPool: could not record {event.get('type')}: {e}")
+
+    # ------------------------------------------------------------------
     # Switching
     # ------------------------------------------------------------------
 
@@ -157,6 +271,22 @@ class SynthesizerPool:
 
             old = self.active_label
 
+            if self.is_lazy(label):
+                opened_at = self.leg_opened_at.get(label)
+                self.record(
+                    {
+                        "type": "leg_switch",
+                        "component": "tts",
+                        "language": label,
+                        "ready": label in self._monitor_tasks and self.is_connected(label),
+                        "opened_ms_before": (
+                            round((time.monotonic() - opened_at) * 1000) if opened_at is not None else None
+                        ),
+                    }
+                )
+                # Not connected yet: the first sender waits in _wait_for_ws, which wakes on the connect.
+                self.open(label, reason="switch")
+
             if self._gen_task and not self._gen_task.done():
                 self._gen_task.cancel()
                 try:
@@ -171,6 +301,10 @@ class SynthesizerPool:
 
             self._output_queue.put_nowait(_SWITCH_SENTINEL)
             logger.info(f"SynthesizerPool: switched {old} -> {label}")
+
+            if self.is_lazy(label):
+                self.used_labels.add(label)
+            self.close_later(old, reason="switched_away")
 
     # ------------------------------------------------------------------
     # Active synth info
@@ -192,6 +326,10 @@ class SynthesizerPool:
 
     async def cleanup(self):
         """Clean up all synthesizers and cancel all tasks."""
+        self.cleaning_up = True
+        for task in list(self.leg_close_tasks):
+            await process_task_cancellation(task, "SynthesizerPool leg close")
+
         # Cancel generate task
         if self._gen_task and not self._gen_task.done():
             self._gen_task.cancel()
@@ -201,7 +339,7 @@ class SynthesizerPool:
                 pass
 
         # Cancel monitor tasks
-        for label, task in self._monitor_tasks.items():
+        for label, task in list(self._monitor_tasks.items()):
             if task and not task.done():
                 task.cancel()
                 try:

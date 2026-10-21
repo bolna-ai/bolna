@@ -648,6 +648,7 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
             if websocket is None:
                 return False
             self.websocket = websocket
+            self.websocket_ready.set()
             return True
 
     async def monitor_connection(self):
@@ -876,6 +877,15 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
                     self.connection_error = self.connection_error or str(e)
                     return
                 await asyncio.sleep(0.1)
+
+    async def close_connection(self):
+        """Also stop the keep-alive and any redial a barge-in started, or they would reopen the socket closed here."""
+        for task in (self._keep_alive_task, self._reconnect_task):
+            if task:
+                task.cancel()
+        self._keep_alive_task = None
+        self._reconnect_task = None
+        await super().close_connection()
 
     async def cleanup(self):
         for task in (self._keep_alive_task, self._reconnect_task):

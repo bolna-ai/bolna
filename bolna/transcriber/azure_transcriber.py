@@ -18,6 +18,9 @@ load_dotenv()
 
 
 class AzureTranscriber(BaseTranscriber):
+    # The Speech SDK starts recognition synchronously on the event loop (.get() in initialize_connection).
+    reopens_mid_call = False
+
     def __init__(
         self,
         telephony_provider,
