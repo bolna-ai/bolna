@@ -97,6 +97,10 @@ class BaseSynthesizer:
     async def handle_interruption(self):
         pass
 
+    def abandon_open_turn(self):
+        """Close the open turn's latency record on interruption; streaming synthesizers override."""
+        pass
+
     # ------------------------------------------------------------------
     # Meta-info helpers used by generate() implementations
     # ------------------------------------------------------------------
