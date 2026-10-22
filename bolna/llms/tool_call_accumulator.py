@@ -66,7 +66,7 @@ class ToolCallAccumulator:
         """Build the final API call payload from accumulated tool-call data.
 
         Validates required parameters against the tool spec and merges parsed
-        arguments into the payload. Returns ``None`` if no tool calls or the
+        arguments into a separate data mapping. Returns ``None`` if no tool calls or the
         function isn't in ``api_params``.
         """
         if not self.final_tool_calls:
@@ -124,8 +124,7 @@ class ToolCallAccumulator:
                     is_cached=False,
                     run_id=self.run_id,
                 )
-                for k, v in parsed_args.items():
-                    setattr(api_call_payload, k, v)
+                api_call_payload.arguments = parsed_args
             else:
                 api_call_payload.resp = None
         except (json.JSONDecodeError, KeyError) as e:

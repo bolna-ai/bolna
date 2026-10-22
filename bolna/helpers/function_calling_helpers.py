@@ -217,7 +217,9 @@ def substitute_var_markers(obj, values):
         return obj  # Primitives returned as-is
 
 
-def prepare_api_request(param, api_token, headers_data, **kwargs):
+def prepare_api_request(param, api_token, headers_data, *, arguments=None, **kwargs):
+    # Legacy callers may pass individual template values; model tool calls use a mapping.
+    kwargs = arguments if arguments is not None else kwargs
     request_body, api_params = None, None
     if param:
         # NEW FORMAT: Check for $var markers (type-safe JSON substitution)
@@ -286,12 +288,13 @@ async def trigger_api(
     run_id,
     return_response_metadata=False,
     called_fun=None,
+    arguments=None,
     **kwargs,
 ):
     timeout_seconds = 10
     try:
         await validate_outbound_url(url)
-        prepared_request = prepare_api_request(param, api_token, headers_data, **kwargs)
+        prepared_request = prepare_api_request(param, api_token, headers_data, arguments=arguments, **kwargs)
         request_body = prepared_request["request_body"]
         api_params = prepared_request["api_params"]
         headers = prepared_request["headers"]
