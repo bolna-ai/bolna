@@ -13,6 +13,7 @@ import aiohttp
 import websockets
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.constants import ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, resample
@@ -101,6 +102,7 @@ class ElevenlabsBase(StreamSynthesizer):
         style=0,
         synthesizer_key=None,
         caching=True,
+        pronunciation_dictionary_locators=None,
         **kwargs,
     ):
         super().__init__(
@@ -116,6 +118,7 @@ class ElevenlabsBase(StreamSynthesizer):
         self.sampling_rate = sampling_rate
         self.speed = speed
         self.style = style
+        self.pronunciation_dictionary_locators = self._pronunciation_locators(pronunciation_dictionary_locators)
         self.audio_format = "mp3"
         self.use_mulaw = kwargs.get("use_mulaw", True)
         self.temperature = temperature
@@ -138,6 +141,46 @@ class ElevenlabsBase(StreamSynthesizer):
             rate = int(self.sampling_rate)
             self.wire_pcm_rate = rate if rate in (16000, 22050, 24000, 44100) else 24000
             self.wire_format = f"pcm_{self.wire_pcm_rate}"
+
+    @staticmethod
+    def _pronunciation_locators(locators):
+        """Plain-dict locators within ElevenLabsConfig's limits.
+
+        Every language's voice is built at call start, so an invalid locator is dropped rather than failing the call."""
+        valid = []
+        for locator in locators or []:
+            locator = locator.model_dump() if hasattr(locator, "model_dump") else locator
+            if isinstance(locator, dict) and locator.get("pronunciation_dictionary_id") and locator.get("version_id"):
+                valid.append(
+                    {
+                        "pronunciation_dictionary_id": locator["pronunciation_dictionary_id"],
+                        "version_id": locator["version_id"],
+                    }
+                )
+            else:
+                logger.warning(f"Dropping ElevenLabs pronunciation dictionary without both IDs: {locator}")
+        if len(valid) > ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES:
+            logger.warning(
+                f"ElevenLabs accepts at most {ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES} pronunciation dictionaries; "
+                f"dropping {valid[ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES:]}"
+            )
+        return valid[:ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES]
+
+    def _drop_rejected_dictionaries(self, *details):
+        """True when an ElevenLabs error rejects our dictionaries, e.g. one deleted after the save.
+
+        They're dropped and recorded, so the call speaks on without them."""
+        text = " ".join(str(detail) for detail in details if detail)
+        if not self.pronunciation_dictionary_locators or not re.search(r"pronunciation|dictionar", text, re.I):
+            return False
+        dropped = [locator["pronunciation_dictionary_id"] for locator in self.pronunciation_dictionary_locators]
+        self.pronunciation_dictionary_locators = []
+        logger.error(f"ElevenLabs rejected pronunciation dictionaries {dropped}, continuing without them: {text}")
+        if self.task_manager_instance is not None:
+            self.task_manager_instance.record_non_fatal_synthesizer_error(
+                {"error_type": "pronunciation_dictionary_rejected", "error": text, "dictionaries": dropped}
+            )
+        return True
 
     def _get_audio_format(self):
         return "mulaw" if self.wire_format == "ulaw_8000" else "wav"
@@ -186,6 +229,8 @@ class ElevenlabsBase(StreamSynthesizer):
                 "style": self.style,
             },
         }
+        if self.pronunciation_dictionary_locators:
+            payload["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
         headers = {"xi-api-key": self.api_key}
         fmt = format or self._get_output_format()
         url = f"{self.api_url}{fmt}"
@@ -221,6 +266,7 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
         self.current_turn_ttfb = None
         self.eos_accum_context_id = None  # context whose spoken chars are being accumulated
         self.eos_accum_text = ""  # spoken-so-far for that context (end-of-stream match)
+        self.dictionary_context_id = None  # last context whose first message carried the dictionaries
         self._reported_closed_ws = None  # socket whose close was already logged
         self.pending_text = ""
         self.pending_sequence_id = None
@@ -324,11 +370,14 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                     await self.flush_synthesizer_stream()
                     return
                 try:
+                    message = {"text": f"{unit} ", "context_id": self.context_id, "flush": True}
+                    # ElevenLabs reads dictionaries only from a context's first message.
+                    if self.pronunciation_dictionary_locators and self.context_id != self.dictionary_context_id:
+                        message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
+                        self.dictionary_context_id = self.context_id
                     # Claim before sending: text lost into a socket that dies mid-send is still this turn's.
                     self.current_turn_socket = self.websocket
-                    await self.websocket.send(
-                        json.dumps({"text": f"{unit} ", "context_id": self.context_id, "flush": True})
-                    )
+                    await self.websocket.send(json.dumps(message))
                 except websockets.exceptions.ConnectionClosed:
                     self._send_hit_closed_socket(end_of_llm_stream)
                     return
@@ -412,6 +461,9 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                 consecutive_errors = 0  # successful recv — reset the error backoff
 
                 ctx = data.get("contextId")
+                # Before the ignore check: a rejection that lands on an interrupted context still has to drop them.
+                if data.get("error") and self._drop_rejected_dictionaries(data.get("error"), data.get("message")):
+                    continue
                 if ctx in self.context_ids_to_ignore:
                     continue
 
@@ -534,6 +586,8 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                 "xi_api_key": self.api_key,
             }
             await websocket.send(json.dumps(bos_message))
+            # A new socket knows none of our contexts, so the next message must carry the dictionaries again.
+            self.dictionary_context_id = None
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
@@ -605,15 +659,14 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
                 self.ws_trace_id = websocket.response.headers.get("x-trace-id")
                 logger.info(f"Elevenlabs v3 WebSocket connected trace_id={self.ws_trace_id}")
-            # First message only. stability is the sole setting v3 honours.
-            await websocket.send(
-                json.dumps(
-                    {
-                        "voices": [self.voice],
-                        "voice_settings": {"stability": self.temperature},
-                    }
-                )
-            )
+            # First message only. stability is the sole setting v3 honours; dictionaries apply to the whole socket.
+            first_message = {
+                "voices": [self.voice],
+                "voice_settings": {"stability": self.temperature},
+            }
+            if self.pronunciation_dictionary_locators:
+                first_message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
+            await websocket.send(json.dumps(first_message))
             self._last_send_time = time.perf_counter()
             self._new_turn_pending = True
             # Teardown is over once a replacement is up.
@@ -817,6 +870,13 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
                 consecutive_errors = 0
 
                 if data.get("error"):
+                    if self._drop_rejected_dictionaries(data.get("error"), data.get("message")):
+                        # They ride on the socket's first message, so redial; end any turn that was speaking on it.
+                        await self.handle_interruption()
+                        if not self._turn_eos_emitted:
+                            self._turn_eos_emitted = True
+                            yield b"\x00", ""
+                        continue
                     logger.error(f"ElevenLabs v3 error: {data.get('error')} - {data.get('message')}")
                     self.connection_error = data.get("message") or data.get("error")
                     return

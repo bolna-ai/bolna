@@ -105,6 +105,8 @@ class SonioxTranscriber(BaseTranscriber):
         self.current_turn_interim_details = []
         self.turn_counter = 0
         self.last_interim_time = None
+        # Stream position (ms) where the turn's last final word ended: the caller's real speech end.
+        self.turn_last_word_end_ms = None
         self._last_detected_language = None
         # Set while a discarded turn's flushed tokens are still due back (see discard_open_turn).
         self.discard_until_fin_deadline = None
@@ -193,10 +195,10 @@ class SonioxTranscriber(BaseTranscriber):
         except Exception as e:
             raise ConnectionError(f"Unexpected error connecting to Soniox websocket: {e}")
 
-    def _audio_frame_seconds(self, num_bytes: int) -> float:
+    def _audio_frame_seconds(self, num_bytes: int, measured: bool = False) -> float:
         """Audio carried by one send. Measured where the input handler batches something other than
-        the constant it is booked at; every other path really does send the constant."""
-        if self.provider not in MEASURED_FRAME_PROVIDERS:
+        the constant it is booked at (and for pool keepalives); every other path sends the constant."""
+        if self.provider not in MEASURED_FRAME_PROVIDERS and not measured:
             return self.audio_frame_duration
         return num_bytes / ((1 if self.encoding == "mulaw" else 2) * self.sampling_rate)
 
@@ -223,7 +225,8 @@ class SonioxTranscriber(BaseTranscriber):
                 if not data:
                     continue
                 if isinstance(data, (bytes, bytearray)):
-                    self.record_audio_frame(self._audio_frame_seconds(len(data)), timestamp_ms())
+                    frame_seconds = self._audio_frame_seconds(len(data), measured=bool(ws_data_packet.get("keepalive")))
+                    self.record_audio_frame(frame_seconds, timestamp_ms())
                     self.count_audio_sent(len(data), self.sampling_rate, mulaw=self.encoding == "mulaw")
                 try:
                     await ws.send(data)
@@ -240,8 +243,11 @@ class SonioxTranscriber(BaseTranscriber):
             logger.error(f"Error in Soniox sender_stream: {e}")
             raise
 
-    def _start_turn(self):
+    def _start_turn(self, onset_ms=None):
         """Begin a new user turn on the first content token and record an eager latency stub."""
+        self.meta_info["user_start_ts_wall"] = self.audio_position_wall_time(
+            onset_ms / 1000 if onset_ms is not None else None
+        )
         self.turn_counter += 1
         self.current_turn_id = self.turn_counter
         now = timestamp_ms()
@@ -266,7 +272,10 @@ class SonioxTranscriber(BaseTranscriber):
         self.current_turn_id = None
         self.final_transcript = ""
         self.last_interim_time = None
+        self.turn_last_word_end_ms = None
         self.is_transcript_sent_for_processing = True
+        if self.meta_info is not None:
+            self.meta_info.pop("user_start_ts_wall", None)
 
     def _mark_last_interim_final(self):
         if not self.current_turn_interim_details:
@@ -292,6 +301,13 @@ class SonioxTranscriber(BaseTranscriber):
                 "last_interim_to_final_ms": last_interim_to_final_ms,
             }
         )
+
+    def turn_speech_end_wall(self):
+        """Wall-clock seconds the turn's last final word ended, or None (the endpoint offset applies then).
+        The endpoint delay is only Soniox's maximum, so subtracting it from now overshoots."""
+        if self.turn_last_word_end_ms is None:
+            return None
+        return self.audio_position_wall_time(self.turn_last_word_end_ms / 1000)
 
     def _find_audio_send_timestamp(self, audio_position_s):
         """Send-time (epoch ms) of the audio frame containing this position (seconds), or None."""
@@ -321,6 +337,7 @@ class SonioxTranscriber(BaseTranscriber):
                 new_final_text = ""
                 non_final_text = ""
                 latest_end_ms = None
+                earliest_start_ms = None
                 for token in res.get("tokens", []):
                     text = token.get("text", "")
                     if not text:
@@ -338,15 +355,22 @@ class SonioxTranscriber(BaseTranscriber):
                     end_ms = token.get("end_ms")
                     if end_ms is not None:
                         latest_end_ms = end_ms if latest_end_ms is None else max(latest_end_ms, end_ms)
+                    start_ms = token.get("start_ms")
+                    if start_ms is not None:
+                        earliest_start_ms = start_ms if earliest_start_ms is None else min(earliest_start_ms, start_ms)
                     if token.get("is_final"):
                         new_final_text += text
+                        if end_ms is not None and (
+                            self.turn_last_word_end_ms is None or end_ms > self.turn_last_word_end_ms
+                        ):
+                            self.turn_last_word_end_ms = end_ms
                     else:
                         non_final_text += text
 
                 has_content = bool(new_final_text or non_final_text)
 
                 if has_content and self.current_turn_id is None:
-                    self._start_turn()
+                    self._start_turn(earliest_start_ms)
                     yield create_ws_data_packet("speech_started", self.meta_info)
 
                 if new_final_text:
@@ -379,6 +403,7 @@ class SonioxTranscriber(BaseTranscriber):
                         logger.info(f"Soniox endpoint reached, yielding transcript: {final}")
                         self._build_finalized_turn_latency(final)
                         self.meta_info["user_stop_offset_ms"] = self.user_stop_offset_ms
+                        self.meta_info["user_stop_ts_wall"] = self.turn_speech_end_wall()
                         if self._last_detected_language:
                             self.meta_info["transcriber_detected_language"] = self._last_detected_language
                         yield create_ws_data_packet({"type": "transcript", "content": final}, self.meta_info)
@@ -447,6 +472,7 @@ class SonioxTranscriber(BaseTranscriber):
             logger.error(f"Soniox force-finalize: error building turn latencies: {e}")
 
         self.meta_info["user_stop_offset_ms"] = self.user_stop_offset_ms
+        self.meta_info["user_stop_ts_wall"] = self.turn_speech_end_wall()
         if self._last_detected_language:
             self.meta_info["transcriber_detected_language"] = self._last_detected_language
 

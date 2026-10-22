@@ -193,7 +193,7 @@ def test_the_config_always_carries_a_voice_name():
     when backchanneling is on; a None voice crashes call setup before any audio."""
     cfg = Synthesizer(provider="kalpa", provider_config={"voice_id": VOICE_ID}, stream=True)
     assert isinstance(cfg.provider_config, KalpaConfig)
-    assert cfg.provider_config.voice == "Kiara"
+    assert cfg.provider_config.voice == "Arjun"
     assert cfg.provider_config.voice_id == VOICE_ID  # the id still wins at resolution time
     assert cfg.provider_config.model == KALPA_DEFAULT_MODEL
 
