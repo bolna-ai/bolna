@@ -1363,7 +1363,15 @@ def clean_gemini_schema(schema):
 
 
 def structure_system_prompt(
-    system_prompt, run_id, assistant_id, call_sid, context_data, timezone, is_web_based_call=False, language=None, primary_language=None
+    system_prompt,
+    run_id,
+    assistant_id,
+    call_sid,
+    context_data,
+    timezone,
+    is_web_based_call=False,
+    language=None,
+    primary_language=None,
 ):
     final_prompt = system_prompt
     default_variables = {"agent_id": assistant_id, "execution_id": run_id}
