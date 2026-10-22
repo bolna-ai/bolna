@@ -643,6 +643,7 @@ class TaskManager(BaseManager):
         self.http_transcriber_duration = 0
         self.synthesizer_characters = 0
         self.ended_by_assistant = False
+        self._caller_on_line_at_hangup = False
         # False until the caller's own words land in conversation history as a user turn.
         # Synthetic user turns (silence nudges, injected prompts) deliberately do not set it,
         # so a call where only the agent ever spoke stays False.
@@ -3285,6 +3286,11 @@ class TaskManager(BaseManager):
 
         self.conversation_ended = True
         self.ended_by_assistant = True
+        # A sent hangup means the caller heard our goodbye; sip-trunk can drop the stream on it before we get here.
+        output_handler = self.tools.get("output")
+        self._caller_on_line_at_hangup = (
+            output_handler is not None and output_handler.hangup_sent()
+        ) or not self._caller_disconnected()
 
         # Cancel any running LLM / function-call tasks so they don't add phantom responses to
         # the transcript after the call has ended. The end_call tool reaches this from inside
@@ -3535,6 +3541,10 @@ class TaskManager(BaseManager):
             # playout wait above returns normally and we would disconnect a call just rescued.
             if self._hangup_cancelled:
                 logger.info("end_call: hangup was cancelled by a barge-in, not arming the teardown")
+                return
+            # The playout wait also returns when the caller hangs up mid-goodbye; that hangup is theirs, not ours.
+            if self._caller_disconnected():
+                logger.info("end_call: caller hung up during the goodbye, not arming the teardown")
                 return
 
             self.__arm_end_call_teardown()
@@ -4838,6 +4848,14 @@ class TaskManager(BaseManager):
         exception = task.exception()
         if exception is not None:
             logger.error(f"Detached end_call hangup failed | error={type(exception).__name__}: {exception}")
+
+    def _settle_hangup_detail(self):
+        # Ending the call was our decision only if the caller was still on the line when we hung up.
+        if (
+            self.hangup_detail in (HangupReason.END_CALL_TOOL, HangupReason.LLM_PROMPTED_HANGUP)
+            and not self._caller_on_line_at_hangup
+        ):
+            self.hangup_detail = None
 
     async def __end_without_goodbye(self):
         self.hangup_message_queued = False
@@ -9501,6 +9519,7 @@ class TaskManager(BaseManager):
                 # record appended during that gather would never be persisted.
                 await process_task_cancellation(self.voicemail_handler.check_task, "voicemail_check_task")
                 await self._settle_routing_tails()
+                self._settle_hangup_detail()
 
                 output = {
                     "messages": self._prepare_precise_transcript_messages(self.history),
