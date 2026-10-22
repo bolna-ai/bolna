@@ -2790,6 +2790,8 @@ class TaskManager(BaseManager):
             self.regen_settle_task.cancel()
         self.regen_settle_payload = None
         await self.tools["output"].handle_interruption()
+        # Before handle_interruption, which may itself drop the open turn's timer without recording it.
+        self.tools["synthesizer"].abandon_open_turn()
         await self.tools["synthesizer"].handle_interruption()
 
         # handle_interruption clears the welcome's pending mark; its ACK would
@@ -5811,7 +5813,7 @@ class TaskManager(BaseManager):
                             welcome_played=self.tools["input"].welcome_message_played(),
                         ):
                             logger.info(f"Condition for interruption hit")
-                            self.interruption_manager.on_user_speech_started()
+                            self.interruption_manager.on_user_speech_started(meta_info.get("user_start_ts_wall"))
                             _t = self.tools.get("transcriber")
                             if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
                                 _t = _t.transcribers.get(_t.active_label, _t)
@@ -5826,7 +5828,7 @@ class TaskManager(BaseManager):
                             not self.tools["input"].is_audio_being_played_to_user()
                             and self.tools["input"].welcome_message_played()
                         ):
-                            self.interruption_manager.on_user_speech_started()
+                            self.interruption_manager.on_user_speech_started(meta_info.get("user_start_ts_wall"))
                             has_pending_response = self.interruption_manager.has_pending_responses()
                             time_since_utterance_end = self.interruption_manager.get_time_since_utterance_end()
                             within_grace_period = (
@@ -5863,7 +5865,7 @@ class TaskManager(BaseManager):
                             continue
                         else:
                             # Normal interim (no audio playing, no continuation) - mark user as speaking
-                            self.interruption_manager.on_user_speech_started()
+                            self.interruption_manager.on_user_speech_started(meta_info.get("user_start_ts_wall"))
 
                         self.interruption_manager.update_required_delay(len(self.history))
                         self.interruption_manager.on_interim_transcript_received()
