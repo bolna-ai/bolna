@@ -89,7 +89,7 @@ from bolna.enums import (
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
-from bolna.helpers.language_switcher import LanguageSwitcher
+from bolna.helpers.jev_language_switcher import build_language_switcher
 from bolna.transcriber.transcriber_pool import TranscriberPool
 from bolna.synthesizer.synthesizer_pool import SynthesizerPool
 from bolna.helpers.utils import (
@@ -1876,8 +1876,8 @@ class TaskManager(BaseManager):
                         lid_config["sarvam_model"] = lid_model
                     switch_enabled = self.__language_switch_enabled()
                     if switch_enabled:
-                        # language_switch_llm (from the azure flag) overrides the model; absent → default.
-                        self.language_switcher = LanguageSwitcher(
+                        # language_switch_llm (azure or jev flag) overrides the model; absent → default.
+                        self.language_switcher = build_language_switcher(
                             available_labels=list(transcribers.keys()),
                             run_id=self.run_id,
                             model=self.task_config.get("tools_config", {}).get("language_switch_llm"),
@@ -6696,6 +6696,16 @@ class TaskManager(BaseManager):
             detector_idle_s = pool.lid_buffer_age()
             if detector_idle_s is None or detector_idle_s < settle_ms / 1000:
                 await asyncio.sleep(settle_ms / 1000)
+                # Call cleanup can run during the settle and clear conversation_history, which is read below.
+                if (
+                    self.conversation_ended
+                    or self.conversation_history is None
+                    or self._should_ignore_transcriber_input()
+                ):
+                    logger.info(
+                        "LanguageSwitcher: hangup/transfer/teardown in progress — abandoning switch (post-settle)"
+                    )
+                    return None
 
         buffered_max_segment_s = pool.lid_buffer_max_segment_seconds()
         # Peek confidence + segments before take_lid_transcript() drains the buffer.
@@ -6852,7 +6862,7 @@ class TaskManager(BaseManager):
             emit_lid_decision("no_decision")
             return
         # decide() can take seconds; a hangup/transfer may have started meanwhile — re-check
-        if self.conversation_ended or self._should_ignore_transcriber_input():
+        if self.conversation_ended or self.conversation_history is None or self._should_ignore_transcriber_input():
             logger.info("LanguageSwitcher: hangup/transfer/teardown in progress — abandoning switch (post-decide)")
             emit_lid_decision("gated:hangup")
             return None
@@ -7018,7 +7028,11 @@ class TaskManager(BaseManager):
                     await asyncio.sleep(audio_gap_s)
                     # The gap is an await like any other: teardown may have started during it,
                     # and a switch applied now would flip the pools under a goodbye.
-                    if self.conversation_ended or self._should_ignore_transcriber_input():
+                    if (
+                        self.conversation_ended
+                        or self.conversation_history is None
+                        or self._should_ignore_transcriber_input()
+                    ):
                         logger.info("LanguageSwitcher: hangup/transfer during audio gap — abandoning switch")
                         emit_lid_decision("gated:hangup", inflight_activity=activity)
                         return None
@@ -7038,6 +7052,9 @@ class TaskManager(BaseManager):
         )
         await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
         emit_lid_decision("switched", switched_to=target, context_note=context_note, inflight_activity=activity)
+        if self.conversation_history is None:
+            # Call cleanup ran during the switch: no history to correct and no caller left to answer.
+            return None
 
         # Put the caller's actual words into conversation history. Turn-boundary path:
         # the locked-pool ASR garbled this turn, so replace it with the unbiased
@@ -9769,6 +9786,12 @@ class TaskManager(BaseManager):
                             await aux_llm.close()
                         except Exception as e:
                             logger.error(f"Error closing language detector LLM: {e}")
+                close_switcher = getattr(self.language_switcher, "aclose", None)
+                if close_switcher is not None:
+                    try:
+                        await close_switcher()
+                    except Exception as e:
+                        logger.error(f"Error closing language switcher: {e}")
                 for obs in self.observable_variables.values():
                     obs._observers.clear()
                 self.observable_variables.clear()
