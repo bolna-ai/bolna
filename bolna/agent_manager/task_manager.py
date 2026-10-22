@@ -2275,6 +2275,7 @@ class TaskManager(BaseManager):
                 self.timezone,
                 self.is_web_based_call,
                 self.language
+                self.language
             )
 
             notes = ""
@@ -2303,7 +2304,8 @@ class TaskManager(BaseManager):
                     self.context_data,
                     self.timezone,
                     self.is_web_based_call,
-                    lang_code
+                    lang_code,
+                    self.language
                 )
                 notes = ""
                 if self._is_conversation_task() and self.use_fillers:

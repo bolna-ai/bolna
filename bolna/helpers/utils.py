@@ -1314,7 +1314,7 @@ def clean_gemini_schema(schema):
 
 
 def structure_system_prompt(
-    system_prompt, run_id, assistant_id, call_sid, context_data, timezone, is_web_based_call=False, language=None
+    system_prompt, run_id, assistant_id, call_sid, context_data, timezone, is_web_based_call=False, language=None, primary_language=None
 ):
     final_prompt = system_prompt
     default_variables = {"agent_id": assistant_id, "execution_id": run_id}
@@ -1323,9 +1323,12 @@ def structure_system_prompt(
         enrich_context_with_time_variables(context_data, timezone)
         default_variables["agent_number"] = context_data.get("recipient_data", {}).get("agent_number")
         default_variables["user_number"] = context_data.get("recipient_data", {}).get("user_number")
+        if primary_language:
+            user_data = context_data.get("recipient_data", {})
+            context_data.get("recipient_data", {}).update(user_data.get(primary_language, {}))
 
         if not is_web_based_call:
-            final_prompt = update_prompt_with_context(system_prompt, context_data)
+            final_prompt = update_prompt_with_context(system_prompt, context_data, language)
 
         # call_sid is deliberately NOT exposed as a prompt variable: the model would echo it
         # into spoken text (and into the required transfer_call call_sid arg), yet the real sid
