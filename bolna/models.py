@@ -326,6 +326,12 @@ class SonioxConfig(StandardVoiceConfig):
     reduce_silence: Optional[bool] = None
 
 
+class NavanaConfig(StandardVoiceConfig):
+    # voice_id is the id Navana addresses ("default_female", or a cloned "cv_..."); every voice speaks
+    # every language. model is "navana-tts", or "navana-tts-fast" for the distilled model.
+    pass
+
+
 # The config class each provider's provider_config is validated against. Adding a provider means
 # one entry here.
 SYNTHESIZER_CONFIG_MODELS = {
@@ -343,6 +349,7 @@ SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.KALPA.value: KalpaConfig,
     SynthesizerProvider.GEMINI.value: GeminiConfig,
     SynthesizerProvider.SONIOX.value: SonioxConfig,
+    SynthesizerProvider.NAVANA.value: NavanaConfig,
     SynthesizerProvider.CUSTOM.value: OpenAIConfig,
 }
 
