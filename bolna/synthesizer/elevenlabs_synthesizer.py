@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 import uuid
 from collections import deque
 from websockets.exceptions import InvalidHandshake
@@ -12,12 +13,75 @@ import aiohttp
 import websockets
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.constants import ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, resample
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
 logger = configure_logger(__name__)
+
+# Left to split a reply itself, ElevenLabs can cut mid-sentence and repeat or garble the word at the cut.
+SENTENCE_END = re.compile(r"""[।॥。！？؟۔]+["'”’)]*|[?!.]+["'”’)]*(?=\s|$)""")
+CLAUSE_BREAKS = ",，、،;"
+ABBREVIATIONS = set("mr mrs ms dr prof sr jr st smt shri pvt ltd inc co etc vs".split())
+INITIALISM = re.compile(r"(?:[a-z]\.)+[a-z]")
+CLAUSE_FLUSH_CHARS = 120
+MAX_UNFLUSHED_CHARS = 250
+
+
+def _is_word(token):
+    """Letters, counting combining marks, so Devanagari like "रु" is a word."""
+    return all(ch.isalpha() or unicodedata.category(ch).startswith("M") for ch in token)
+
+
+def _ends_sentence(before, after, mark):
+    """A "." after an abbreviation ("Mr.", "U.S.", "Rs. 500") or a list number ("2.") doesn't end the sentence."""
+    if "." not in mark:
+        return True
+    words = before.split()
+    if not words:
+        return False
+    word = words[-1].lstrip("([{\"'“‘")
+    last = word.lower()
+    if last in ABBREVIATIONS or INITIALISM.fullmatch(last):
+        return False
+    if last.isdigit():
+        return len(last) > 2 and len(words) > 1 and words[-2][-1] not in ":.;,!?।"
+    if len(last) <= 4 and _is_word(last):
+        next_char = after.lstrip()[:1]
+        # At a push boundary the next word isn't known yet, so a short capitalised word ("Rs.") waits for it.
+        return not (next_char.isdigit() or (not next_char and word[:1].isupper()))
+    return True
+
+
+def _clause_cut(text, limit):
+    """Index just past the last clause break before `limit` that isn't inside a number ("1,25,000"), or 0."""
+    for index in range(min(len(text), limit) - 1, 0, -1):
+        if text[index] in CLAUSE_BREAKS and not (text[index - 1].isdigit() and text[index + 1 : index + 2].isdigit()):
+            return index + 1
+    return 0
+
+
+def split_flushable(text, end_of_stream):
+    """Split `text` into the units to send now and the unfinished rest to hold."""
+    units, start = [], 0
+    for match in SENTENCE_END.finditer(text):
+        if _ends_sentence(text[start : match.start()], text[match.end() :], match.group()):
+            units.append(text[start : match.end()].strip())
+            start = match.end()
+    rest = text[start:].strip()
+    if end_of_stream:
+        return units + [rest] if rest else units, ""
+    while len(rest) > CLAUSE_FLUSH_CHARS:
+        cut = _clause_cut(rest, MAX_UNFLUSHED_CHARS)
+        if not cut and len(rest) > MAX_UNFLUSHED_CHARS:
+            cut = rest.rfind(" ", 0, MAX_UNFLUSHED_CHARS) + 1 or MAX_UNFLUSHED_CHARS
+        if not cut:
+            break
+        units.append(rest[:cut].strip())
+        rest = rest[cut:].strip()
+    return units, rest
 
 
 class ElevenlabsBase(StreamSynthesizer):
@@ -38,6 +102,7 @@ class ElevenlabsBase(StreamSynthesizer):
         style=0,
         synthesizer_key=None,
         caching=True,
+        pronunciation_dictionary_locators=None,
         **kwargs,
     ):
         super().__init__(
@@ -53,6 +118,7 @@ class ElevenlabsBase(StreamSynthesizer):
         self.sampling_rate = sampling_rate
         self.speed = speed
         self.style = style
+        self.pronunciation_dictionary_locators = self._pronunciation_locators(pronunciation_dictionary_locators)
         self.audio_format = "mp3"
         self.use_mulaw = kwargs.get("use_mulaw", True)
         self.temperature = temperature
@@ -75,6 +141,46 @@ class ElevenlabsBase(StreamSynthesizer):
             rate = int(self.sampling_rate)
             self.wire_pcm_rate = rate if rate in (16000, 22050, 24000, 44100) else 24000
             self.wire_format = f"pcm_{self.wire_pcm_rate}"
+
+    @staticmethod
+    def _pronunciation_locators(locators):
+        """Plain-dict locators within ElevenLabsConfig's limits.
+
+        Every language's voice is built at call start, so an invalid locator is dropped rather than failing the call."""
+        valid = []
+        for locator in locators or []:
+            locator = locator.model_dump() if hasattr(locator, "model_dump") else locator
+            if isinstance(locator, dict) and locator.get("pronunciation_dictionary_id") and locator.get("version_id"):
+                valid.append(
+                    {
+                        "pronunciation_dictionary_id": locator["pronunciation_dictionary_id"],
+                        "version_id": locator["version_id"],
+                    }
+                )
+            else:
+                logger.warning(f"Dropping ElevenLabs pronunciation dictionary without both IDs: {locator}")
+        if len(valid) > ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES:
+            logger.warning(
+                f"ElevenLabs accepts at most {ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES} pronunciation dictionaries; "
+                f"dropping {valid[ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES:]}"
+            )
+        return valid[:ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES]
+
+    def _drop_rejected_dictionaries(self, *details):
+        """True when an ElevenLabs error rejects our dictionaries, e.g. one deleted after the save.
+
+        They're dropped and recorded, so the call speaks on without them."""
+        text = " ".join(str(detail) for detail in details if detail)
+        if not self.pronunciation_dictionary_locators or not re.search(r"pronunciation|dictionar", text, re.I):
+            return False
+        dropped = [locator["pronunciation_dictionary_id"] for locator in self.pronunciation_dictionary_locators]
+        self.pronunciation_dictionary_locators = []
+        logger.error(f"ElevenLabs rejected pronunciation dictionaries {dropped}, continuing without them: {text}")
+        if self.task_manager_instance is not None:
+            self.task_manager_instance.record_non_fatal_synthesizer_error(
+                {"error_type": "pronunciation_dictionary_rejected", "error": text, "dictionaries": dropped}
+            )
+        return True
 
     def _get_audio_format(self):
         return "mulaw" if self.wire_format == "ulaw_8000" else "wav"
@@ -123,6 +229,8 @@ class ElevenlabsBase(StreamSynthesizer):
                 "style": self.style,
             },
         }
+        if self.pronunciation_dictionary_locators:
+            payload["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
         headers = {"xi-api-key": self.api_key}
         fmt = format or self._get_output_format()
         url = f"{self.api_url}{fmt}"
@@ -158,7 +266,10 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
         self.current_turn_ttfb = None
         self.eos_accum_context_id = None  # context whose spoken chars are being accumulated
         self.eos_accum_text = ""  # spoken-so-far for that context (end-of-stream match)
+        self.dictionary_context_id = None  # last context whose first message carried the dictionaries
         self._reported_closed_ws = None  # socket whose close was already logged
+        self.pending_text = ""
+        self.pending_sequence_id = None
 
     def _report_closed_socket(self, ws):
         """Log why ElevenLabs closed a socket, once per socket."""
@@ -197,7 +308,20 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
             self.context_id = str(uuid.uuid4())
             self.current_turn_context_id = self.context_id
 
+    def _take_flushable(self, text, sequence_id, end_of_llm_stream):
+        """Units of this turn's text to send now; the unfinished sentence stays held."""
+        carried = []
+        if sequence_id != self.pending_sequence_id:
+            if self.pending_text and self.should_synthesize_response(self.pending_sequence_id):
+                carried = [self.pending_text]
+            self.pending_text, self.pending_sequence_id = "", sequence_id
+        # The LLM wrappers cut pushes at a space and drop it.
+        joined = " ".join(f"{self.pending_text} {text or ''}".split())
+        units, self.pending_text = split_flushable(joined, end_of_llm_stream)
+        return carried + units
+
     async def handle_interruption(self):
+        self.pending_text = ""
         try:
             # Also covers a context already closed at end_of_llm_stream but still draining frames.
             if self.current_turn_context_id:
@@ -231,28 +355,36 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                 await self.flush_synthesizer_stream()
                 return
 
+            # At the first push, so first-audio latency counts the hold.
+            if self.ws_send_time is None:
+                self.ws_send_time = time.perf_counter()
+                logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
+            # Before any await, so pushes reach the buffer in order.
+            units = self._take_flushable(text, sequence_id, end_of_llm_stream)
+
             await self._wait_for_ws()
 
-            if text != "":
-                for text_chunk in self.text_chunker(text):
-                    if not self.should_synthesize_response(sequence_id):
-                        logger.info(f"Not synthesizing (inner): sequence_id {sequence_id} not current")
-                        await self.flush_synthesizer_stream()
-                        return
-                    try:
-                        if self.ws_send_time is None:
-                            self.ws_send_time = time.perf_counter()
-                            logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
-                        # Claim before sending: text lost into a socket that dies mid-send is still this turn's.
-                        self.current_turn_socket = self.websocket
-                        await self.websocket.send(json.dumps({"text": text_chunk, "context_id": self.context_id}))
-                    except websockets.exceptions.ConnectionClosed:
-                        self._send_hit_closed_socket(end_of_llm_stream)
-                        return
-                    except Exception as e:
-                        logger.info(f"Error sending chunk: {e}")
-                        self.connection_error = str(e)
-                        return
+            for unit in units:
+                if not self.should_synthesize_response(sequence_id):
+                    logger.info(f"Not synthesizing (inner): sequence_id {sequence_id} not current")
+                    await self.flush_synthesizer_stream()
+                    return
+                try:
+                    message = {"text": f"{unit} ", "context_id": self.context_id, "flush": True}
+                    # ElevenLabs reads dictionaries only from a context's first message.
+                    if self.pronunciation_dictionary_locators and self.context_id != self.dictionary_context_id:
+                        message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
+                        self.dictionary_context_id = self.context_id
+                    # Claim before sending: text lost into a socket that dies mid-send is still this turn's.
+                    self.current_turn_socket = self.websocket
+                    await self.websocket.send(json.dumps(message))
+                except websockets.exceptions.ConnectionClosed:
+                    self._send_hit_closed_socket(end_of_llm_stream)
+                    return
+                except Exception as e:
+                    logger.info(f"Error sending chunk: {e}")
+                    self.connection_error = str(e)
+                    return
 
             if end_of_llm_stream:
                 self.last_text_sent = True
@@ -329,6 +461,9 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                 consecutive_errors = 0  # successful recv — reset the error backoff
 
                 ctx = data.get("contextId")
+                # Before the ignore check: a rejection that lands on an interrupted context still has to drop them.
+                if data.get("error") and self._drop_rejected_dictionaries(data.get("error"), data.get("message")):
+                    continue
                 if ctx in self.context_ids_to_ignore:
                     continue
 
@@ -451,6 +586,8 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                 "xi_api_key": self.api_key,
             }
             await websocket.send(json.dumps(bos_message))
+            # A new socket knows none of our contexts, so the next message must carry the dictionaries again.
+            self.dictionary_context_id = None
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
@@ -522,15 +659,14 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
                 self.ws_trace_id = websocket.response.headers.get("x-trace-id")
                 logger.info(f"Elevenlabs v3 WebSocket connected trace_id={self.ws_trace_id}")
-            # First message only. stability is the sole setting v3 honours.
-            await websocket.send(
-                json.dumps(
-                    {
-                        "voices": [self.voice],
-                        "voice_settings": {"stability": self.temperature},
-                    }
-                )
-            )
+            # First message only. stability is the sole setting v3 honours; dictionaries apply to the whole socket.
+            first_message = {
+                "voices": [self.voice],
+                "voice_settings": {"stability": self.temperature},
+            }
+            if self.pronunciation_dictionary_locators:
+                first_message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
+            await websocket.send(json.dumps(first_message))
             self._last_send_time = time.perf_counter()
             self._new_turn_pending = True
             # Teardown is over once a replacement is up.
@@ -734,6 +870,13 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
                 consecutive_errors = 0
 
                 if data.get("error"):
+                    if self._drop_rejected_dictionaries(data.get("error"), data.get("message")):
+                        # They ride on the socket's first message, so redial; end any turn that was speaking on it.
+                        await self.handle_interruption()
+                        if not self._turn_eos_emitted:
+                            self._turn_eos_emitted = True
+                            yield b"\x00", ""
+                        continue
                     logger.error(f"ElevenLabs v3 error: {data.get('error')} - {data.get('message')}")
                     self.connection_error = data.get("message") or data.get("error")
                     return

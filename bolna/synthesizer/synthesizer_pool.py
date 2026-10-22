@@ -73,6 +73,9 @@ class SynthesizerPool:
     async def handle_interruption(self):
         await self.synthesizers[self.active_label].handle_interruption()
 
+    def abandon_open_turn(self):
+        self.synthesizers[self.active_label].abandon_open_turn()
+
     async def flush_synthesizer_stream(self):
         await self.synthesizers[self.active_label].flush_synthesizer_stream()
 

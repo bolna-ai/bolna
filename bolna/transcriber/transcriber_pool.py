@@ -304,10 +304,12 @@ class TranscriberPool:
                         getattr(transcriber, "sampling_rate", None) or getattr(transcriber, "sample_rate", None) or 8000
                     )
                     silence = self._silence_frame(encoding, int(sample_rate))
+                    # Tagged so the leg books it at its real 100 ms, not its telephony frame constant.
                     transcriber.input_queue.put_nowait(
                         {
                             "data": silence,
                             "meta_info": {},
+                            "keepalive": True,
                         }
                     )
                 # Sleep AFTER sending so the first keepalive round goes out

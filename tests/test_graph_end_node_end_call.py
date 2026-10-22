@@ -164,6 +164,8 @@ def _hangup_tm(interruptible_flag):
     tm.interruptible_hangup_message = interruptible_flag
     tm._hangup_interruptible_window = False
     tm.process_call_hangup = AsyncMock()
+    tm.hangup_detail = None
+    tm.tools = {"input": MagicMock(input_stream_ended=False)}
     tm.window_during_reply = None
 
     async def _reply_playing():
@@ -202,3 +204,17 @@ async def test_a_barge_in_during_the_reply_keeps_the_call_up():
     await asyncio.sleep(0)
 
     tm.process_call_hangup.assert_not_awaited()
+
+
+async def test_a_caller_hanging_up_during_the_reply_is_not_recorded_as_our_hangup():
+    tm = _hangup_tm(interruptible_flag=False)
+
+    async def _caller_hung_up_while_playing():
+        tm.tools["input"].input_stream_ended = True
+
+    tm.wait_for_current_message = AsyncMock(side_effect=_caller_hung_up_while_playing)
+    await tm._TaskManager__hang_up_after_reply()
+    await asyncio.sleep(0)
+
+    tm.process_call_hangup.assert_not_awaited()
+    assert tm.hangup_detail is None
