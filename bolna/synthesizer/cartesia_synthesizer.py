@@ -13,6 +13,7 @@ from .stream_synthesizer import StreamSynthesizer
 from bolna.constants import CARTESIA_VOLUME_MAX, CARTESIA_VOLUME_MIN, CARTESIA_VOLUME_MODELS
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
+from bolna.helpers.utils import cartesia_supports_pronunciation_dict
 
 
 logger = configure_logger(__name__)
@@ -33,6 +34,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
         caching=True,
         speed=1.0,
         volume=1.0,
+        pronunciation_dict_id=None,
         **kwargs,
     ):
         super().__init__(
@@ -50,6 +52,12 @@ class CartesiaSynthesizer(StreamSynthesizer):
         self.volume = float(volume)
         if not CARTESIA_VOLUME_MIN <= self.volume <= CARTESIA_VOLUME_MAX:
             raise ValueError(f"Cartesia volume must be between {CARTESIA_VOLUME_MIN} and {CARTESIA_VOLUME_MAX}")
+        self.pronunciation_dict_id = None
+        if pronunciation_dict_id:
+            if cartesia_supports_pronunciation_dict(model):
+                self.pronunciation_dict_id = pronunciation_dict_id
+            else:
+                logger.warning(f"Cartesia model {model} does not support pronunciation dictionaries; not sending one")
         self.use_mulaw = kwargs.get("use_mulaw", True)  # web/freeswitch pass False → raw PCM @sampling_rate
         self.stream = True
 
@@ -140,6 +148,9 @@ class CartesiaSynthesizer(StreamSynthesizer):
             ),
             "generation_config": self._generation_config(),
         }
+        # Every message of a context must carry the same fields, the closing empty one included.
+        if self.pronunciation_dict_id:
+            payload["pronunciation_dict_id"] = self.pronunciation_dict_id
         if text:
             payload["continue"] = True
         return payload
@@ -217,6 +228,19 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 response = await self.websocket.recv()
                 data = json.loads(response)
 
+                error = data.get("error")
+                if data.get("type") == "error" and self.pronunciation_dict_id and "pronunciation" in str(error).lower():
+                    # e.g. deleted after the save: later messages go without it, and this turn ends on the frame's done.
+                    logger.error(f"Cartesia rejected pronunciation dictionary {self.pronunciation_dict_id}: {error}")
+                    if self.task_manager_instance is not None:
+                        self.task_manager_instance.record_non_fatal_synthesizer_error(
+                            {
+                                "error_type": "pronunciation_dictionary_rejected",
+                                "error": error,
+                                "dictionaries": [self.pronunciation_dict_id],
+                            }
+                        )
+                    self.pronunciation_dict_id = None
                 if data.get("context_id") in self.context_ids_to_ignore:
                     continue
 
@@ -297,6 +321,8 @@ class CartesiaSynthesizer(StreamSynthesizer):
             "language": self.language,
             "generation_config": self._generation_config(),
         }
+        if self.pronunciation_dict_id:
+            payload["pronunciation_dict_id"] = self.pronunciation_dict_id
         headers = {"X-API-Key": self.api_key, "Cartesia-Version": "2024-06-10"}
         async with aiohttp.ClientSession() as session:
             async with session.post(self.api_url, headers=headers, json=payload) as response:
