@@ -1860,7 +1860,8 @@ class TaskManager(BaseManager):
                         else:
                             cls = SUPPORTED_TRANSCRIBER_MODELS.get(cfg["model"])
                         leg_kwargs = self.__pool_leg_kwargs(self.kwargs, "transcriber_key", cfg.get("provider"))
-                        transcribers[label] = cls(provider, **cfg, **leg_kwargs)
+                        # Runtime kwargs win over the saved config, which may carry the same key.
+                        transcribers[label] = cls(provider, **{**cfg, **leg_kwargs})
 
                         if label == active_label:
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
@@ -1949,7 +1950,7 @@ class TaskManager(BaseManager):
                         transcriber_class = SUPPORTED_TRANSCRIBER_PROVIDERS.get(transcriber_config["provider"])
                     else:
                         transcriber_class = SUPPORTED_TRANSCRIBER_MODELS.get(transcriber_config["model"])
-                    self.tools["transcriber"] = transcriber_class(provider, **transcriber_config, **self.kwargs)
+                    self.tools["transcriber"] = transcriber_class(provider, **{**transcriber_config, **self.kwargs})
         except Exception as e:
             logger.error(f"Something went wrong with starting transcriber {e}")
 

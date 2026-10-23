@@ -195,3 +195,18 @@ async def test_provider_key_map_is_captured_and_kept_out_of_the_kwargs_splat(mon
 
     assert tm.provider_api_keys == {"sarvam": "sarvam-byok"}
     assert "provider_api_keys" not in tm.kwargs
+
+
+def test_a_runtime_kwarg_wins_over_the_same_key_in_a_leg_config(monkeypatch):
+    # A saved per-language override may carry a key the server also passes at runtime.
+    calls = _setup_transcribers(
+        monkeypatch,
+        {
+            "en": {"provider": "deepgram", "model": "nova-3", "soniox_regions": ["eu"]},
+            "kn": {"provider": "sarvam", "model": "saaras:v3"},
+        },
+        kwargs={"soniox_regions": ["in", "eu"]},
+        provider_api_keys={},
+    )
+
+    assert calls["deepgram"]["soniox_regions"] == ["in", "eu"]
