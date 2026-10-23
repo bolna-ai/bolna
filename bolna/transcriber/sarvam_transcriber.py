@@ -437,6 +437,8 @@ class SarvamTranscriber(BaseTranscriber):
                             self.final_transcript = ""
                             # New turn: drop the previous turn's speech-end stamp so it can't leak.
                             self.meta_info.pop("user_stop_ts_wall", None)
+                            # Onset on the same clock as END_SPEECH; the transcript only arrives after it.
+                            self.meta_info["user_start_ts_wall"] = time.time()
                             yield create_ws_data_packet("speech_started", self.meta_info)
 
                         elif vad.get("signal_type") == "END_SPEECH":

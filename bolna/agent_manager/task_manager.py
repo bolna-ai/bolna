@@ -112,6 +112,7 @@ from bolna.helpers.utils import (
     save_audio_file_to_s3,
     update_prompt_with_context,
     get_md5_hash,
+    pronunciation_dictionary_key,
     scalar_fields,
     static_node_audio_key,
     static_node_ends_call,
@@ -416,6 +417,7 @@ class TaskManager(BaseManager):
         self.synthesizer_voice_id = None
         self.synthesizer_model = None
         self.synthesizer_render_settings = ""
+        self.synthesizer_pronunciation_key = None
         self.transfer_call_params = self.kwargs.get("transfer_call_params", None)
 
         if task["tools_config"].get("api_tools", None) is not None:
@@ -500,6 +502,7 @@ class TaskManager(BaseManager):
         self._hangup_processing = False
         self.dtmf_events: list[dict] = []
         self.non_fatal_llm_error_events: list[dict] = []
+        self.non_fatal_synthesizer_error_events: list[dict] = []
         self._agent_end_timestamps: dict = {}
         self.hangup_message_queued = False
         self._end_of_conversation_in_progress = False
@@ -2044,6 +2047,12 @@ class TaskManager(BaseManager):
             self.synthesizer_voice_id = provider_config.get("voice_id")
             self.synthesizer_model = provider_config.get("model")
             self.synthesizer_render_settings = tts_render_settings(self.synthesizer_provider, provider_config)
+            self.synthesizer_pronunciation_key = pronunciation_dictionary_key(
+                self.synthesizer_provider,
+                provider_config,
+                synth_config.get("pronunciation_rules"),
+                on_platform_key=not self.kwargs.get("synthesizer_key"),
+            )
             if self.turn_based_conversation:
                 synth_config["audio_format"] = "mp3"  # Hard code mp3 if we're connected through dashboard
             synth_config["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
@@ -2786,6 +2795,8 @@ class TaskManager(BaseManager):
             self.regen_settle_task.cancel()
         self.regen_settle_payload = None
         await self.tools["output"].handle_interruption()
+        # Before handle_interruption, which may itself drop the open turn's timer without recording it.
+        self.tools["synthesizer"].abandon_open_turn()
         await self.tools["synthesizer"].handle_interruption()
 
         # handle_interruption clears the welcome's pending mark; its ACK would
@@ -4103,6 +4114,12 @@ class TaskManager(BaseManager):
             )
         finally:
             self.record_non_fatal_llm_errors(meta_info, generation_errors)
+
+    def record_non_fatal_synthesizer_error(self, error):
+        """An error the synthesizer recovered from, e.g. a rejected pronunciation dictionary it dropped."""
+        self.non_fatal_synthesizer_error_events.append(
+            {**error, "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2)}
+        )
 
     def record_non_fatal_llm_errors(self, meta_info, errors):
         """Runs as each generation ends, so a follow-up's events precede its parent's: sort by sequence_id."""
@@ -5801,7 +5818,7 @@ class TaskManager(BaseManager):
                             welcome_played=self.tools["input"].welcome_message_played(),
                         ):
                             logger.info(f"Condition for interruption hit")
-                            self.interruption_manager.on_user_speech_started()
+                            self.interruption_manager.on_user_speech_started(meta_info.get("user_start_ts_wall"))
                             _t = self.tools.get("transcriber")
                             if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
                                 _t = _t.transcribers.get(_t.active_label, _t)
@@ -5816,7 +5833,7 @@ class TaskManager(BaseManager):
                             not self.tools["input"].is_audio_being_played_to_user()
                             and self.tools["input"].welcome_message_played()
                         ):
-                            self.interruption_manager.on_user_speech_started()
+                            self.interruption_manager.on_user_speech_started(meta_info.get("user_start_ts_wall"))
                             has_pending_response = self.interruption_manager.has_pending_responses()
                             time_since_utterance_end = self.interruption_manager.get_time_since_utterance_end()
                             within_grace_period = (
@@ -5853,7 +5870,7 @@ class TaskManager(BaseManager):
                             continue
                         else:
                             # Normal interim (no audio playing, no continuation) - mark user as speaking
-                            self.interruption_manager.on_user_speech_started()
+                            self.interruption_manager.on_user_speech_started(meta_info.get("user_start_ts_wall"))
 
                         self.interruption_manager.update_required_delay(len(self.history))
                         self.interruption_manager.on_interim_transcript_received()
@@ -7255,16 +7272,24 @@ class TaskManager(BaseManager):
 
         # A call has exactly one transport, so render in its wire format only.
         mulaw_wire = self.__handoff_mulaw_wire()
+        multilingual = (self.task_config["tools_config"].get("synthesizer") or {}).get("multilingual") or {}
 
         async def render(label, synth):
             text = self.__handoff_text_for(label)
             if not text:
                 return
+            label_config = multilingual.get(label) or {}
             cache_key = (
                 synth.__class__.__name__,
                 getattr(synth, "voice_id", None) or getattr(synth, "voice", None),
                 text,
                 "mulaw" if mulaw_wire else f"pcm{WEBCALL_TTS_SAMPLE_RATE}",
+                # The cache is process-wide: another agent may share this voice with other dictionaries.
+                pronunciation_dictionary_key(
+                    label_config.get("provider"),
+                    label_config.get("provider_config"),
+                    label_config.get("pronunciation_rules"),
+                ),
             )
             cached = HANDOFF_CLIP_CACHE.get(cache_key)
             if cached:
@@ -7776,6 +7801,7 @@ class TaskManager(BaseManager):
                     voice_id=self.synthesizer_voice_id,
                     model=self.synthesizer_model,
                     render_settings=self.synthesizer_render_settings,
+                    pronunciation=self.synthesizer_pronunciation_key,
                 )
             if self.turn_based_conversation or self.task_config["tools_config"]["output"]["provider"] == "default":
                 # Static-node clips are pre-generated as mp3 keyed by md5(text); fetch that
@@ -9589,6 +9615,7 @@ class TaskManager(BaseManager):
                     "voicemail_check_count": self.voicemail_handler.check_count,
                     "dtmf_events": list(self.dtmf_events),
                     "non_fatal_llm_error_events": list(self.non_fatal_llm_error_events),
+                    "non_fatal_synthesizer_error_events": list(self.non_fatal_synthesizer_error_events),
                     "component_error": self.component_error_event,
                     "language_switch_events": list(self.language_switch_events),
                     "transfer_call_events": list(self.transfer_call_events),
