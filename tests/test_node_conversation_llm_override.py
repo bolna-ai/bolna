@@ -150,12 +150,72 @@ def test_an_effort_enum_is_serialized_to_its_value():
 
 
 def test_a_provider_switch_is_refused_rather_than_silently_rekeyed():
-    # A node carries no credentials, so the only options are the agent's key against the wrong
-    # provider, or the platform env default — which would move a BYOK customer onto our account.
+    # With no credentials resolved for the node, the only options are the agent's key against the wrong
+    # provider, or the platform env default, which would move a BYOK customer onto our account.
     with _agent() as agent:
         llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"provider": "groq", "model": "llama-3.3"}})
         assert llm is agent.llm
         assert agent._conversation_llm_cache == {}
+
+
+def test_a_provider_switch_runs_on_the_credentials_resolved_for_that_node():
+    with _agent(
+        provider="google",
+        model="gemini-3.7-flash",
+        extra_body={"top_k": 0},
+        service_tier="priority",
+        overflow_llm={"api_key": "o", "base_url": "https://o.example", "model": "m"},
+        node_llm_credentials={
+            "n1": {"llm_key": "node-azure-key", "base_url": "https://node.azure.example", "api_version": "2024-12-01"}
+        },
+    ) as agent:
+        llm = agent._conversation_llm_for(
+            {"id": "n1", "llm_config": {"provider": "azure", "model": "azure/gpt-4.1-mini"}}
+        )
+    assert llm is not agent.llm
+    kwargs = llm.captured_kwargs
+    assert kwargs["provider"] == "azure"
+    assert kwargs["model"] == "azure/gpt-4.1-mini"
+    assert (kwargs["llm_key"], kwargs["base_url"], kwargs["api_version"]) == (
+        "node-azure-key",
+        "https://node.azure.example",
+        "2024-12-01",
+    )
+    # Settings of the agent's own backend do not follow the node onto another provider.
+    assert not {"extra_body", "service_tier", "overflow_llm"} & kwargs.keys()
+
+
+def test_a_provider_switch_with_an_empty_entry_takes_the_providers_platform_default():
+    with _agent(node_llm_credentials={"n1": {}}) as agent:
+        llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"provider": "groq", "model": "llama-3.3"}})
+    assert llm is not agent.llm
+    assert "llm_key" not in llm.captured_kwargs
+    assert "base_url" not in llm.captured_kwargs
+
+
+def test_credentials_resolved_for_another_node_do_not_unlock_this_one():
+    with _agent(node_llm_credentials={"other": {"llm_key": "k"}}) as agent:
+        llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"provider": "groq", "model": "llama-3.3"}})
+    assert llm is agent.llm
+
+
+def test_a_node_switched_to_azure_builds_a_real_client_on_the_resolved_endpoint():
+    from bolna.llms import AzureLLM
+
+    with _agent(
+        real_registry={"azure": AzureLLM},
+        provider="google",
+        model="gemini-3.7-flash",
+        node_llm_credentials={
+            "n1": {"llm_key": "k", "base_url": "https://node.azure.example", "api_version": "2024-12-01-preview"}
+        },
+    ) as agent:
+        llm = agent._conversation_llm_for(
+            {"id": "n1", "llm_config": {"provider": "azure", "model": "azure/gpt-4.1-mini"}}
+        )
+    assert isinstance(llm, AzureLLM)
+    assert llm.model == "gpt-4.1-mini"
+    assert llm.llm_host == "node.azure.example"
 
 
 def test_a_model_override_on_the_agents_own_provider_is_served():

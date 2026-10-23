@@ -47,6 +47,9 @@ OPENAI_KEYED_PROVIDERS = frozenset(
     p for p, cls in SUPPORTED_LLM_PROVIDERS.items() if cls is OpenAiLLM and p != LLMProvider.BOLNA.value
 )
 
+# Conversation LLM settings that belong to the agent's provider, dropped when a node switches provider.
+AGENT_PROVIDER_BOUND_KWARGS = ("llm_key", "base_url", "api_version", "extra_body", "service_tier", "overflow_llm")
+
 load_dotenv()
 logger = configure_logger(__name__)
 
@@ -297,14 +300,18 @@ class GraphAgent(BaseAgent):
                 kwargs[key] = override[key]
 
         if switched_provider:
-            # A node carries no credentials of its own, so the only options are the agent's key
-            # (wrong provider) or the platform env default (moves a BYOK customer onto our
-            # account, silently). Neither is acceptable — refuse until nodes can carry their own.
-            logger.error(
-                f"Node {node_id!r} switches provider {agent_provider!r}→{provider!r}, which carries no "
-                f"credentials of its own — override refused, serving the node on the agent LLM"
-            )
-            return None
+            # Only the caller knows which key the customer uses on the node's provider, so without its answer the
+            # override is refused rather than run on the agent's key or a platform default.
+            node_credentials = (self.config.get("node_llm_credentials") or {}).get(node_id)
+            if node_credentials is None:
+                logger.error(
+                    f"Node {node_id!r} switches provider {agent_provider!r}→{provider!r} with no credentials "
+                    f"resolved for it; override refused, serving the node on the agent LLM"
+                )
+                return None
+            for key in AGENT_PROVIDER_BOUND_KWARGS:
+                kwargs.pop(key, None)
+            kwargs.update({k: v for k, v in node_credentials.items() if v})
 
         llm_class = SUPPORTED_LLM_PROVIDERS.get(provider, OpenAiLLM)
         model_changed = "model" in override or switched_provider
