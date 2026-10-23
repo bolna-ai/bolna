@@ -68,6 +68,7 @@ class SynthesizerProvider(str, Enum):
     KALPA = "kalpa"
     GEMINI = "gemini"
     SONIOX = "soniox"
+    NAVANA = "navana"
     # A customer's own TTS server, over the OpenAI speech API.
     CUSTOM = "custom"
 
