@@ -148,3 +148,22 @@ async def test_without_a_socket_the_turn_is_still_closed_and_nothing_is_dropped(
 
     assert leg.current_turn_id is None and leg.final_transcript == ""
     assert leg.discard_until_fin_deadline is None
+
+
+async def test_a_reconnect_does_not_inherit_a_discard_its_closed_connection_never_finished():
+    # A lazy pool closes the leg the call left before its <fin> can arrive; a switch back within the discard window
+    # reconnects that leg, and its caller's first words must not be taken for the discarded turn's leftovers.
+    leg = soniox_leg()
+    await hear(leg, tokens(final("apni ki "), pending("jokay")))
+    await leg.discard_open_turn()
+    assert leg.discard_until_fin_deadline is not None
+
+    async def refuse():
+        raise ConnectionError("no network in tests")
+
+    leg.soniox_connect = refuse
+    await leg.transcribe()  # the per-connection resets run before the connect
+
+    assert leg.discard_until_fin_deadline is None
+    events = await hear(leg, tokens(final("dekhaben?")), tokens(final(SONIOX_ENDPOINT_TOKEN)))
+    assert transcripts(events) == ["dekhaben?"]

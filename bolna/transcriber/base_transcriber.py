@@ -11,6 +11,10 @@ logger = configure_logger(__name__)
 
 
 class BaseTranscriber:
+    # A multilingual pool with lazy legs closes and reopens a leg mid-call (toggle_connection, then run());
+    # a provider whose connect or close blocks the event loop sets this False to keep its legs connected.
+    reopens_mid_call = True
+
     def __init__(self, input_queue=None):
         self.input_queue = input_queue
         self.connection_on = True

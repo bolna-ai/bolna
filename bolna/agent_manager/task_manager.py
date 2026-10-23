@@ -1897,12 +1897,13 @@ class TaskManager(BaseManager):
                         lid_provider=LID_PROVIDER,
                         lid_config=lid_config,
                         on_lid_switch=None if switch_enabled else self.switch_language,
+                        lazy_legs=True,
                     )
                     logger.info(
                         f"TranscriberPool created with labels={list(transcribers.keys())}, "
                         f"active='{active_label}', language_switch_enabled={switch_enabled}, "
                         f"lid_provider={LID_PROVIDER!r}, lid_model={lid_model or 'default'}, "
-                        f"legacy_lid_heuristic={not switch_enabled}"
+                        f"legacy_lid_heuristic={not switch_enabled}, lazy_legs={self.tools['transcriber'].lazy_legs}"
                     )
                     if switch_enabled:
                         # Idle-flush fallback: recovers the stuck-language deadlock where
@@ -2014,7 +2015,11 @@ class TaskManager(BaseManager):
                 self.synthesizer_voice = active_cfg.get("provider_config", {}).get("voice", "unknown")
 
                 self.tools["synthesizer"] = SynthesizerPool(
-                    synthesizers=synthesizers, active_label=active_label, multilingual_config=multilingual
+                    synthesizers=synthesizers,
+                    active_label=active_label,
+                    multilingual_config=multilingual,
+                    lazy_legs=True,
+                    record_event=self.__record_lid_event,
                 )
 
                 logger.info(f"SynthesizerPool created with labels={list(synthesizers.keys())}, active='{active_label}'")
@@ -6199,6 +6204,32 @@ class TaskManager(BaseManager):
         """
         return bool(self.task_config.get("tools_config", {}).get("llm_language_switch"))
 
+    def __open_detected_language(self, holder, label=None) -> None:
+        """Start connecting the voice of the language the detector hears, so a switch to it finds the voice ready.
+        The decision that `holder` runs keeps it open until it releases it.
+
+        Automatic switching only: a caller-requested agent switches on an explicit ask, rarely to the language the
+        detector hears, so an early open there would almost always close unused."""
+        synth = self.tools.get("synthesizer")
+        pool = self.tools.get("transcriber")
+        if not isinstance(synth, SynthesizerPool) or not synth.lazy_legs or not isinstance(pool, TranscriberPool):
+            return
+        if self.language_switcher is None or self.language_switcher.explicit_only:
+            return
+        if label is None:
+            active_short = (self.language or "").split("-")[0].lower()
+            _, foreign_langs, _ = self.__buffered_language_evidence(pool, active_short)
+            label = next((lang for lang in foreign_langs if lang in pool.labels), None)
+        if label is None or label not in pool.labels or label not in synth.labels:
+            return
+        synth.open(label, holder=holder, reason="detector_signal")
+
+    def __release_detected_languages(self) -> None:
+        """Close the voices this decision opened early, unless it switched to one or another decision holds it."""
+        synth = self.tools.get("synthesizer")
+        if isinstance(synth, SynthesizerPool) and synth.lazy_legs:
+            synth.release(asyncio.current_task())
+
     def __arm_lid_playback_gate(self, sequence_id, decision_task) -> None:
         """Hold this turn's AUDIO (not its generation) until the switch decision resolves.
 
@@ -6402,6 +6433,7 @@ class TaskManager(BaseManager):
         # arming only at the turn boundary left every eager turn playing the old-language reply.
         if self.__detector_language_mismatch():
             self.__arm_lid_playback_gate(snapshot.get("sequence_id"), decision_task)
+            self.__open_detected_language(decision_task)
         return decision_task
 
     def __detector_language_mismatch(self) -> bool:
@@ -6514,6 +6546,7 @@ class TaskManager(BaseManager):
                 # Claim our own spec task while the lock is still effectively ours (no await
                 spec = self._spec_followup_task
                 self._spec_followup_task = None
+                self.__release_detected_languages()
             # Generate outside the lock (streamed, multi-second). A later confirmed switch
             if followup is not None:
                 await self.__generate_switch_followup(*followup)
@@ -6761,6 +6794,9 @@ class TaskManager(BaseManager):
             late_synth = self.tools.get("synthesizer")
             if not isinstance(late_synth, SynthesizerPool) or detected_lang in late_synth.labels:
                 self.__arm_lid_playback_gate((meta_info or {}).get("sequence_id"), asyncio.current_task())
+        # Separate from the arm: it also covers a gate armed at spawn for another language, and idle-flush decides.
+        if detected_lang and detected_lang != active and foreign_max_segment_s >= min_segment_s:
+            self.__open_detected_language(asyncio.current_task(), detected_lang)
 
         # Speculative follow-up: generate the reply on the main LLM in parallel with the
         spec_task = None
