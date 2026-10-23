@@ -142,6 +142,13 @@ S2S_GOODBYE_TIMEOUT_S = 10.0
 
 # Soniox real-time STT
 SONIOX_WEBSOCKET_HOST = "stt-rt.soniox.com"
+# Regional real-time hosts; a region's key is read from SONIOX_<REGION>_API_KEY, since keys are region-bound.
+SONIOX_REGION_HOSTS = {
+    "us": "stt-rt.soniox.com",
+    "eu": "stt-rt.eu.soniox.com",
+    "in": "stt-rt.in.soniox.com",
+    "jp": "stt-rt.jp.soniox.com",
+}
 SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops
 SONIOX_FINALIZE_TOKEN = "<fin>"  # closes the tokens a {"type": "finalize"} request flushed
 # Ceiling on dropping a finalized turn's leftovers, in case its <fin> never comes back.

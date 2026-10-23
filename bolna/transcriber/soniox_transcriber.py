@@ -21,6 +21,7 @@ from bolna.constants import (
     SONIOX_ENDPOINT_TOKEN,
     SONIOX_FINALIZE_DISCARD_S,
     SONIOX_FINALIZE_TOKEN,
+    SONIOX_REGION_HOSTS,
     SONIOX_WEBSOCKET_HOST,
 )
 
@@ -61,8 +62,9 @@ class SonioxTranscriber(BaseTranscriber):
         self.transcriber_output_queue = output_queue
         self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
 
-        self.api_key = kwargs.get("transcriber_key", os.getenv("SONIOX_API_KEY"))
-        self.soniox_host = os.getenv("SONIOX_HOST", SONIOX_WEBSOCKET_HOST)
+        self.endpoints = self._resolve_endpoints(kwargs.get("soniox_regions"), kwargs.get("transcriber_key"))
+        self._use_endpoint(0)
+        self._rejected_for_capacity = False
 
         # Soniox uses semantic endpoint detection (not a pure silence timer). Leave its own
         # default delay (~2s) unless explicitly tuned, so a brief pause mid-thought isn't cut off.
@@ -162,6 +164,62 @@ class SonioxTranscriber(BaseTranscriber):
             context=self._build_soniox_context(),
         )
 
+    @staticmethod
+    def _resolve_endpoints(regions, transcriber_key):
+        """The regions, in order, whose key is in env, else the env host; a customer key always uses the env host."""
+        if regions and not transcriber_key:
+            endpoints = [
+                {"label": region, "host": SONIOX_REGION_HOSTS[region], "api_key": api_key}
+                for region in regions
+                if region in SONIOX_REGION_HOSTS and (api_key := os.getenv(f"SONIOX_{region.upper()}_API_KEY"))
+            ]
+            if endpoints:
+                return endpoints
+        return [
+            {
+                "label": "default",
+                "host": os.getenv("SONIOX_HOST", SONIOX_WEBSOCKET_HOST),
+                "api_key": transcriber_key or os.getenv("SONIOX_API_KEY"),
+            }
+        ]
+
+    def _use_endpoint(self, index):
+        self._endpoint_index = index
+        endpoint = self.endpoints[index]
+        self.endpoint_label = endpoint["label"]
+        self.soniox_host = endpoint["host"]
+        self.api_key = endpoint["api_key"]
+
+    def _next_endpoint_after_rejection(self):
+        """Move to the next endpoint if the current one refused the session for capacity."""
+        if not self._rejected_for_capacity or self._endpoint_index + 1 >= len(self.endpoints):
+            return False
+        refused = self.endpoint_label
+        self._use_endpoint(self._endpoint_index + 1)
+        self._rejected_for_capacity = False
+        self.connection_error = None
+        self.connection_time = None
+        # Token positions restart with the new session.
+        self._reset_turn_state()
+        logger.warning(f"Soniox endpoint {refused} refused the session for capacity, moving to {self.endpoint_label}")
+        return True
+
+    async def _drop_stream(self, ws):
+        """Close a refused connection and its tasks."""
+        tasks = [task for task in (self.sender_task, self.utterance_timeout_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.sender_task = None
+        self.utterance_timeout_task = None
+        # Bounded: the caller is waiting on the next connect.
+        try:
+            await asyncio.wait_for(ws.close(), timeout=1.0)
+        except Exception as e:
+            logger.error(f"Error closing refused Soniox websocket: {e}")
+        self.websocket_connection = None
+        self.connection_authenticated = False
+
     def get_soniox_ws_url(self):
         return soniox_ws_url(self.soniox_host)
 
@@ -185,8 +243,8 @@ class SonioxTranscriber(BaseTranscriber):
             self.websocket_connection = soniox_ws
             self.connection_authenticated = True
             logger.info(
-                f"Connected to Soniox (model={self.model}, audio_format={self.soniox_audio_format}, "
-                f"sample_rate={self.sampling_rate})"
+                f"Connected to Soniox (endpoint={self.endpoint_label}, model={self.model}, "
+                f"audio_format={self.soniox_audio_format}, sample_rate={self.sampling_rate})"
             )
             return soniox_ws
         except asyncio.TimeoutError:
@@ -330,6 +388,8 @@ class SonioxTranscriber(BaseTranscriber):
 
                 if res.get("error_code") is not None:
                     self.connection_error = f"{res.get('error_code')}: {res.get('error_message')}"
+                    # 429 is this region's limit; the next region has its own.
+                    self._rejected_for_capacity = str(res.get("error_code")) == "429"
                     logger.error(f"Soniox error: {self.connection_error}")
                     break
 
@@ -566,41 +626,50 @@ class SonioxTranscriber(BaseTranscriber):
 
     async def transcribe(self):
         soniox_ws = None
-        # Audio positions restart at 0 on each connection; reset local frame bookkeeping with them.
-        self.reset_audio_frame_state()
-        self.reset_billed_audio()
-        # A discard armed on a connection that closed before its <fin> means nothing on this one; left set, it would
-        # drop the caller's first words after a quick switch back.
-        self.discard_until_fin_deadline = None
         try:
             start_time = timestamp_ms()
-            try:
-                soniox_ws = await self.soniox_connect()
-            except (ValueError, ConnectionError) as e:
-                logger.error(f"Failed to establish Soniox connection: {e}")
-                self.connection_error = str(e)
-                await self.toggle_connection()
-                return
+            while True:
+                # Audio positions restart at 0 on each connection; reset local frame bookkeeping with them.
+                self.reset_audio_frame_state()
+                self.reset_billed_audio()
+                # A discard armed on a connection that closed before its <fin> means nothing on this one; left set, it would
+                # drop the caller's first words after a quick switch back.
+                self.discard_until_fin_deadline = None
+                try:
+                    soniox_ws = await self.soniox_connect()
+                except (ValueError, ConnectionError) as e:
+                    logger.error(f"Failed to establish Soniox connection: {e}")
+                    self.connection_error = str(e)
+                    await self.toggle_connection()
+                    return
 
-            if not self.connection_time:
-                self.connection_time = round(timestamp_ms() - start_time)
+                if not self.connection_time:
+                    self.connection_time = round(timestamp_ms() - start_time)
 
-            self.sender_task = asyncio.create_task(self.sender_stream(soniox_ws))
-            self.utterance_timeout_task = asyncio.create_task(self.monitor_utterance_timeout())
+                self.sender_task = asyncio.create_task(self.sender_stream(soniox_ws))
+                self.utterance_timeout_task = asyncio.create_task(self.monitor_utterance_timeout())
 
-            try:
-                async for message in self.receiver(soniox_ws):
-                    if self.connection_on:
-                        await self.push_to_transcriber_queue(message)
-                    else:
-                        break
-            except ConnectionClosedError as e:
-                logger.error(f"Soniox websocket closed during streaming: {e}")
-                self.connection_error = str(e)
-            except Exception as e:
-                logger.error(f"Error during Soniox streaming: {e}")
-                self.connection_error = str(e)
-                raise
+                try:
+                    async for message in self.receiver(soniox_ws):
+                        if self.connection_on:
+                            await self.push_to_transcriber_queue(message)
+                        else:
+                            break
+                except ConnectionClosedError as e:
+                    logger.error(f"Soniox websocket closed during streaming: {e}")
+                    self.connection_error = str(e)
+                except Exception as e:
+                    logger.error(f"Error during Soniox streaming: {e}")
+                    self.connection_error = str(e)
+                    raise
+
+                if not self._next_endpoint_after_rejection():
+                    break
+                await self._drop_stream(soniox_ws)
+                soniox_ws = None
+                # The caller hung up during the move.
+                if not self.connection_on:
+                    break
 
         except (ValueError, ConnectionError) as e:
             logger.error(f"Connection error in Soniox transcribe: {e}")
@@ -620,8 +689,9 @@ class SonioxTranscriber(BaseTranscriber):
                     self.websocket_connection = None
                     self.connection_authenticated = False
 
-            if self.sender_task is not None:
-                self.sender_task.cancel()
+            for task in (self.sender_task, self.utterance_timeout_task):
+                if task is not None:
+                    task.cancel()
 
             await self.push_to_transcriber_queue(
                 create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
