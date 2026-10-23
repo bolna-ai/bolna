@@ -237,23 +237,50 @@ async def test_the_close_an_old_connection_reports_on_its_way_out_never_reaches_
         await pool.cleanup()
 
 
-async def test_a_pool_holding_a_provider_that_cannot_reopen_keeps_every_leg_connected():
-    pool, legs = make_pool(legs={"hi": FakeLeg(), "ta": BlockingLeg()})
+async def test_only_the_leg_that_cannot_reopen_stays_connected():
+    pool, legs = make_pool(legs={"hi": FakeLeg(), "ta": FakeLeg(), "te": BlockingLeg()})
     await pool.run()
     try:
-        assert pool.lazy_legs is False
-        assert legs["hi"].runs == 1 and legs["ta"].runs == 1
-        assert pool._keepalive_task is not None
+        assert legs["hi"].runs == 1 and legs["te"].runs == 1  # the active leg, and the one that stays connected
+        assert legs["ta"].runs == 0  # still lazy
+        assert pool._keepalive_task is not None  # the connected standby still needs it
+
+        await pool.switch("te")
+        await pool.leg_close_tasks["hi"]
+        assert legs["te"].runs == 1  # already connected, not reopened
+        assert legs["hi"].toggles == 1  # the lazy leg the call left closes
+
+        await pool.switch("ta")
+        await settle()
+        assert legs["ta"].runs == 1
+        assert legs["te"].toggles == 0 and "te" not in pool.leg_close_tasks  # left connected
     finally:
         await pool.cleanup()
 
 
 def test_providers_whose_connect_or_close_blocks_the_event_loop_opt_out():
-    assert AzureTranscriber.reopens_mid_call is False
     assert GoogleTranscriber.reopens_mid_call is False
+    # Azure's blocking start takes about 1 ms and its close already runs in an executor.
+    assert AzureTranscriber.reopens_mid_call is True
     assert DeepgramTranscriber.reopens_mid_call is True
     assert SarvamTranscriber.reopens_mid_call is True
     assert SonioxTranscriber.reopens_mid_call is True
+
+
+async def test_a_hangup_during_a_quick_switch_back_keeps_the_leg_that_got_eos():
+    # The switch back waits for the target's pending close; eos arriving meanwhile goes to the active leg, and only
+    # that leg can deliver the close that ends the call.
+    pool, legs = make_pool(close_delay_s=0.05)
+    await pool.run()
+    await pool.switch("ta")
+    switch_back = asyncio.create_task(pool.switch("hi"))
+    await asyncio.sleep(0.01)  # inside the wait for hi's close
+    pool.call_ended = True  # the router saw eos and routed it to ta
+    await switch_back
+    try:
+        assert pool.active_label == "ta"
+    finally:
+        await pool.cleanup()
 
 
 async def test_a_failed_start_reports_a_closed_connection():

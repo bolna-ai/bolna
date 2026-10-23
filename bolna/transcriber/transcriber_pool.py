@@ -158,12 +158,10 @@ class TranscriberPool:
         # and sarvam connection churn).
         self.call_ended: bool = False
 
-        # Lazy legs close and reopen recognizers mid-call; a provider whose connect or close blocks the event loop
-        # would stall every call on the pod there, so a pool holding one keeps all its legs connected.
-        blocking_labels = [label for label, t in transcribers.items() if not getattr(t, "reopens_mid_call", True)]
-        self.lazy_legs = lazy_legs and not blocking_labels
-        if lazy_legs and blocking_labels:
-            logger.info(f"TranscriberPool: lazy legs off, {blocking_labels} cannot reopen mid-call")
+        self.lazy_legs = lazy_legs
+        always_connected = [label for label in transcribers if lazy_legs and not self.is_lazy(label)]
+        if always_connected:
+            logger.info(f"TranscriberPool: {always_connected} stay connected (cannot reopen mid-call)")
         # Lazy legs whose connection has been started and not closed since.
         self.open_labels: set[str] = set()
         self.leg_opened_at: dict[str, float] = {}
@@ -232,16 +230,16 @@ class TranscriberPool:
                 self.output_forwarder_tasks.append(asyncio.create_task(self.forward_leg_output(label, leg_queue)))
 
         for label, transcriber in self.transcribers.items():
-            if self.lazy_legs and label != self.active_label:
+            if self.is_lazy(label) and label != self.active_label:
                 continue
             logger.info(f"TranscriberPool: starting transcriber '{label}'")
             await transcriber.run()
-        if self.lazy_legs:
+        if self.is_lazy(self.active_label):
             self.open_labels.add(self.active_label)
 
         self._router_task = asyncio.create_task(self._audio_router())
-        # Lazy legs leave no standby connected, so there is nothing to keep alive.
-        if not self.lazy_legs:
+        # A lazy leg is never a connected standby, so only legs that stay connected need the keepalive.
+        if not all(self.is_lazy(label) for label in self.transcribers):
             self._keepalive_task = asyncio.create_task(self._standby_keepalive())
         logger.info(f"TranscriberPool: audio router started, active='{self.active_label}'")
 
@@ -624,7 +622,7 @@ class TranscriberPool:
             # after eos: a switch decision landing post-hangup must not resurrect
             # connections on a call that is tearing down.
             target = self.transcribers[label]
-            if self.lazy_legs and label not in self.open_labels:
+            if self.is_lazy(label) and label not in self.open_labels:
                 if self.call_ended:
                     # Only the active leg can deliver the close that ends the call now; a leg that never opened
                     # would never send one, and the call would wait for it forever.
@@ -647,6 +645,12 @@ class TranscriberPool:
             if discard_open_turn is not None:
                 await discard_open_turn()
 
+            # Re-checked after every await above (a pending close, a reopen, the finalize): eos that arrived meanwhile
+            # went to the old leg, and only it can deliver the close that ends the call.
+            if self.call_ended:
+                logger.info(f"TranscriberPool: input ended — keeping '{old}' active instead of switching to '{label}'")
+                return
+
             # Carry turn_counter forward so the incoming transcriber continues
             # the turn sequence rather than restarting from 0. The next speech
             # event on the new transcriber will increment the counter normally.
@@ -659,8 +663,13 @@ class TranscriberPool:
             self.active_label = label
             logger.info(f"TranscriberPool: switched {old} -> {label} (inherited turn_counter={inherited_turn_counter})")
 
-            if self.lazy_legs:
+            if self.is_lazy(old):
                 self.close_leg_later(old)
+
+    def is_lazy(self, label):
+        """Lazy legs connect on a switch to them and close when the call leaves. A provider whose connect or close
+        blocks the event loop (reopens_mid_call False) would stall every call on the pod there, so it stays connected."""
+        return self.lazy_legs and getattr(self.transcribers[label], "reopens_mid_call", True)
 
     async def open_leg(self, label):
         """Start a lazy leg's connection and return at once; the router queues its audio until it is up."""

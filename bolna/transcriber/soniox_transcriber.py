@@ -540,6 +540,9 @@ class SonioxTranscriber(BaseTranscriber):
         # Audio positions restart at 0 on each connection; reset local frame bookkeeping with them.
         self.reset_audio_frame_state()
         self.reset_billed_audio()
+        # A discard armed on a connection that closed before its <fin> means nothing on this one; left set, it would
+        # drop the caller's first words after a quick switch back.
+        self.discard_until_fin_deadline = None
         try:
             start_time = timestamp_ms()
             try:
