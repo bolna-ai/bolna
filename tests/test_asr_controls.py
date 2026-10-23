@@ -1,6 +1,6 @@
 import pytest
 
-from bolna.constants import ASR_CONTROLS, asr_controls_for, supports_endpointing
+from bolna.asr_controls import ASR_CONTROLS, asr_controls_for, supports_endpointing
 from bolna.models import Transcriber
 
 
