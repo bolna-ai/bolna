@@ -158,7 +158,8 @@ async def _as_tool_call_deltas(chunks, function_name: Optional[str]):
                     # A cap-truncated reply keeps "length", so the cut stays visible downstream.
                     if named and choice.finish_reason == "stop":
                         choice.finish_reason = "tool_calls"
-                choice.delta.tool_calls = [d for d in deltas if d] or None
+                # A server whose parser reads the JSON as a call streams it natively; that passes through.
+                choice.delta.tool_calls = [*(choice.delta.tool_calls or []), *(d for d in deltas if d)] or None
             yield chunk
     finally:
         # A reader that stops early closes this generator; the response underneath must close with it.

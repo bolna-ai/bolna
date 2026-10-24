@@ -190,3 +190,17 @@ async def test_edge_parameters_survive_any_chunking_of_the_reply(piece):
     assert decision["function_name"] == "transition_to_book"
     assert decision["arguments"] == {"slot": {"day": "mon", "at": {"h": 9}}}
     assert (await decision["routing_tail"])["reasoning"] == "asked for monday"
+
+
+async def test_a_call_the_server_streams_natively_passes_through_untouched():
+    native = {
+        "tool_calls": [
+            {"index": 0, "id": "c1", "type": "function", "function": {"name": FETCH, "arguments": '{"user_id": "u-7"}'}}
+        ]
+    }
+    backend = Backend([sse({"role": "assistant", "content": None}), sse(native), sse(finish_reason="tool_calls")])
+
+    chunks = await forced_turn(bolna_llm(backend, api_tools=API_TOOLS))
+
+    calls = [c.data for c in chunks if isinstance(c.data, FunctionCallPayload)]
+    assert [(p.called_fun, p.user_id) for p in calls] == [(FETCH, "u-7")]
