@@ -1,5 +1,6 @@
 import asyncio
 from collections import OrderedDict
+import hashlib
 import os
 import re
 import time
@@ -230,7 +231,7 @@ class GraphAgent(BaseAgent):
             self._active_conversation_llm = self.llm
             return self.llm
 
-        cache_key = repr(sorted((k, str(v)) for k, v in override.items()))
+        cache_key = self._conversation_cache_key(node, override)
         llm = self._conversation_llm_cache.get(cache_key)
         if llm is not None:
             self._active_conversation_llm = llm
@@ -261,6 +262,15 @@ class GraphAgent(BaseAgent):
         self._active_conversation_llm = llm
         return llm
 
+    def _conversation_cache_key(self, node: Optional[dict], override: dict) -> str:
+        """Nodes share a client only when their override and their own resolved credentials both match."""
+        key = repr(sorted((k, str(v)) for k, v in override.items()))
+        credentials = (self.config.get("node_llm_credentials") or {}).get((node or {}).get("id"))
+        if credentials is not None:
+            # A fingerprint, so no key material sits in a cache key that may be logged.
+            key += hashlib.sha256(json.dumps(credentials, sort_keys=True).encode()).hexdigest()
+        return key
+
     def _prewarm_conversation_overrides(self):
         """Build the override clients at graph load — the nodes are known, and constructing one
         opens a socket in Responses mode, which would otherwise land in a turn's first-token path."""
@@ -271,7 +281,7 @@ class GraphAgent(BaseAgent):
                 raw = raw.model_dump()
             if not any(v is not None for v in raw.values()):
                 continue
-            key = repr(sorted((k, str(v)) for k, v in raw.items() if v is not None))
+            key = self._conversation_cache_key(node, {k: v for k, v in raw.items() if v is not None})
             if key in seen:
                 continue
             seen.add(key)

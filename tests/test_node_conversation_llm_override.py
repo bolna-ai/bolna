@@ -8,6 +8,8 @@ Unset fields inherit; a node that overrides nothing reuses the agent's own LLM i
 
 import os
 from contextlib import contextmanager
+
+import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bolna.agent_types.graph_agent import GraphAgent
@@ -498,3 +500,27 @@ async def test_a_real_override_client_picks_the_transport_from_its_own_model():
         assert getattr(responses, "use_responses_api", False) is True
         # And the agent's own client is untouched by either.
         assert getattr(agent.llm, "use_responses_api", False) is False
+
+
+AZURE_OVERRIDE = {"provider": "azure", "model": "azure/gpt-4.1-mini"}
+NODE_AZURE = {"llm_key": "k", "base_url": "https://node.azure.example", "api_version": "2024-12-01"}
+
+
+@pytest.mark.parametrize("first", ["with_credentials", "without_credentials"])
+def test_a_node_without_credentials_never_borrows_another_nodes_client(first):
+    nodes = {
+        "with_credentials": {"id": "a", "llm_config": AZURE_OVERRIDE},
+        "without_credentials": {"id": "b", "llm_config": AZURE_OVERRIDE},
+    }
+    second = "without_credentials" if first == "with_credentials" else "with_credentials"
+    with _agent(node_llm_credentials={"a": NODE_AZURE}) as agent:
+        served = {name: agent._conversation_llm_for(nodes[name]) for name in (first, second)}
+    assert served["without_credentials"] is agent.llm
+    assert served["with_credentials"] is not agent.llm
+
+
+def test_nodes_with_the_same_override_and_credentials_share_one_client():
+    with _agent(node_llm_credentials={"a": NODE_AZURE, "b": dict(NODE_AZURE)}) as agent:
+        a = agent._conversation_llm_for({"id": "a", "llm_config": AZURE_OVERRIDE})
+        b = agent._conversation_llm_for({"id": "b", "llm_config": AZURE_OVERRIDE})
+    assert a is b and a is not agent.llm
