@@ -797,6 +797,10 @@ class TaskManager(BaseManager):
             self.check_user_online_message_config = self.conversation_config.get(
                 "check_user_online_message", DEFAULT_USER_ONLINE_MESSAGE
             )
+            # Off by default: the LLM never sees the nudge. On, its next reply knows the agent just asked.
+            self.user_online_message_in_llm_history = (
+                self.conversation_config.get("user_online_message_in_llm_history") is True
+            )
             if self.check_user_online_message_config and self.context_data:
                 if isinstance(self.check_user_online_message_config, dict):
                     self.check_user_online_message_config = {
@@ -8465,7 +8469,7 @@ class TaskManager(BaseManager):
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info=meta_info))
                     self.conversation_history.append_assistant(
                         user_online_message,
-                        exclude_from_llm=True,
+                        exclude_from_llm=not self.user_online_message_in_llm_history,
                         sequence_id=-1,
                         message_category="is_user_online_message",
                     )
