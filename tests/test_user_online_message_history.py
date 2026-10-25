@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from bolna.helpers.conversation_history import ConversationHistory
+from bolna.models import ConversationConfig
 from tests.test_check_completion_requires_mark_ack import _drive, _telephony_task_manager
 
 NUDGE = "Hey, are you still there"
@@ -50,3 +51,12 @@ async def test_an_opted_in_agent_sends_the_nudge_to_the_llm(monkeypatch):
     await _drive(tm, monkeypatch)
 
     assert [m["role"] for m in nudges(tm.conversation_history.get_copy())] == ["assistant"]
+
+
+def test_the_opt_in_survives_agent_validation():
+    """The OSS server stores the validated config's model_dump(), so the key must be a declared field."""
+    assert (
+        ConversationConfig(user_online_message_in_llm_history=True).model_dump()["user_online_message_in_llm_history"]
+        is True
+    )
+    assert ConversationConfig().model_dump()["user_online_message_in_llm_history"] is False
