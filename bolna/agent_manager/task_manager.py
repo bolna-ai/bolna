@@ -8466,6 +8466,12 @@ class TaskManager(BaseManager):
                             "end_of_llm_stream": True,
                         }
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info=meta_info))
+                    if self.user_online_message_in_llm_history:
+                        # Tells the LLM why it asked, so a "yes" answers the check and the open question stays open.
+                        self.conversation_history.append_user(
+                            f"[silence] User was silent for {self.trigger_user_online_message_after} seconds",
+                            exclude_from_transcript=True,
+                        )
                     self.conversation_history.append_assistant(
                         user_online_message,
                         exclude_from_llm=not self.user_online_message_in_llm_history,
