@@ -5,7 +5,7 @@ from typing import Optional
 
 from openai import BadRequestError, APIError
 
-from bolna.constants import is_reasoning_model
+from bolna.constants import IS_USER_ONLINE_MESSAGE, is_reasoning_model
 from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
 from bolna.helpers.utils import (
     convert_to_request_log,
@@ -52,7 +52,11 @@ def _strip_server_injected_params(tools):
 def _new_items_start(messages):
     """Index of the first message after the last assistant message, where a chained request begins."""
     for i in range(len(messages) - 1, -1, -1):
-        if messages[i].get("role") == ChatRole.ASSISTANT:
+        # The "are you still there" nudge never went through the model, so it is not on the chain.
+        if (
+            messages[i].get("role") == ChatRole.ASSISTANT
+            and messages[i].get("message_category") != IS_USER_ONLINE_MESSAGE
+        ):
             return i + 1
     return 0
 
