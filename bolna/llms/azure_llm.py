@@ -325,7 +325,7 @@ class AzureLLM(OpenAICompatibleLLM):
 
             if hasattr(delta, "tool_calls") and delta.tool_calls and accumulator:
                 if buffer:
-                    delivered = True
+                    delivered = delivered or bool(buffer.strip())
                     yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
                     buffer = ""
 
@@ -333,7 +333,8 @@ class AzureLLM(OpenAICompatibleLLM):
 
                 pre_call = accumulator.get_pre_call_message(meta_info)
                 if pre_call:
-                    delivered = True
+                    # A silent filler (switch_language's "") speaks nothing, so the turn can still be re-issued.
+                    delivered = delivered or bool((pre_call[0] or "").strip())
                     yield LLMStreamChunk(
                         data=pre_call[0],
                         end_of_stream=True,
@@ -367,7 +368,7 @@ class AzureLLM(OpenAICompatibleLLM):
                     if before:
                         answer += before
                         if synthesize:
-                            delivered = True
+                            delivered = delivered or bool(before.strip())
                             yield LLMStreamChunk(data=before, end_of_stream=False, latency=latency_data)
                     end_pos = self._find_tool_call_end(after)
                     if end_pos != -1:
@@ -387,7 +388,7 @@ class AzureLLM(OpenAICompatibleLLM):
                     buffer += content
                     if synthesize and len(buffer) >= self.buffer_size:
                         split = buffer.rsplit(" ", 1)
-                        delivered = True
+                        delivered = delivered or bool(split[0].strip())
                         yield LLMStreamChunk(data=split[0], end_of_stream=False, latency=latency_data)
                         buffer = split[1] if len(split) > 1 else ""
 

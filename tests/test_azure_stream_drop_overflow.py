@@ -83,9 +83,9 @@ def azure_llm(pool, overflow=None, **kwargs):
     return llm
 
 
-async def run_turn(llm, meta_info=None):
+async def run_turn(llm, meta_info=None, synthesize=True):
     meta_info = {"sequence_id": 1} if meta_info is None else meta_info
-    return [chunk async for chunk in llm.generate_stream(MSGS, meta_info=meta_info)]
+    return [chunk async for chunk in llm.generate_stream(MSGS, synthesize=synthesize, meta_info=meta_info)]
 
 
 def words(chunks):
@@ -154,10 +154,26 @@ async def test_a_stream_that_drops_with_its_text_still_buffered_is_reissued():
     assert [e["error_type"] for e in meta_info["_non_fatal_errors"]] == ["stream_dropped_before_output"]
 
 
-END_CALL_TOOLS = {
-    "tools": [{"type": "function", "function": {"name": "end_call", "parameters": {"type": "object"}}}],
-    "tools_params": {},
-}
+async def test_a_turn_not_being_synthesized_is_reissued_without_the_dropped_text():
+    """Nothing streams out mid-turn when the answer is not synthesized, so the whole answer comes from the overflow."""
+    pool = Backend(Body([ROLE, sse({"content": "Sure, I can help you book that appointment for"})], then=drop))
+    overflow = Backend(Body(HEALTHY))
+
+    chunks = await run_turn(azure_llm(pool, overflow), synthesize=False)
+
+    assert chunks[-1].data == REPLY
+    assert chunks[-1].overflowed is True
+
+
+def tool_spec(name):
+    """A tool configured the way the task manager wires it, so the accumulator would emit its call."""
+    return {
+        "tools": [{"type": "function", "function": {"name": name, "parameters": {"type": "object"}}}],
+        "tools_params": {name: {"pre_call_message": None}},
+    }
+
+
+END_CALL_TOOLS = tool_spec("end_call")
 
 
 async def test_a_stream_that_drops_mid_tool_call_is_reissued_without_the_half_call():
@@ -170,6 +186,34 @@ async def test_a_stream_that_drops_mid_tool_call_is_reissued_without_the_half_ca
 
     assert words(chunks) == REPLY.split()
     assert not any(c.is_function_call for c in chunks)
+    assert chunks[-1].overflowed is True
+
+
+async def test_a_stream_that_drops_after_a_silent_filler_is_reissued():
+    """switch_language's filler is empty, so yielding it speaks nothing."""
+    tool_call = {
+        "index": 0,
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "switch_language", "arguments": '{"la'},
+    }
+    pool = Backend(Body([ROLE, sse({"tool_calls": [tool_call]})], then=drop))
+    overflow = Backend(Body(HEALTHY))
+
+    chunks = await run_turn(azure_llm(pool, overflow, api_tools=tool_spec("switch_language")))
+
+    assert words(chunks) == REPLY.split()
+    assert not any(c.is_function_call for c in chunks)
+    assert chunks[-1].overflowed is True
+
+
+async def test_a_stream_that_drops_inside_a_text_tool_call_after_only_whitespace_is_reissued():
+    pool = Backend(Body([ROLE, sse({"content": "\nfunctions.end_call("})], then=drop))
+    overflow = Backend(Body(HEALTHY))
+
+    chunks = await run_turn(azure_llm(pool, overflow, api_tools=END_CALL_TOOLS))
+
+    assert words(chunks) == REPLY.split()
     assert chunks[-1].overflowed is True
 
 
