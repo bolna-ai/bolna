@@ -150,7 +150,7 @@ class LiteLLM(BaseLLM):
 
             elif hasattr(delta, "content") and delta.content:
                 if accumulator:
-                    accumulator.received_textual = True
+                    accumulator.note_content(delta.content)
                 answer += delta.content
                 buffer += delta.content
                 if synthesize and len(buffer) >= self.buffer_size:
