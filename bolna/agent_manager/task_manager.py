@@ -1798,6 +1798,12 @@ class TaskManager(BaseManager):
         self.transcriber_provider = None
         self.synthesizer_provider = None
         self.synthesizer_voice = None
+        # The agent's language lives on its transcriber config; a chat builds no transcriber, so read it as a call does.
+        transcriber_config = self.task_config["tools_config"].get("transcriber") or {}
+        if transcriber_config.get("multilingual"):
+            self.language = transcriber_config.get("active") or DEFAULT_LANGUAGE_CODE
+        else:
+            self.language = transcriber_config.get("language") or DEFAULT_LANGUAGE_CODE
         if self.task_config["tools_config"].get("llm_agent") is not None and llm_config is not None:
             llm_config["buffer_size"] = (self.task_config["tools_config"].get("synthesizer") or {}).get("buffer_size")
 
