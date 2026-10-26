@@ -11,8 +11,10 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 import pytest
+from pydantic import ValidationError
 
 from bolna.constants import SARVAM_MAX_KEYTERM_CHARACTERS, SARVAM_MAX_KEYTERMS
+from bolna.models import Transcriber
 from bolna.transcriber.sarvam_transcriber import SarvamTranscriber
 
 
@@ -70,6 +72,24 @@ def test_vad_params_present(model):
     ws_url = _transcriber(model).ws_url
     assert "high_vad_sensitivity=true" in ws_url
     assert "vad_signals=true" in ws_url
+
+
+def test_first_turn_min_speech_frames_forwarded_when_set():
+    # Sarvam's default (8) drops short first replies like "Yes" (BOLNA-3263).
+    ws_url = _transcriber("saaras:v4", first_turn_min_speech_frames=2).ws_url
+    assert parse_qs(urlparse(ws_url).query)["first_turn_min_speech_frames"] == ["2"]
+
+
+def test_first_turn_min_speech_frames_omitted_by_default():
+    assert "first_turn_min_speech_frames" not in _transcriber("saaras:v4").ws_url
+
+
+def test_first_turn_min_speech_frames_survives_transcriber_model():
+    # Agent create/GET round-trips through this model; an undeclared field is silently dropped.
+    config = Transcriber(provider="sarvam", model="saaras:v4", first_turn_min_speech_frames=2)
+    assert config.model_dump()["first_turn_min_speech_frames"] == 2
+    with pytest.raises(ValidationError):
+        Transcriber(provider="sarvam", model="saaras:v4", first_turn_min_speech_frames=0)
 
 
 def test_unknown_language_passthrough():
