@@ -394,6 +394,8 @@ class Transcriber(BaseModel):
     noise_reduction: Optional[bool] = False
     vad_threshold: Optional[float] = 0.5
     vad_prefix_padding_ms: Optional[int] = 300
+    # Sarvam streaming VAD: speech frames needed to open the first turn; unset keeps Sarvam's default (8).
+    first_turn_min_speech_frames: Optional[int] = Field(default=None, ge=1)
     assemblyai_config: Optional[AssemblyAITranscriberConfig] = None
 
     @field_validator("provider")

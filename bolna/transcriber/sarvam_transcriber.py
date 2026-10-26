@@ -52,6 +52,7 @@ class SarvamTranscriber(BaseTranscriber):
         disable_sdk=False,
         keywords=None,
         context=None,
+        first_turn_min_speech_frames=None,
         **kwargs,
     ):
         super().__init__(input_queue)
@@ -65,6 +66,7 @@ class SarvamTranscriber(BaseTranscriber):
         self.sampling_rate = int(sampling_rate)
         self.high_vad_sensitivity = high_vad_sensitivity
         self.vad_signals = vad_signals
+        self.first_turn_min_speech_frames = first_turn_min_speech_frames
         self.disable_sdk = disable_sdk
         self.context = (context or "").strip()
         self.keyterms = self._resolve_keyterms(keywords)
@@ -162,6 +164,9 @@ class SarvamTranscriber(BaseTranscriber):
             params["high_vad_sensitivity"] = "true"
         if self.vad_signals:
             params["vad_signals"] = "true"
+        if self.first_turn_min_speech_frames is not None:
+            # Sarvam's default (8) swallows short first replies like "Yes"/"Hello".
+            params["first_turn_min_speech_frames"] = str(self.first_turn_min_speech_frames)
         if self.target_language:
             params["target_language"] = self.target_language
         if self.context:
