@@ -179,6 +179,8 @@ class OpenAIWSConnection:
 class OpenAiLLM(OpenAICompatibleLLM):
     _base_url = None
     _base_url_validated = False
+    # Stop sequences sent on chat streaming requests to non-reasoning models; None sends none.
+    STOP_SEQUENCES = ("User:",)
 
     def __init__(
         self,
@@ -229,18 +231,33 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         # http2=False: cancelled h2 requests leak streams until the connection pins at 100 (barge-in)
         http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False)
+        max_retries = kwargs.get("max_retries", 2)
 
         if self_hosted:
             base_url = kwargs.get("base_url")
             api_key = kwargs.get("llm_key", None)
-            self.async_client = AsyncOpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
+            self.async_client = AsyncOpenAI(
+                base_url=base_url,
+                api_key=api_key,
+                http_client=http_client,
+                max_retries=max_retries,
+            )
         else:
             llm_key = kwargs.get("llm_key", os.getenv("OPENAI_API_KEY"))
             base_url = kwargs.get("base_url")
             if base_url:
-                self.async_client = AsyncOpenAI(base_url=base_url, api_key=llm_key, http_client=http_client)
+                self.async_client = AsyncOpenAI(
+                    base_url=base_url,
+                    api_key=llm_key,
+                    http_client=http_client,
+                    max_retries=max_retries,
+                )
             else:
-                self.async_client = AsyncOpenAI(api_key=llm_key, http_client=http_client)
+                self.async_client = AsyncOpenAI(
+                    api_key=llm_key,
+                    http_client=http_client,
+                    max_retries=max_retries,
+                )
             api_key = llm_key
         self.llm_host = urlparse(base_url).netloc if base_url else None
         # Only a customer endpoint is guarded; platform ones keep the SDK's connection retries.
@@ -310,8 +327,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
             "stream_options": {"include_usage": True},
         }
 
-        if not is_reasoning_model(self.model):
-            model_args["stop"] = ["User:"]
+        if self.STOP_SEQUENCES and not is_reasoning_model(self.model):
+            model_args["stop"] = list(self.STOP_SEQUENCES)
 
         if self.trigger_function_call:
             _tools = self._parse_tools(tools)
