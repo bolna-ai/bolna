@@ -343,7 +343,7 @@ class AzureLLM(OpenAICompatibleLLM):
 
             elif hasattr(delta, "content") and delta.content is not None:
                 if accumulator:
-                    accumulator.received_textual = True
+                    accumulator.note_content(delta.content)
                 content = delta.content
 
                 if text_tool_buffer is not None:

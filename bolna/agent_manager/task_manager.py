@@ -1866,7 +1866,8 @@ class TaskManager(BaseManager):
                         else:
                             cls = SUPPORTED_TRANSCRIBER_MODELS.get(cfg["model"])
                         leg_kwargs = self.__pool_leg_kwargs(self.kwargs, "transcriber_key", cfg.get("provider"))
-                        transcribers[label] = cls(provider, **cfg, **leg_kwargs)
+                        # Runtime kwargs win over the saved config, which may carry the same key.
+                        transcribers[label] = cls(provider, **{**cfg, **leg_kwargs})
 
                         if label == active_label:
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
@@ -1955,7 +1956,7 @@ class TaskManager(BaseManager):
                         transcriber_class = SUPPORTED_TRANSCRIBER_PROVIDERS.get(transcriber_config["provider"])
                     else:
                         transcriber_class = SUPPORTED_TRANSCRIBER_MODELS.get(transcriber_config["model"])
-                    self.tools["transcriber"] = transcriber_class(provider, **transcriber_config, **self.kwargs)
+                    self.tools["transcriber"] = transcriber_class(provider, **{**transcriber_config, **self.kwargs})
         except Exception as e:
             logger.error(f"Something went wrong with starting transcriber {e}")
 
@@ -2144,7 +2145,7 @@ class TaskManager(BaseManager):
                 injected_cfg["routing_reasoning_effort"] = self.kwargs["routing_reasoning_effort"]
             if "routing_max_tokens" in self.kwargs:
                 injected_cfg["routing_max_tokens"] = self.kwargs["routing_max_tokens"]
-            for key in ("routing_llm_key", "routing_base_url", "routing_api_version"):
+            for key in ("routing_llm_key", "routing_base_url", "routing_api_version", "node_llm_credentials"):
                 if self.kwargs.get(key) is not None:
                     injected_cfg[key] = self.kwargs[key]
             # Set when the caller serves the conversation LLM from a different backend than the agent's own.
