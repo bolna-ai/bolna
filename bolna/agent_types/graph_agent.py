@@ -1047,7 +1047,7 @@ class GraphAgent(BaseAgent):
         return (
             self._hold_until_first_delivery
             and node is not None
-            and self._node_type_of(node) == NodeType.LLM
+            and self._node_type_of(node) in (NodeType.LLM, NodeType.STATIC)
             and not self._active_node_first_response_delivered
         )
 
