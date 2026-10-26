@@ -797,6 +797,9 @@ class TaskManager(BaseManager):
             self.check_user_online_message_config = self.conversation_config.get(
                 "check_user_online_message", DEFAULT_USER_ONLINE_MESSAGE
             )
+            self.user_online_message_in_llm_history = self.conversation_config.get(
+                "user_online_message_in_llm_history", False
+            )
             if self.check_user_online_message_config and self.context_data:
                 if isinstance(self.check_user_online_message_config, dict):
                     self.check_user_online_message_config = {
@@ -8463,9 +8466,15 @@ class TaskManager(BaseManager):
                             "end_of_llm_stream": True,
                         }
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info=meta_info))
+                    if self.user_online_message_in_llm_history:
+                        # Tells the LLM why it asked, so a "yes" answers the check and the open question stays open.
+                        self.conversation_history.append_user(
+                            f"[silence] User was silent for {self.trigger_user_online_message_after} seconds",
+                            exclude_from_transcript=True,
+                        )
                     self.conversation_history.append_assistant(
                         user_online_message,
-                        exclude_from_llm=True,
+                        exclude_from_llm=not self.user_online_message_in_llm_history,
                         sequence_id=-1,
                         message_category="is_user_online_message",
                     )
