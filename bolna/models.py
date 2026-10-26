@@ -390,6 +390,7 @@ class Transcriber(BaseModel):
     eager_eot_threshold: Optional[float] = None
     eot_timeout_ms: Optional[int] = None
     language_hints: Optional[List[str]] = None
+    hinglish_mode: Optional[bool] = False
     delay: Optional[str] = "medium"
     noise_reduction: Optional[bool] = False
     vad_threshold: Optional[float] = 0.5

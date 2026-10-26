@@ -138,6 +138,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.flux_watchdog_task = None
         self.eager_transcript_pending = None
         self.language_hints = kwargs.get("language_hints")
+        self.hinglish_mode = kwargs.get("hinglish_mode")
         # ASR-native LID events (flux-general-multi only) — collected per turn and
         # merged into lid_shadow_events.asr_lid_events at call end.
         self.flux_lid_events: list[dict] = []
@@ -257,6 +258,8 @@ class DeepgramTranscriber(BaseTranscriber):
 
         if self.is_flux_multi:
             hints = self._resolve_language_hints()
+            if self.hinglish_mode and hints == ["hi"]:
+                hints = ["hi", "en"]
             if hints:
                 dg_params["language_hint"] = hints
 

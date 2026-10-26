@@ -67,6 +67,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         self.speech_model = LEGACY_SPEECH_MODEL_ALIASES.get(model, model)
         self.is_legacy_streaming_model = self.speech_model in LEGACY_STREAMING_MODELS
         self.is_universal_3_model = (self.speech_model or "").startswith("universal-3")
+        self.hinglish_mode = kwargs.get("hinglish_mode")
         self.sampling_rate = int(sampling_rate)
         self.encoding = encoding
         self.format_turns = format_turns
@@ -186,7 +187,8 @@ class AssemblyAITranscriber(BaseTranscriber):
             if self.speech_model == "universal-streaming-english" and base_language != "en":
                 logger.warning(f"AssemblyAI {self.speech_model} only supports English, got {self.language}")
         elif base_language in ASSEMBLYAI_SUPPORTED_LANGUAGES:
-            connection_params["language_codes"] = json.dumps([base_language])
+            hinglish =self.hinglish_mode and base_language == "hi" and self.speech_model == "universal-3-6-pro"
+            connection_params["language_codes"] = json.dumps(["hi", "en"] if hinglish else [base_language])
         else:
             logger.warning(f"AssemblyAI {self.speech_model} has no language code for {self.language}, auto-detecting")
 

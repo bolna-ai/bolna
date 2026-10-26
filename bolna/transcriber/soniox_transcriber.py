@@ -47,6 +47,7 @@ class SonioxTranscriber(BaseTranscriber):
         context=None,
         process_interim_results="true",
         language_hints=None,
+        hinglish_mode=False,
         **kwargs,
     ):
         super().__init__(input_queue)
@@ -59,6 +60,7 @@ class SonioxTranscriber(BaseTranscriber):
         self.keywords = keywords
         self.context = (context or "").strip()
         self.language_hints = language_hints
+        self.hinglish =bool(hinglish_mode) and not language_hints and (language or "").lower() == "hi"
         self.transcriber_output_queue = output_queue
         self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
 
@@ -140,6 +142,8 @@ class SonioxTranscriber(BaseTranscriber):
         lang = (self.language or "").lower()
         if lang in SONIOX_AUTO_LANGUAGE_VALUES:
             return SONIOX_DEFAULT_MULTILINGUAL_HINTS
+        if self.hinglish:
+            return ["hi", "en"]
         return [self.language]
 
     def _build_soniox_context(self):
@@ -161,6 +165,7 @@ class SonioxTranscriber(BaseTranscriber):
             max_endpoint_delay_ms=self.max_endpoint_delay_ms,
             endpoint_sensitivity=self.endpoint_sensitivity,
             language_hints=self._resolve_language_hints() or None,
+            language_hints_strict=True if self.hinglish else None,
             context=self._build_soniox_context(),
         )
 
