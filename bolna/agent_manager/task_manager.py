@@ -408,7 +408,9 @@ class TaskManager(BaseManager):
         # User utterance behind that turn — lets the gate tell a re-finalized ASR turn from a new
         # one the LLM happened to answer identically.
         self._last_spoken_user_input = None
-        self._pending_user_input = None  # (turn_id, text) of the turn being answered
+        # (turn_id, text, fresh) of the turn being answered. fresh means nothing was in flight when
+        # the caller's final arrived, so the reply answers new speech rather than regenerating one.
+        self._pending_user_input = None
 
         self.task_config = task
 
@@ -643,6 +645,7 @@ class TaskManager(BaseManager):
         self.http_transcriber_duration = 0
         self.synthesizer_characters = 0
         self.ended_by_assistant = False
+        self._caller_on_line_at_hangup = False
         # False until the caller's own words land in conversation history as a user turn.
         # Synthetic user turns (silence nudges, injected prompts) deliberately do not set it,
         # so a call where only the agent ever spoke stays False.
@@ -796,6 +799,9 @@ class TaskManager(BaseManager):
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
             self.check_user_online_message_config = self.conversation_config.get(
                 "check_user_online_message", DEFAULT_USER_ONLINE_MESSAGE
+            )
+            self.user_online_message_in_llm_history = self.conversation_config.get(
+                "user_online_message_in_llm_history", False
             )
             if self.check_user_online_message_config and self.context_data:
                 if isinstance(self.check_user_online_message_config, dict):
@@ -1795,6 +1801,12 @@ class TaskManager(BaseManager):
         self.transcriber_provider = None
         self.synthesizer_provider = None
         self.synthesizer_voice = None
+        # The agent's language lives on its transcriber config; a chat builds no transcriber, so read it as a call does.
+        transcriber_config = self.task_config["tools_config"].get("transcriber") or {}
+        if transcriber_config.get("multilingual"):
+            self.language = transcriber_config.get("active") or DEFAULT_LANGUAGE_CODE
+        else:
+            self.language = transcriber_config.get("language") or DEFAULT_LANGUAGE_CODE
         if self.task_config["tools_config"].get("llm_agent") is not None and llm_config is not None:
             llm_config["buffer_size"] = (self.task_config["tools_config"].get("synthesizer") or {}).get("buffer_size")
 
@@ -1860,7 +1872,8 @@ class TaskManager(BaseManager):
                         else:
                             cls = SUPPORTED_TRANSCRIBER_MODELS.get(cfg["model"])
                         leg_kwargs = self.__pool_leg_kwargs(self.kwargs, "transcriber_key", cfg.get("provider"))
-                        transcribers[label] = cls(provider, **cfg, **leg_kwargs)
+                        # Runtime kwargs win over the saved config, which may carry the same key.
+                        transcribers[label] = cls(provider, **{**cfg, **leg_kwargs})
 
                         if label == active_label:
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
@@ -1897,12 +1910,13 @@ class TaskManager(BaseManager):
                         lid_provider=LID_PROVIDER,
                         lid_config=lid_config,
                         on_lid_switch=None if switch_enabled else self.switch_language,
+                        lazy_legs=True,
                     )
                     logger.info(
                         f"TranscriberPool created with labels={list(transcribers.keys())}, "
                         f"active='{active_label}', language_switch_enabled={switch_enabled}, "
                         f"lid_provider={LID_PROVIDER!r}, lid_model={lid_model or 'default'}, "
-                        f"legacy_lid_heuristic={not switch_enabled}"
+                        f"legacy_lid_heuristic={not switch_enabled}, lazy_legs={self.tools['transcriber'].lazy_legs}"
                     )
                     if switch_enabled:
                         # Idle-flush fallback: recovers the stuck-language deadlock where
@@ -1948,7 +1962,7 @@ class TaskManager(BaseManager):
                         transcriber_class = SUPPORTED_TRANSCRIBER_PROVIDERS.get(transcriber_config["provider"])
                     else:
                         transcriber_class = SUPPORTED_TRANSCRIBER_MODELS.get(transcriber_config["model"])
-                    self.tools["transcriber"] = transcriber_class(provider, **transcriber_config, **self.kwargs)
+                    self.tools["transcriber"] = transcriber_class(provider, **{**transcriber_config, **self.kwargs})
         except Exception as e:
             logger.error(f"Something went wrong with starting transcriber {e}")
 
@@ -2014,7 +2028,11 @@ class TaskManager(BaseManager):
                 self.synthesizer_voice = active_cfg.get("provider_config", {}).get("voice", "unknown")
 
                 self.tools["synthesizer"] = SynthesizerPool(
-                    synthesizers=synthesizers, active_label=active_label, multilingual_config=multilingual
+                    synthesizers=synthesizers,
+                    active_label=active_label,
+                    multilingual_config=multilingual,
+                    lazy_legs=True,
+                    record_event=self.__record_lid_event,
                 )
 
                 logger.info(f"SynthesizerPool created with labels={list(synthesizers.keys())}, active='{active_label}'")
@@ -2133,7 +2151,7 @@ class TaskManager(BaseManager):
                 injected_cfg["routing_reasoning_effort"] = self.kwargs["routing_reasoning_effort"]
             if "routing_max_tokens" in self.kwargs:
                 injected_cfg["routing_max_tokens"] = self.kwargs["routing_max_tokens"]
-            for key in ("routing_llm_key", "routing_base_url", "routing_api_version"):
+            for key in ("routing_llm_key", "routing_base_url", "routing_api_version", "node_llm_credentials"):
                 if self.kwargs.get(key) is not None:
                     injected_cfg[key] = self.kwargs[key]
             # Set when the caller serves the conversation LLM from a different backend than the agent's own.
@@ -2903,10 +2921,11 @@ class TaskManager(BaseManager):
         ):
             followup_meta_info.pop(key, None)
         # A follow-up answers its parent's caller utterance; without it the duplicate gate can't
-        # tell a barge-in after a tool call from a re-finalized turn and silences the reply.
+        # tell a barge-in after a tool call from a re-finalized turn and silences the reply. It continues
+        # the parent's reply rather than answering new speech, so restating that reply is still a duplicate.
         pending_user = self._pending_user_input
         if pending_user and pending_user[0] == meta_info.get("turn_id"):
-            self._pending_user_input = (followup_meta_info["turn_id"], pending_user[1])
+            self._pending_user_input = (followup_meta_info["turn_id"], pending_user[1], False)
         logger.info(
             "BOLNA_TRACE_META followup seq=%s turn=%s response_uid=%s group_uid=%s parent_response_uid=%s request_id=%s parent_seq=%s parent_turn=%s",
             followup_meta_info.get("sequence_id"),
@@ -3285,6 +3304,11 @@ class TaskManager(BaseManager):
 
         self.conversation_ended = True
         self.ended_by_assistant = True
+        # A sent hangup means the caller heard our goodbye; sip-trunk can drop the stream on it before we get here.
+        output_handler = self.tools.get("output")
+        self._caller_on_line_at_hangup = (
+            output_handler is not None and output_handler.hangup_sent()
+        ) or not self._caller_disconnected()
 
         # Cancel any running LLM / function-call tasks so they don't add phantom responses to
         # the transcript after the call has ended. The end_call tool reaches this from inside
@@ -3535,6 +3559,10 @@ class TaskManager(BaseManager):
             # playout wait above returns normally and we would disconnect a call just rescued.
             if self._hangup_cancelled:
                 logger.info("end_call: hangup was cancelled by a barge-in, not arming the teardown")
+                return
+            # The playout wait also returns when the caller hangs up mid-goodbye; that hangup is theirs, not ours.
+            if self._caller_disconnected():
+                logger.info("end_call: caller hung up during the goodbye, not arming the teardown")
                 return
 
             self.__arm_end_call_teardown()
@@ -4299,8 +4327,6 @@ class TaskManager(BaseManager):
                     if routing_tail is None:
                         self._log_routing_response(routing_info, routing_usage, meta_info)
 
-                    is_silence_trigger = routing_info.get("is_silence_trigger", False)
-
                     current_node = self.tools["llm_agent"].get_node_by_id(routing_info["current_node"])
                     if current_node:
                         self.repeat_after_silence_seconds = current_node.get("repeat_after_silence_seconds")
@@ -4314,17 +4340,16 @@ class TaskManager(BaseManager):
                     turn_id = meta_info.get("turn_id")
                     response_uid = meta_info.get("response_uid")
 
-                    if not is_silence_trigger:
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": static_text,
-                                "turn_id": turn_id,
-                                "response_uid": response_uid,
-                            }
-                        )
-                        self._stage_assistant_history(meta_info, static_text)
-                        self.conversation_history.sync_interim(messages)
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": static_text,
+                            "turn_id": turn_id,
+                            "response_uid": response_uid,
+                        }
+                    )
+                    self._stage_assistant_history(meta_info, static_text)
+                    self.conversation_history.sync_interim(messages)
 
                     convert_to_request_log(
                         message=static_text,
@@ -4340,7 +4365,6 @@ class TaskManager(BaseManager):
                     meta_info["text"] = static_text
                     meta_info["cached"] = True
                     meta_info["message_category"] = "static_node"
-                    meta_info["is_silence_trigger"] = is_silence_trigger
                     ws_packet = create_ws_data_packet(static_hash, meta_info=meta_info, is_md5_hash=True)
                     await self.__play_static_clip(ws_packet, ends_call=llm_message.get(HANGUP_AFTER_REPLY, False))
                     return
@@ -4839,6 +4863,14 @@ class TaskManager(BaseManager):
         if exception is not None:
             logger.error(f"Detached end_call hangup failed | error={type(exception).__name__}: {exception}")
 
+    def _settle_hangup_detail(self):
+        # Ending the call was our decision only if the caller was still on the line when we hung up.
+        if (
+            self.hangup_detail in (HangupReason.END_CALL_TOOL, HangupReason.LLM_PROMPTED_HANGUP)
+            and not self._caller_on_line_at_hangup
+        ):
+            self.hangup_detail = None
+
     async def __end_without_goodbye(self):
         self.hangup_message_queued = False
         self.hangup_triggered_at = time.time()
@@ -5272,12 +5304,14 @@ class TaskManager(BaseManager):
         if sequence_id is None or not content or not str(content).strip():
             return
         pending_user = self._pending_user_input
+        answered = pending_user if pending_user and pending_user[0] == turn_id else None
         self._pending_assistant_history[sequence_id] = {
             "content": content,
             "turn_id": turn_id,
             "response_uid": response_uid,
             "message_category": meta_info.get("message_category"),
-            "user_input": pending_user[1] if pending_user and pending_user[0] == turn_id else None,
+            "user_input": answered[1] if answered else None,
+            "answers_fresh_turn": answered[2] if answered else False,
         }
         logger.info(
             "BOLNA_TRACE_TM stage_assistant_history seq=%s turn=%s response_uid=%s text_len=%s",
@@ -5315,6 +5349,18 @@ class TaskManager(BaseManager):
             return False
         similarity = normalized_similarity(staged["content"], previous_text)
         if similarity < DUPLICATE_RESPONSE_SIMILARITY:
+            return False
+        # A caller who spoke with nothing in flight has heard or cut off the previous reply, so an
+        # identical answer is a real one, even when their words repeat ("hello?", "repeat please").
+        if staged.get("answers_fresh_turn"):
+            logger.info(
+                "BOLNA_TRACE_TM duplicate_reply_fresh_user_turn seq=%s turn=%s previous_turn=%s "
+                "similarity=%.2f, speaking it: nothing was in flight when the caller spoke",
+                sequence_id,
+                turn_id,
+                previous_turn_id,
+                similarity,
+            )
             return False
         # Only a re-finalized utterance is a duplicate: the same reply to a *new* user turn is a
         # real answer, and suppressing it leaves silence and no transcript line. Unknown → unchanged.
@@ -5553,7 +5599,7 @@ class TaskManager(BaseManager):
             transcriber_message, asr_turn_id=asr_id_to_int(meta_info.get("asr_turn_id"))
         )
         if meta_info.get("turn_id") is not None:
-            self._pending_user_input = (meta_info.get("turn_id"), transcriber_message)
+            self._pending_user_input = (meta_info.get("turn_id"), transcriber_message, not overlapped)
         logger.info(
             "BOLNA_TRACE_TM append_user seq=%s turn=%s response_uid=%s history_len=%s text=%r",
             meta_info.get("sequence_id"),
@@ -6199,6 +6245,32 @@ class TaskManager(BaseManager):
         """
         return bool(self.task_config.get("tools_config", {}).get("llm_language_switch"))
 
+    def __open_detected_language(self, holder, label=None) -> None:
+        """Start connecting the voice of the language the detector hears, so a switch to it finds the voice ready.
+        The decision that `holder` runs keeps it open until it releases it.
+
+        Automatic switching only: a caller-requested agent switches on an explicit ask, rarely to the language the
+        detector hears, so an early open there would almost always close unused."""
+        synth = self.tools.get("synthesizer")
+        pool = self.tools.get("transcriber")
+        if not isinstance(synth, SynthesizerPool) or not synth.lazy_legs or not isinstance(pool, TranscriberPool):
+            return
+        if self.language_switcher is None or self.language_switcher.explicit_only:
+            return
+        if label is None:
+            active_short = (self.language or "").split("-")[0].lower()
+            _, foreign_langs, _ = self.__buffered_language_evidence(pool, active_short)
+            label = next((lang for lang in foreign_langs if lang in pool.labels), None)
+        if label is None or label not in pool.labels or label not in synth.labels:
+            return
+        synth.open(label, holder=holder, reason="detector_signal")
+
+    def __release_detected_languages(self) -> None:
+        """Close the voices this decision opened early, unless it switched to one or another decision holds it."""
+        synth = self.tools.get("synthesizer")
+        if isinstance(synth, SynthesizerPool) and synth.lazy_legs:
+            synth.release(asyncio.current_task())
+
     def __arm_lid_playback_gate(self, sequence_id, decision_task) -> None:
         """Hold this turn's AUDIO (not its generation) until the switch decision resolves.
 
@@ -6402,6 +6474,7 @@ class TaskManager(BaseManager):
         # arming only at the turn boundary left every eager turn playing the old-language reply.
         if self.__detector_language_mismatch():
             self.__arm_lid_playback_gate(snapshot.get("sequence_id"), decision_task)
+            self.__open_detected_language(decision_task)
         return decision_task
 
     def __detector_language_mismatch(self) -> bool:
@@ -6514,6 +6587,7 @@ class TaskManager(BaseManager):
                 # Claim our own spec task while the lock is still effectively ours (no await
                 spec = self._spec_followup_task
                 self._spec_followup_task = None
+                self.__release_detected_languages()
             # Generate outside the lock (streamed, multi-second). A later confirmed switch
             if followup is not None:
                 await self.__generate_switch_followup(*followup)
@@ -6771,6 +6845,9 @@ class TaskManager(BaseManager):
             late_synth = self.tools.get("synthesizer")
             if not isinstance(late_synth, SynthesizerPool) or detected_lang in late_synth.labels:
                 self.__arm_lid_playback_gate((meta_info or {}).get("sequence_id"), asyncio.current_task())
+        # Separate from the arm: it also covers a gate armed at spawn for another language, and idle-flush decides.
+        if detected_lang and detected_lang != active and foreign_max_segment_s >= min_segment_s:
+            self.__open_detected_language(asyncio.current_task(), detected_lang)
 
         # Speculative follow-up: generate the reply on the main LLM in parallel with the
         spec_task = None
@@ -7768,9 +7845,7 @@ class TaskManager(BaseManager):
     def _stamp_cached_clip_text(self, meta_info):
         """Give the mark its text so an interrupted clip can be trimmed. Cached-send branch
         only: the cache-miss path re-synthesizes live and would stamp every chunk. See INIT.md."""
-        if meta_info.get("message_category") not in CACHED_SINGLE_MARK_CATEGORIES or meta_info.get(
-            "is_silence_trigger"
-        ):
+        if meta_info.get("message_category") not in CACHED_SINGLE_MARK_CATEGORIES:
             return
         meta_info["text_synthesized"] = meta_info.get("text", "")
 
@@ -8453,9 +8528,15 @@ class TaskManager(BaseManager):
                             "end_of_llm_stream": True,
                         }
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info=meta_info))
+                    if self.user_online_message_in_llm_history:
+                        # Tells the LLM why it asked, so a "yes" answers the check and the open question stays open.
+                        self.conversation_history.append_user(
+                            f"[silence] User was silent for {self.trigger_user_online_message_after} seconds",
+                            exclude_from_transcript=True,
+                        )
                     self.conversation_history.append_assistant(
                         user_online_message,
-                        exclude_from_llm=True,
+                        exclude_from_llm=not self.user_online_message_in_llm_history,
                         sequence_id=-1,
                         message_category="is_user_online_message",
                     )
@@ -9528,6 +9609,7 @@ class TaskManager(BaseManager):
                 # record appended during that gather would never be persisted.
                 await process_task_cancellation(self.voicemail_handler.check_task, "voicemail_check_task")
                 await self._settle_routing_tails()
+                self._settle_hangup_detail()
 
                 output = {
                     "messages": self._prepare_precise_transcript_messages(self.history),

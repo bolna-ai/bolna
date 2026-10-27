@@ -780,6 +780,22 @@ class TestBuildResponsesInput:
         assert items[1]["type"] == "message"
         assert items[1]["content"] == "thanks"
 
+    def test_nudge_after_the_chain_head_goes_out_as_input(self):
+        """The are-you-still-there nudge is not on the chain, so a chained request must carry it."""
+        llm = _make_llm(use_responses_api=True, previous_response_id="resp_prev")
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Can I book you for Monday?"},
+            {"role": "assistant", "content": "Are you still there?", "message_category": "is_user_online_message"},
+            {"role": "user", "content": "yes"},
+        ]
+        _, items = llm._build_responses_input(messages)
+        assert [(i["role"], i["content"]) for i in items] == [
+            ("assistant", "Are you still there?"),
+            ("user", "yes"),
+        ]
+
     def test_fallback_to_full_when_no_assistant_with_previous_id(self):
         """If no assistant message found, send full history including system input item."""
         llm = _make_llm(use_responses_api=True, previous_response_id="resp_prev")

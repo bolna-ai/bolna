@@ -131,7 +131,7 @@ async def test_a_cached_single_mark_is_waited_for_at_hangup(category):
 # --------------------------------------------------------- the field the mark reads
 
 
-async def _static_turn(is_silence_trigger=False):
+async def _static_turn(is_silence_trigger=False, stage_history=None):
     """Drive the static branch of __do_llm_generation_impl and return the synthesized packet's meta."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -150,7 +150,7 @@ async def _static_turn(is_silence_trigger=False):
     tm.repeat_after_silence_seconds = None
     tm.tools = {"input": MagicMock(), "llm_agent": MagicMock()}
     tm.conversation_history = ConversationHistory()
-    tm._stage_assistant_history = MagicMock()
+    tm._stage_assistant_history = stage_history or MagicMock()
     tm._inject_language_instruction = lambda messages: messages
     tm._apply_node_interruption_threshold = lambda node: None
     tm._synthesize = AsyncMock()
@@ -176,8 +176,16 @@ async def test_the_generation_branch_leaves_the_text_unstamped():
     assert meta["message_category"] == "static_node"
 
 
-async def test_the_generation_branch_carries_the_silence_flag_forward():
-    assert (await _static_turn(is_silence_trigger=True))["is_silence_trigger"] is True
+@pytest.mark.parametrize("is_silence_trigger", [False, True], ids=["caller-turn", "silence-turn"])
+async def test_every_static_clip_the_caller_hears_is_recorded_in_history(is_silence_trigger):
+    """A silence re-prompt can route to a new node, such as a static end node whose goodbye is
+    the last line of the call; it is spoken, so the transcript must carry it."""
+    from unittest.mock import MagicMock
+
+    stage_history = MagicMock()
+    await _static_turn(is_silence_trigger=is_silence_trigger, stage_history=stage_history)
+    stage_history.assert_called_once()
+    assert stage_history.call_args.args[1] == FULL_TEXT
 
 
 def _stamp(**meta):
@@ -188,14 +196,6 @@ def _stamp(**meta):
 def test_the_cached_send_branch_stamps_the_text():
     meta = _stamp(message_category="static_node", text=FULL_TEXT)
     assert meta["text_synthesized"] == FULL_TEXT
-
-
-def test_a_silence_reprompt_is_never_stamped():
-    """History deliberately never records a re-prompt; mark text would let sync_history
-    materialise one that was interrupted, so a barged re-prompt would appear and a fully
-    played one would not."""
-    meta = _stamp(message_category="static_node", text=FULL_TEXT, is_silence_trigger=True)
-    assert "text_synthesized" not in meta
 
 
 def test_other_cached_clips_are_not_stamped():
