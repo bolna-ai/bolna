@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import websockets.protocol
+from websockets.exceptions import ConnectionClosed
 
 import bolna.synthesizer.navana_synthesizer as navana
 from bolna.providers import SUPPORTED_SYNTHESIZER_MODELS
@@ -336,6 +337,69 @@ async def test_a_socket_closing_under_a_closed_turn_still_ends_it():
     assert synth.frame_owner == {}
     # A server-side failure is retried by monitor_connection, not fatal to the call.
     assert synth.connection_error is None
+
+
+def _kill_on_send(ws, before_raise=lambda: None):
+    """The socket dies under the next send, the way a server close lands mid-frame."""
+
+    async def send(message):
+        before_raise()
+        raise ConnectionClosed(None, None)
+
+    ws.send = send
+
+
+async def test_a_final_push_lost_with_its_socket_ends_the_turn_once_the_reader_drains():
+    synth = _synth()
+    ws = _connected(synth)
+    await synth.sender("Your payment is confirmed.", 1)
+    _kill_on_send(ws)
+    await synth.sender("Anything else I can help with?", 1, end_of_llm_stream=True)
+    # Not yet: the reader may still hold this turn's earlier audio. The lost frame is not owed.
+    assert _drain(synth) == []
+    assert synth.frame_owner == {0: 1}
+
+    ws.closed = True
+    await synth._read(ws)
+    assert _drain(synth) == [b"\x00"]
+
+
+async def test_a_final_push_lost_after_the_socket_was_replaced_ends_the_turn_at_once():
+    synth = _synth()
+    ws = _connected(synth)
+    _kill_on_send(ws, before_raise=lambda: setattr(synth, "websocket", FakeWS()))
+    await synth.sender("Anything else I can help with?", 1, end_of_llm_stream=True)
+    assert _drain(synth) == [b"\x00"]
+    assert synth.frame_owner == {}
+
+
+async def test_the_reconnect_ends_a_lost_turn_its_finished_reader_left(monkeypatch):
+    synth = _synth()
+    ws = _connected(synth)
+    # The reader already drained the socket and finished before the send failed.
+    synth._on_socket_closed(ws)
+    _kill_on_send(ws)
+    await synth.sender("Anything else I can help with?", 1, end_of_llm_stream=True)
+    assert _drain(synth) == []
+
+    ws.closed = True
+    ready = json.dumps({"type": "ready", "session_id": "ws-2"})
+    monkeypatch.setattr(navana.websockets, "connect", AsyncMock(return_value=FakeWS([ready])))
+    await synth.establish_connection()
+    assert _drain(synth) == [b"\x00"]
+    await synth.cleanup()
+
+
+async def test_a_mid_turn_push_lost_with_its_socket_leaves_the_turn_open():
+    synth = _synth()
+    ws = _connected(synth)
+    _kill_on_send(ws)
+    await synth.sender("Your payment is confirmed.", 1)
+    ws.closed = True
+    await synth._read(ws)
+    # More text is coming, and the turn's end push ends it on the replacement socket.
+    assert _drain(synth) == []
+    assert synth.frame_owner == {}
 
 
 @pytest.mark.parametrize("code", ["unauthorized", "insufficient_funds", "unknown_voice"])

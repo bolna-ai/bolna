@@ -206,6 +206,23 @@ class NavanaSynthesizer(StreamSynthesizer):
         else:
             self.events.put_nowait(b"\x00")
 
+    def _end_lost_turn(self, ws, frame_seq, sequence_id):
+        """The turn's last text died with `ws`, so no frame will ever arrive to end it."""
+        if ws is self.websocket:
+            # Ended when the socket is dropped: by its reader once drained, or by the reconnect.
+            self.final_frames.setdefault(frame_seq, []).append(sequence_id)
+        else:
+            # Already replaced, and its leftover frames are ignored, so nothing is left to wait for.
+            self.events.put_nowait(self._end_of_stream(sequence_id))
+
+    def _settle_owed_turns(self):
+        """Drop the socket's state. Owed audio is lost with it, but every turn already closed still
+        gets its end, or playback would stay marked in progress for the rest of the call."""
+        for sequence_ids in self.final_frames.values():
+            for sequence_id in sequence_ids:
+                self.events.put_nowait(self._end_of_stream(sequence_id))
+        self._reset_socket_state()
+
     def _reset_socket_state(self):
         self.frame_owner = {}
         self.final_frames = {}
@@ -239,7 +256,7 @@ class NavanaSynthesizer(StreamSynthesizer):
                     if not self.should_synthesize_response(sequence_id):
                         logger.info(f"Not synthesizing (inner): sequence_id {sequence_id} not current")
                         return
-                    if not await self._send_text(unit, sequence_id):
+                    if not await self._send_text(unit, sequence_id, ends_turn=end_of_llm_stream):
                         return
                 if end_of_llm_stream:
                     self._close_turn(sequence_id)
@@ -249,7 +266,7 @@ class NavanaSynthesizer(StreamSynthesizer):
         except Exception as e:
             logger.error(f"Unexpected error in Navana sender: {e}")
 
-    async def _send_text(self, unit, sequence_id):
+    async def _send_text(self, unit, sequence_id, ends_turn=False):
         ws = self.websocket
         frame_seq = self.next_frame_seq
         self.next_frame_seq += 1
@@ -261,10 +278,12 @@ class NavanaSynthesizer(StreamSynthesizer):
             await ws.send(json.dumps({"type": "text", "seq": frame_seq, "target_text": unit}))
             return True
         except ConnectionClosed:
-            # Not fatal: the socket's reader settles the turn and monitor_connection replaces it.
+            # Not fatal: monitor_connection replaces the socket. Frame seqs are never reused, so
+            # this pop can only remove the frame that never reached Navana.
             logger.warning("Navana TTS socket closed mid-send")
-            if ws is self.websocket:
-                self.frame_owner.pop(frame_seq, None)
+            self.frame_owner.pop(frame_seq, None)
+            if ends_turn:
+                self._end_lost_turn(ws, frame_seq, sequence_id)
             return False
 
     # ------------------------------------------------------------------
@@ -333,14 +352,8 @@ class NavanaSynthesizer(StreamSynthesizer):
             self.connection_error = f"Navana TTS {code}: {message}"
 
     def _on_socket_closed(self, ws):
-        if ws is not self.websocket:
-            return
-        # Owed audio died with the socket; a turn already closed still gets its end, or playback
-        # would stay marked in progress for the rest of the call.
-        for sequence_ids in self.final_frames.values():
-            for sequence_id in sequence_ids:
-                self.events.put_nowait(self._end_of_stream(sequence_id))
-        self._reset_socket_state()
+        if ws is self.websocket:
+            self._settle_owed_turns()
 
     # ------------------------------------------------------------------
     # Interruption
@@ -415,8 +428,9 @@ class NavanaSynthesizer(StreamSynthesizer):
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url} session_id={ready.get('session_id')}")
 
+            # Anything still waiting belongs to the dead socket this one replaces.
+            self._settle_owed_turns()
             self.websocket = websocket
-            self._reset_socket_state()
             reader = asyncio.create_task(self._read(websocket))
             self.readers.add(reader)
             reader.add_done_callback(self.readers.discard)
