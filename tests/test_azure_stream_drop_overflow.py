@@ -75,17 +75,17 @@ class Backend:
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)
 
 
-def azure_llm(pool, overflow=None):
-    llm = AzureLLM(model=POOL_MODEL, llm_key="k", base_url="https://x.openai.azure.com")
+def azure_llm(pool, overflow=None, **kwargs):
+    llm = AzureLLM(model=POOL_MODEL, llm_key="k", base_url="https://x.openai.azure.com", **kwargs)
     llm.async_client = pool.client()
     llm._overflow_client = overflow.client() if overflow else None
     llm._overflow_model, llm._overflow_service_tier = OVERFLOW_MODEL, "priority"
     return llm
 
 
-async def run_turn(llm, meta_info=None):
+async def run_turn(llm, meta_info=None, synthesize=True):
     meta_info = {"sequence_id": 1} if meta_info is None else meta_info
-    return [chunk async for chunk in llm.generate_stream(MSGS, meta_info=meta_info)]
+    return [chunk async for chunk in llm.generate_stream(MSGS, synthesize=synthesize, meta_info=meta_info)]
 
 
 def words(chunks):
@@ -132,13 +132,89 @@ async def test_any_other_error_inside_the_stream_is_not_reissued():
 
 
 async def test_a_stream_that_drops_after_output_is_not_reissued():
-    """Part of the reply may already be spoken, so a second answer would repeat it."""
-    pool = Backend(Body([ROLE, sse({"content": "Sure, I can help"})], then=drop))
+    """Part of the reply already went out to be spoken, so a second answer would repeat it."""
+    pool = Backend(Body([ROLE, sse({"content": "Sure, I can help you book that appointment for"})], then=drop))
     overflow = Backend(Body(HEALTHY))
 
     with pytest.raises(httpx.RemoteProtocolError):
         await run_turn(azure_llm(pool, overflow))
     assert overflow.requests == []
+
+
+async def test_a_stream_that_drops_with_its_text_still_buffered_is_reissued():
+    """Text shorter than the buffer never left the LLM, so the caller heard nothing of it."""
+    pool = Backend(Body([ROLE, sse({"content": "Sure, I can help"})], then=drop))
+    overflow = Backend(Body(HEALTHY))
+    meta_info = {"sequence_id": 1}
+
+    chunks = await run_turn(azure_llm(pool, overflow), meta_info)
+
+    assert words(chunks) == REPLY.split(), "the dropped fragment is discarded, not prepended"
+    assert chunks[-1].overflowed is True
+    assert [e["error_type"] for e in meta_info["_non_fatal_errors"]] == ["stream_dropped_before_output"]
+
+
+async def test_a_turn_not_being_synthesized_is_reissued_without_the_dropped_text():
+    """Nothing streams out mid-turn when the answer is not synthesized, so the whole answer comes from the overflow."""
+    pool = Backend(Body([ROLE, sse({"content": "Sure, I can help you book that appointment for"})], then=drop))
+    overflow = Backend(Body(HEALTHY))
+
+    chunks = await run_turn(azure_llm(pool, overflow), synthesize=False)
+
+    assert chunks[-1].data == REPLY
+    assert chunks[-1].overflowed is True
+
+
+def tool_spec(name):
+    """A tool configured the way the task manager wires it, so the accumulator would emit its call."""
+    return {
+        "tools": [{"type": "function", "function": {"name": name, "parameters": {"type": "object"}}}],
+        "tools_params": {name: {"pre_call_message": None}},
+    }
+
+
+END_CALL_TOOLS = tool_spec("end_call")
+
+
+async def test_a_stream_that_drops_mid_tool_call_is_reissued_without_the_half_call():
+    """end_call speaks no filler, so a drop inside its arguments has sent nothing to the caller."""
+    tool_call = {"index": 0, "id": "call_1", "type": "function", "function": {"name": "end_call", "arguments": '{"rea'}}
+    pool = Backend(Body([ROLE, sse({"tool_calls": [tool_call]})], then=drop))
+    overflow = Backend(Body(HEALTHY))
+
+    chunks = await run_turn(azure_llm(pool, overflow, api_tools=END_CALL_TOOLS))
+
+    assert words(chunks) == REPLY.split()
+    assert not any(c.is_function_call for c in chunks)
+    assert chunks[-1].overflowed is True
+
+
+async def test_a_stream_that_drops_after_a_silent_filler_is_reissued():
+    """switch_language's filler is empty, so yielding it speaks nothing."""
+    tool_call = {
+        "index": 0,
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "switch_language", "arguments": '{"la'},
+    }
+    pool = Backend(Body([ROLE, sse({"tool_calls": [tool_call]})], then=drop))
+    overflow = Backend(Body(HEALTHY))
+
+    chunks = await run_turn(azure_llm(pool, overflow, api_tools=tool_spec("switch_language")))
+
+    assert words(chunks) == REPLY.split()
+    assert not any(c.is_function_call for c in chunks)
+    assert chunks[-1].overflowed is True
+
+
+async def test_a_stream_that_drops_inside_a_text_tool_call_after_only_whitespace_is_reissued():
+    pool = Backend(Body([ROLE, sse({"content": "\nfunctions.end_call("})], then=drop))
+    overflow = Backend(Body(HEALTHY))
+
+    chunks = await run_turn(azure_llm(pool, overflow, api_tools=END_CALL_TOOLS))
+
+    assert words(chunks) == REPLY.split()
+    assert chunks[-1].overflowed is True
 
 
 async def test_an_error_that_is_not_a_dropped_connection_is_not_reissued():
