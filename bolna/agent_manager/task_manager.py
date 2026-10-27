@@ -6887,7 +6887,7 @@ class TaskManager(BaseManager):
         decide_started_at = time.time()
         decision = None
 
-        def emit_lid_decision(outcome, switched_to=None, context_note=None, inflight_activity=None):
+        def emit_lid_decision(outcome, switched_to=None, context_note=None, inflight_activity=None, detail=None):
             # pool is a confirmed TranscriberPool here (guarded at function entry).
             # Snapshot the in-flight response now unless the caller passed a pre-truncation
             activity = inflight_activity if inflight_activity is not None else self._inflight_response_activity()
@@ -6911,6 +6911,26 @@ class TaskManager(BaseManager):
                     detector_fallback=detector_fallback,
                 )
             )
+            # Say what the call actually did, so "the judge said switch" isn't read as "switched".
+            target = (decision or {}).get("target_language")
+            line = None
+            if outcome == "switched":
+                voice = getattr(self.tools.get("synthesizer"), "active_label", None)
+                line = (
+                    f"switched {active} → {switched_to} (transcriber {getattr(pool, 'active_label', None)}, "
+                    f"voice {voice}, prompt {self.language})"
+                )
+            elif target and outcome != "stay":
+                line = f"not switched to {target}: {outcome}" + (f" ({detail})" if detail else "")
+            if line:
+                convert_to_request_log(
+                    message=line,
+                    meta_info=meta_info or {},
+                    model=None,
+                    component=LogComponent.LLM_LANGUAGE_SWITCH,
+                    direction=LogDirection.RESPONSE,
+                    run_id=self.run_id,
+                )
 
         # Timeout strictly around the LLM call (NOT the switch itself — cancelling
         # mid-switch could leave the pools half-switched). The litellm default is
@@ -7037,7 +7057,7 @@ class TaskManager(BaseManager):
                     f"(corroborated={corroborated}, detector_prob={detector_lang_confidence}) (or missing) — "
                     f"no switch (reason={reasoning})"
                 )
-                emit_lid_decision("gated:low_confidence")
+                emit_lid_decision("gated:low_confidence", detail=f"confidence {target_conf} < {effective_min_conf}")
                 return
 
             # Substance gate: acknowledgment-length audio mis-tags languages. Short turns need at
