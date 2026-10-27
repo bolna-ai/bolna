@@ -49,14 +49,6 @@ def should_overflow(error) -> bool:
     return isinstance(error, APIError) and error.type == "server_error"
 
 
-def has_output(chunk) -> bool:
-    """Whether a streamed chunk carries text or a tool call, as opposed to the role or a filter result."""
-    if not getattr(chunk, "choices", None):
-        return False
-    delta = chunk.choices[0].delta
-    return bool(getattr(delta, "content", None) or getattr(delta, "tool_calls", None))
-
-
 @dataclass
 class ReissuedStream:
     """The turn's stream dropped before any output and was re-issued on the overflow target."""
@@ -197,16 +189,14 @@ class AzureLLM(OpenAICompatibleLLM):
         }
         return await self._overflow_client.chat.completions.create(**overflow_args)
 
-    async def _overflow_on_early_drop(self, completion_stream, model_args):
-        """Yield the stream's chunks; if it drops before any output, nothing was spoken, so re-issue on the overflow."""
-        produced = False
+    async def _overflow_on_early_drop(self, completion_stream, model_args, delivered):
+        """Yield the stream's chunks; if it drops before delivered() (nothing spoken yet), re-issue on the overflow."""
         try:
             async for chunk in completion_stream:
-                produced = produced or has_output(chunk)
                 yield chunk
             return
         except Exception as e:
-            if produced or not should_overflow(e):
+            if delivered() or not should_overflow(e):
                 raise
             dropped = e
         logger.warning(
@@ -291,13 +281,22 @@ class AzureLLM(OpenAICompatibleLLM):
             logger.error(f"Azure OpenAI unexpected error: {e}")
             raise
 
+        # Text received but still buffered was never spoken; only a yielded chunk makes a re-issue repeat speech.
+        delivered = False
         chunks = completion_stream
         if self._overflow_client is not None and not turn_overflowed:
-            chunks = self._overflow_on_early_drop(completion_stream, model_args)
+            chunks = self._overflow_on_early_drop(completion_stream, model_args, lambda: delivered)
         async for chunk in chunks:
             if isinstance(chunk, ReissuedStream):
                 completion_stream, turn_overflowed = chunk.stream, True
                 first_token_time = latency_data = None
+                # The dropped stream's unspoken text and half tool call must not leak into the new answer.
+                answer, buffer = "", ""
+                text_tool_buffer = captured_tool_text = finish_reason = stream_usage = None
+                if accumulator:
+                    accumulator = ToolCallAccumulator(
+                        self.api_params, tools, self.language, self.request_log_model, self.run_id
+                    )
                 if isinstance(meta_info, dict):
                     meta_info.setdefault("_non_fatal_errors", []).append(
                         {"error_type": "stream_dropped_before_output", "error": str(chunk.error), "model": self.model}
@@ -326,6 +325,7 @@ class AzureLLM(OpenAICompatibleLLM):
 
             if hasattr(delta, "tool_calls") and delta.tool_calls and accumulator:
                 if buffer:
+                    delivered = delivered or bool(buffer.strip())
                     yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
                     buffer = ""
 
@@ -333,6 +333,8 @@ class AzureLLM(OpenAICompatibleLLM):
 
                 pre_call = accumulator.get_pre_call_message(meta_info)
                 if pre_call:
+                    # A silent filler (switch_language's "") speaks nothing, so the turn can still be re-issued.
+                    delivered = delivered or bool((pre_call[0] or "").strip())
                     yield LLMStreamChunk(
                         data=pre_call[0],
                         end_of_stream=True,
@@ -343,7 +345,7 @@ class AzureLLM(OpenAICompatibleLLM):
 
             elif hasattr(delta, "content") and delta.content is not None:
                 if accumulator:
-                    accumulator.received_textual = True
+                    accumulator.note_content(delta.content)
                 content = delta.content
 
                 if text_tool_buffer is not None:
@@ -366,6 +368,7 @@ class AzureLLM(OpenAICompatibleLLM):
                     if before:
                         answer += before
                         if synthesize:
+                            delivered = delivered or bool(before.strip())
                             yield LLMStreamChunk(data=before, end_of_stream=False, latency=latency_data)
                     end_pos = self._find_tool_call_end(after)
                     if end_pos != -1:
@@ -385,6 +388,7 @@ class AzureLLM(OpenAICompatibleLLM):
                     buffer += content
                     if synthesize and len(buffer) >= self.buffer_size:
                         split = buffer.rsplit(" ", 1)
+                        delivered = delivered or bool(split[0].strip())
                         yield LLMStreamChunk(data=split[0], end_of_stream=False, latency=latency_data)
                         buffer = split[1] if len(split) > 1 else ""
 

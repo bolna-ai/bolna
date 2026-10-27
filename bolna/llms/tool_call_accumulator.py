@@ -26,6 +26,11 @@ class ToolCallAccumulator:
         self._gave_pre_call_msg = False
         self.received_textual = False
 
+    def note_content(self, text: str) -> None:
+        """Spoken text replaces the filler; an empty or whitespace-only chunk says nothing, so it does not."""
+        if text and text.strip():
+            self.received_textual = True
+
     def process_delta(self, tool_calls_delta) -> None:
         """Accumulate streamed tool-call chunks into ``final_tool_calls``."""
         for tool_call in tool_calls_delta or []:

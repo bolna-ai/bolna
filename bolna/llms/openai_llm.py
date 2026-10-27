@@ -28,6 +28,7 @@ from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
 from bolna.helpers.function_calling_helpers import guard_llm_base_url, resolve_tool_name, tool_names
 from .openai_base import OpenAICompatibleLLM
+from .schema_forced_tool_call import SCHEMA_FORCED_TOOL_PROVIDERS, force_tools_by_schema
 from .message_models import strip_internal_keys
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import APIParams, LLMStreamChunk, LatencyData
@@ -218,6 +219,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         provider = kwargs.get("provider")
         self_hosted = provider in (LLMProvider.CUSTOM.value, LLMProvider.BOLNA.value)
+        self._forces_tools_by_schema = provider in SCHEMA_FORCED_TOOL_PROVIDERS
         is_custom = provider == LLMProvider.CUSTOM.value
         if self_hosted:
             if kwargs.get("extra_body"):
@@ -334,6 +336,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         stream_usage = None
         finish_reason = None
 
+        forced = force_tools_by_schema(model_args) if self._forces_tools_by_schema else None
         try:
             completion_stream = await self.async_client.chat.completions.create(**model_args)
         except AuthenticationError as e:
@@ -359,7 +362,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
             raise
 
         _connection_latency_ms: Optional[float] = None
-        async for chunk in completion_stream:
+        chunks = forced.stream(completion_stream) if forced else completion_stream
+        async for chunk in chunks:
             now = now_ms()
             # First chunk = TCP+TLS+HTTP headers received, before any content or token.
             if _connection_latency_ms is None:
@@ -410,7 +414,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
             elif hasattr(delta, "content") and delta.content is not None:
                 if accumulator:
-                    accumulator.received_textual = True
+                    accumulator.note_content(delta.content)
                 content = delta.content
 
                 if text_tool_buffer is not None:
