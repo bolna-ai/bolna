@@ -55,7 +55,9 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.sampling_rate = 16000
         self.encoding = encoding
         self.api_key = kwargs.get("transcriber_key", os.getenv("ELEVENLABS_API_KEY"))
-        self.elevenlabs_host = kwargs.get("elevenlabs_host") or os.getenv("ELEVENLABS_API_HOST", "api.elevenlabs.io")
+        # A per-call host only goes with a per-call key; the deployment's key stays on the configured host.
+        call_host = kwargs.get("elevenlabs_host") if kwargs.get("transcriber_key") is not None else None
+        self.elevenlabs_host = call_host or os.getenv("ELEVENLABS_API_HOST", "api.elevenlabs.io")
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.transcription_cursor = 0.0
