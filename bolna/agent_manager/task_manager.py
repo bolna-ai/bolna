@@ -7018,6 +7018,16 @@ class TaskManager(BaseManager):
             if "input" in self.tools:
                 self.tools["input"].update_is_audio_being_played(False, AudioPlaybackReason.LID_SWITCH_TRUNCATE)
             await self.__cleanup_downstream_tasks()
+            # The trace keeps the cut reply's request rows, which read like a reply that was spoken; mark the cut.
+            # Same component as discarded speculation, so it is never billed.
+            convert_to_request_log(
+                message=f"Reply in progress cancelled for the switch to '{target}'",
+                meta_info=meta_info or {},
+                model=None,
+                component=LogComponent.LLM_LANGUAGE_SWITCH,
+                direction=LogDirection.RESPONSE,
+                run_id=self.run_id,
+            )
             # Sequence invalidated — the held audio can no longer ship; safe to open the gate.
             self.lid_playback_gate = None
             if activity.get("audio_playing"):

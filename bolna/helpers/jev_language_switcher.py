@@ -8,7 +8,7 @@ gates and the switch path downstream are unchanged.
 
 import asyncio
 import os
-import re
+import string
 import time
 import unicodedata
 
@@ -32,13 +32,13 @@ DEFAULT_JEV_TIMEOUT_S = 4.0
 
 # Decision thresholds on Jev's 0-1 answers.
 REQUEST_MIN = 0.5
+UNNAMED_REQUEST_MIN = 0.85
 REFUSAL_MIN = 0.5
 SUBSTANTIVE_MIN = 0.5
-DATA_MIN = 0.5
 DATA_STRONG = 0.75
 DRIFT_MIN_SECONDS = 1.0
 DRIFT_MIN_TURNS = 1
-ENGLISH_FRAME_MIN = 0.6
+ENGLISH_FRAME_MIN = 0.55
 SELECT_MIN = 0.5
 YES_MIN = 0.6
 CLEAR_MARGIN = 0.3
@@ -47,13 +47,14 @@ LANGS = {
     "en": dict(
         name="English",
         script="latin",
-        names="English, इंग्लिश, अंग्रेजी, अंग्रेज़ी, ఇంగ్లీష్, இங்கிலீஷ், ಇಂಗ್ಲಿಷ್, ഇംഗ്ലീഷ്, ইংরেজি, ਅੰਗਰੇਜ਼ੀ, ଇଂରାଜୀ, અંગ્રેજી",
+        names="English, इंग्लिश, अंग्रेजी, अंग्रेज़ी, इंग्रजी, ఇంగ్లీష్, இங்கிலீஷ், ಇಂಗ್ಲಿಷ್, ഇംഗ്ലീഷ്, ഇംഗ്ലീഷ, ইংরেজি, "
+        "ਅੰਗਰੇਜ਼ੀ, ਇੰਗਲਿਸ਼, ਇੰਗਰੇਜ਼, ଇଂରାଜୀ, અંગ્રેજી, ઇંગ્લિશ",
         telltale="I, you, my, me, want, what, where, please, is, are, was, the, can you, do not",
     ),
     "hi": dict(
         name="Hindi",
         script="devanagari",
-        names="Hindi, हिंदी, हिन्दी, హిందీ, ஹிந்தி, ಹಿಂದಿ, ഹിന്ദി, হিন্দি, ਹਿੰਦੀ",
+        names="Hindi, हिंदी, हिन्दी, హిందీ, ஹிந்தி, ಹಿಂದಿ, ഹിന്ദി, হিন্দি, ਹਿੰਦੀ, હિન્દી, ହିନ୍ଦୀ",
         telltale="main, aap, mujhe, mera, chahiye, nahi, kya, kab, kahan, hai, hoon, tha, raha hai, ka / ki / ke, ko, mein, -iye",
     ),
     "mr": dict(
@@ -77,37 +78,37 @@ LANGS = {
     "bn": dict(
         name="Bengali",
         script="bengali",
-        names="Bengali, Bangla, বাংলা",
+        names="Bengali, Bangla, বাংলা, बंगाली, बांग्ला",
         telltale="ami, apni, amar, apnar, lagbe, na, ki, ache, achi, -chi / -chen, -bo / -ben, -eni, korun, bolun",
     ),
     "or": dict(
         name="Odia",
         script="odia",
-        names="Odia, Oriya, ଓଡ଼ିଆ",
+        names="Odia, Oriya, ଓଡ଼ିଆ, ओड़िया, उड़िया",
         telltale="mu, apana, mote, mora, darkar, nahin, kana, achhi, achhanti, -antu, -ibi, -ku, -re",
     ),
     "kn": dict(
         name="Kannada",
         script="kannada",
-        names="Kannada, ಕನ್ನಡ, कन्नड़",
+        names="Kannada, ಕನ್ನಡ, कन्नड़, కన్నడ, கன்னட",
         telltale="naanu, neevu, nanage, nanna, nimma, beku, illa, enu, -ide, -alli, -ge, maadi",
     ),
     "ta": dict(
         name="Tamil",
         script="tamil",
-        names="Tamil, தமிழ், तमिल, తమిళం",
+        names="Tamil, தமிழ், தமிழ, तमिल, తమిళం, తమిళ, ತಮಿಳು, തമിഴ്",
         telltale="naan, neenga, enakku, en, unga, venum, illa, enna, -ren, -reenga, -anum, -unga, irukku",
     ),
     "te": dict(
         name="Telugu",
         script="telugu",
-        names="Telugu, తెలుగు, தெலுங்கு, तेलुगु",
+        names="Telugu, తెలుగు, தெலுங்கு, तेलुगु, ತೆಲುಗು",
         telltale="nenu, meeru, naaku, naa, mee, kavali, ledu, emi, -andi, -undi, -aru, -lo",
     ),
     "ml": dict(
         name="Malayalam",
         script="malayalam",
-        names="Malayalam, മലയാളം",
+        names="Malayalam, മലയാളം, മലയാള, मलयालम, మలయాళం, மலையாளம்",
         telltale="njan, ningal, enikku, ente, venam, illa, entha, -unnu, -aanu, -um, -il, undu",
     ),
 }
@@ -148,6 +149,7 @@ SCRIPT_TO_LANG = {
     "malayalam": "ml",
 }
 NUMBER_WORDS = set("zero oh one two three four five six seven eight nine ten double triple hundred thousand".split())
+WORD_EDGES = string.punctuation + "।॥…—–"
 
 LANGUAGE_QUESTION = {
     "type": "choice",
@@ -213,16 +215,21 @@ HINDI_OR_MARATHI = {
     "type": "choice",
     "instructions": {
         "question": "Is `turn.transcript` Hindi or Marathi?",
-        "how_to_decide": "Both use Devanagari letters, so look at verb endings and small words, not the letters.",
+        "how_to_decide": "Both use Devanagari letters, so look at verb endings and small words, not the letters. "
+        "आहे and नाही are Marathi; है and नहीं are Hindi. A reply that is only बोला ('go ahead') is Marathi; Hindi "
+        "says बोलिए or बोलो.",
     },
     "criteria": {
         "hi": {
             "language": "Hindi",
-            "signs": "hai, hain, hoon, tha, raha, mujhe, mera, ka / ki / ke, kya, nahi before the verb",
+            "signs": "है, हैं, हूँ, था, रहा, नहीं, मैं, मुझे, मेरा, आप, क्या, कौन, सकते, बताइए, का / की / के "
+            "(hai, hain, hoon, tha, raha, mujhe, mera, kya, nahi before the verb)",
         },
         "mr": {
             "language": "Marathi",
-            "signs": "aahe, aahet, hota, nahi at the end, mala, majha, tumhi, kay, -la, -cha / -chi / -che, -tay, -aycha",
+            "signs": "आहे, आहेत, होता, नाही, मी, मला, माझा / माझी, तुम्ही, काय, कोण, होऊ, शकत, द्या, सांगितलं, -ला, "
+            "-चा / -ची / -चे, -तंय / -तोय as in बोलतंय (aahe, aahet, nahi at the end, mala, majha, tumhi, kay, -tay, "
+            "-aycha)",
         },
     },
 }
@@ -251,9 +258,11 @@ def _wants_question(code: str) -> dict:
             "language_name_can_be_written_as": lang["names"],
         },
         "criteria": {
-            "true": f"Asks for {lang['name']} (talk / speak / switch to it), or says the name {lang['name']} two or "
-            "more times with nothing else",
-            "false": f"Does not ask for {lang['name']}: names it in passing, says they can't speak it, or doesn't name it",
+            "true": f"Asks for {lang['name']} (talk / speak / switch to it), even right after saying they don't "
+            f"understand the agent; says they prefer {lang['name']} or that it is better or easier for them; says "
+            f"they will talk in {lang['name']} now; or says the name {lang['name']} two or more times with nothing else",
+            "false": f"Does not ask for {lang['name']}: names it in passing, says they can't speak it, only plans to "
+            "use it later, or doesn't name it",
         },
     }
 
@@ -270,7 +279,9 @@ def _refuses_question(code: str) -> dict:
         "criteria": {
             "true": f"Names {lang['name']} and rejects it: doesn't know it, doesn't understand it, or asks not to use it",
             "false": f"Does not name {lang['name']} as a language they reject. A general 'I don't understand' is not "
-            f"a refusal of {lang['name']}, and neither is the sentence being written in {lang['name']}",
+            f"a refusal of {lang['name']}, and neither is the sentence being written in {lang['name']}. Asking for "
+            f"{lang['name']} because they can't follow the agent ('I don't understand, speak {lang['name']}') is a "
+            "request, never a refusal",
         },
     }
 
@@ -323,10 +334,12 @@ def _explicit_wants_question(code: str) -> dict:
             "language_name_can_be_written_as": lang["names"],
         },
         "criteria": {
-            "true": f"Asks to talk / speak / reply / switch in {lang['name']}, asks whether the agent can speak or "
-            f"understand {lang['name']}, or says the name {lang['name']} two or more times with nothing else",
+            "true": f"Asks to talk / speak / reply / switch in {lang['name']} (even right after saying they don't "
+            f"understand the agent), asks whether the agent can speak or understand {lang['name']}, says they prefer "
+            f"{lang['name']} or that it is better or easier for them, says they will talk in {lang['name']} now, or "
+            f"says the name {lang['name']} two or more times with nothing else",
             "false": f"Does not ask for {lang['name']}: names it in passing, quotes someone, says they can't speak "
-            "it, or doesn't name it",
+            "it, only plans to use it later, or doesn't name it",
         },
     }
 
@@ -388,16 +401,22 @@ def refuses_language(a: dict, code: str, text: str) -> bool:
 
 
 def data_tokens(text: str) -> tuple[int, int]:
-    tokens = re.findall(r"\w+", str(text))
-
-    def is_data(token):
-        return (
-            any(ch.isdigit() for ch in token)
-            or token.lower() in NUMBER_WORDS
-            or (len(token) == 1 and token.isascii() and token.isalpha())
-        )
-
-    return sum(is_data(token) for token in tokens), len(tokens)
+    """(data words, words). Words split on spaces so Indic vowel signs and "don't" stay whole. A digit group
+    weighs up to two spoken words: "98765" outweighs one word, while a year like "2027" stays two."""
+    hits = total = 0
+    for token in str(text).split():
+        token = token.strip(WORD_EDGES)
+        if not token:
+            continue
+        digits = min(sum(ch.isdigit() for ch in token), 2)
+        if digits:
+            hits += digits
+            total += digits
+            continue
+        total += 1
+        spelled_letter = len(token) == 1 and token.isascii() and token.isalpha() and token not in ("I", "a")
+        hits += token.lower() in NUMBER_WORDS or spelled_letter
+    return hits, total
 
 
 def build_jev_request(model_id: str, transcript: str, labels: list) -> dict:
@@ -455,6 +474,10 @@ def flatten_answers(answers: dict) -> dict:
     return flat
 
 
+def _confusable(a: str, b: str) -> bool:
+    return b in SIBLINGS.get(a, "").split(", ") or a in SIBLINGS.get(b, "").split(", ")
+
+
 def _recent_after_last_switch(recent_turns) -> list:
     """Earlier turns as (code, seconds); a firing that switched the agent makes it and everything before it stale."""
     recent = []
@@ -476,7 +499,11 @@ def _spoken_language(a: dict, transcript: str) -> tuple:
     elif lang in LANGS and lang != "en" and script in SCRIPT_TO_LANG and LANGS[lang]["script"] != script:
         lang = SCRIPT_TO_LANG[script]
     if lang in ("hi", "mr") and "hindi_or_marathi" in a:
-        lang, lang_p = a["hindi_or_marathi"]["choice"], a["hindi_or_marathi"]["confidence"]
+        # Jev rescales a choice's confidence so a guess scores 0: 68% sure between two options reads 0.36.
+        # The probability is what compares with the other confidences and the switch threshold.
+        choice = a["hindi_or_marathi"]
+        lang = choice["choice"]
+        lang_p = choice["probabilities"].get(lang, choice["confidence"])
     return lang, lang_p
 
 
@@ -493,6 +520,8 @@ def decide_from_answers(
     def refused(code):
         return refuses_language(a, code, transcript)
 
+    note = ""
+
     def out(target, confidence, explicit, why):
         return {
             "detected_language": detected,
@@ -500,22 +529,34 @@ def decide_from_answers(
             "target_language": label_of[target] if target else None,
             "target_confidence": round(confidence, 3) if target else 0.0,
             "explicit_request": explicit,
-            "reasoning": f"jev: {why}",
+            "reasoning": f"jev: {why}{note}",
         }
 
     hits, total = data_tokens(transcript)
-    if (total and hits / total >= 0.5) or (hits and a["data_readout"] >= DATA_MIN) or a["data_readout"] >= DATA_STRONG:
+    if (total and hits / total >= 0.5) or a["data_readout"] >= DATA_STRONG:
         return out(None, 0, False, "number or code readout, stay")
 
-    wants = {code: a[f"wants_{code}"] for code in supported if not refused(code)}
+    def counts(code):
+        # A request that names no language must be strong: Jev scores false ones (a bare acknowledgement) at
+        # 0.5-0.8, and real ones whose case ending our name lists miss at 0.94 and up.
+        return names_language(transcript, code) or a[f"wants_{code}"] >= UNNAMED_REQUEST_MIN
+
+    candidates = {code: a[f"wants_{code}"] for code in supported if not refused(code)}
+    wants = {code: score for code, score in candidates.items() if counts(code)}
+    ignored = [LANGS[code]["name"] for code, score in candidates.items() if score >= REQUEST_MIN and code not in wants]
+    if ignored:
+        note = f" (ignored an unnamed request for {', '.join(ignored)})"
     if wants and max(wants.values()) >= REQUEST_MIN:
         target = max(wants, key=wants.get)
         if target == active:
             return out(None, 0, False, f"asked for {target}, already active")
         return out(target, wants[target], True, f"caller asked for {LANGS[target]['name']}")
 
-    if lang == "other" or lang == active:
-        return out(None, 0, False, "speaking the active language" if lang == active else "language unclear, stay")
+    if lang == active:
+        acknowledgement = a["filler_only"] >= SUBSTANTIVE_MIN
+        return out(None, 0, False, "short acknowledgement, stay" if acknowledgement else "speaking the active language")
+    if lang == "other":
+        return out(None, 0, False, "language unclear, stay")
     if lang not in supported:
         return out(None, 0, False, f"{LANGS[lang]['name']} not supported, stay")
     if refused(lang):
@@ -523,8 +564,11 @@ def decide_from_answers(
 
     recent = _recent_after_last_switch(recent_turns)
     live = (live_transcript or "").strip()
+    tags = {code for code, seconds in recent if seconds >= DRIFT_MIN_SECONDS}
+    # Rule 4a covers siblings the detector confuses; English after Hindi turns is a real change of language.
     if (
-        len({code for code, seconds in recent if seconds >= DRIFT_MIN_SECONDS}) >= 2
+        len(tags) >= 2
+        and all(code == active or _confusable(code, active) for code in tags | {lang})
         and len(live.split()) >= 2
         and script_of(live) == LANGS[active]["script"]
     ):
@@ -661,15 +705,17 @@ class JevLanguageSwitcher(LanguageSwitcher):
         self.last_usage = None
         transcript = detector_transcript.strip()
         live = (active_transcript or "").strip()
+        also_sent = None
         if self.explicit_only:
             agent_turn = (last_agent_turn or "").strip()
             payload = build_jev_explicit_request(
                 self._jev_model_id, transcript, live, agent_turn, self.available_labels
             )
+            also_sent = {"live_transcript": live, **({"agent_turn": agent_turn} if agent_turn else {})}
         else:
             payload = build_jev_request(self._jev_model_id, transcript, self.available_labels)
         start_time = time.time()
-        log_meta = self._log_request(detector_transcript, start_time)
+        log_meta = self._log_request(detector_transcript, start_time, also_sent)
         try:
             body = await self._post(payload)
             self._tally_usage(body.get("usage"))

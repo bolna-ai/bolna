@@ -67,6 +67,39 @@ CASES = [
         "asked for English",
     ),
     (
+        "weak-request-without-a-language-name-is-ignored",
+        "हाँ जी, बताइए क्या करना है",
+        "",
+        "en",
+        ["en", "hi"],
+        {**_answers("hi"), "wants_en": 0.55},
+        None,
+        "hi",
+        "ignored an unnamed request for English",
+    ),
+    (
+        "strong-request-with-an-inflected-name-switches",
+        "இங்கிலீஷில் பேசுங்க",
+        "",
+        "ta",
+        ["ta", "en"],
+        {**_answers("ta"), "wants_en": 0.98},
+        None,
+        "en",
+        "asked for English",
+    ),
+    (
+        "inflected-language-name-is-a-request",
+        "ദയവായി മലയാളത്തിൽ പറയൂ",
+        "",
+        "en",
+        ["en", "ml"],
+        _answers("ml", wants="ml"),
+        None,
+        "ml",
+        "asked for Malayalam",
+    ),
+    (
         "asking-for-active-stays",
         "Hindi please",
         "",
@@ -100,6 +133,39 @@ CASES = [
         "readout",
     ),
     (
+        "indic-lead-in-with-digits-is-a-readout",
+        "मेरा नंबर है 98765 43210",
+        "",
+        "en",
+        ["en", "hi"],
+        _answers("hi", data=0.3),
+        None,
+        None,
+        "readout",
+    ),
+    (
+        "english-sentence-is-not-a-readout",
+        "I won't go.",
+        "",
+        "hi",
+        ["hi", "en"],
+        _answers("en"),
+        None,
+        "en",
+        "speaking English",
+    ),
+    (
+        "sentence-with-a-few-number-words-is-not-a-readout",
+        "हाँ जी, आप ये नोट कर लीजिए, two three four",
+        "",
+        "en",
+        ["en", "hi"],
+        _answers("hi", data=0.6),
+        None,
+        "hi",
+        "speaking Hindi",
+    ),
+    (
         "named-refusal-stays",
         "मुझे हिंदी नहीं आती",
         "",
@@ -109,6 +175,17 @@ CASES = [
         None,
         None,
         "refused Hindi",
+    ),
+    (
+        "refusal-named-in-marathi-stays",
+        "मला इंग्रजी येत नाही",
+        "",
+        "mr",
+        ["mr", "en"],
+        {**_answers("mr", devanagari="mr"), "wants_en": 0.6, "refuses_en": 0.9},
+        None,
+        None,
+        "active language",
     ),
     (
         "request-outweighs-a-weak-refusal",
@@ -150,6 +227,17 @@ CASES = [
         "hi",
         ["hi", "en"],
         _answers("hi", english=0.8),
+        None,
+        "en",
+        "speaking English",
+    ),
+    (
+        "english-frame-with-hindi-fillers-near-the-bar",
+        "Haan, I need the invoice copy yaar",
+        "",
+        "hi",
+        ["hi", "en"],
+        _answers("hi", english=0.57),
         None,
         "en",
         "speaking English",
@@ -209,6 +297,17 @@ CASES = [
         None,
         "tags unstable",
     ),
+    (
+        "english-after-unrelated-tags-switches",
+        "Please send the receipt to my email",
+        "प्लीज़ सेंड द रिसीट टू माय ईमेल",
+        "hi",
+        ["hi", "en"],
+        _answers("en"),
+        [("hi", 2.0, None), ("pa", 1.5, None)],
+        "en",
+        "speaking English",
+    ),
     ("unsupported-language-stays", "আমি ঠিক আছি", "", "hi", ["hi", "en"], _answers("bn"), None, None, "not supported"),
     (
         "active-language-stays",
@@ -222,6 +321,17 @@ CASES = [
         "active language",
     ),
     ("unclear-language-stays", "Ravi", "", "hi", ["hi", "en"], _answers("other"), None, None, "unclear"),
+    (
+        "acknowledgement-in-the-active-language-stays",
+        "Okay",
+        "Okay.",
+        "en",
+        ["en", "hi"],
+        _answers("en", **FILLER),
+        None,
+        None,
+        "short acknowledgement",
+    ),
 ]
 
 
@@ -242,6 +352,14 @@ def test_named_request_is_explicit_with_its_own_confidence():
     assert result["target_confidence"] == 0.9
 
 
+def test_hindi_or_marathi_reports_the_choice_probability():
+    answers = _answers("hi")
+    answers["hindi_or_marathi"] = {"choice": "mr", "confidence": 0.36, "probabilities": {"hi": 0.32, "mr": 0.68}}
+    result = decide_from_answers(answers, "मी उद्या परत फोन करतो.", "", "hi", ["hi", "mr"])
+    assert result["detected_language"] == "mr"
+    assert result["detection_confidence"] == 0.68
+
+
 def test_odia_label_keeps_the_backend_code():
     result = decide_from_answers(_answers("or"), "ମୋ ଟିକେଟ କେବେ ଆସିବ", "", "en", ["en", "od"])
     assert result["target_language"] == "od"
@@ -251,6 +369,12 @@ def test_odia_label_keeps_the_backend_code():
 def test_data_tokens_count_digits_number_words_and_spelled_letters():
     assert data_tokens("G P one five one two five S") == (8, 8)
     assert data_tokens("where is my order") == (0, 4)
+
+
+def test_data_tokens_keep_words_whole_and_weigh_digit_groups():
+    assert data_tokens("I won't go.") == (0, 3)
+    assert data_tokens("मेरा नंबर है 98765 43210") == (4, 7)
+    assert data_tokens("The card expires in 2027") == (2, 6)
 
 
 def test_request_sends_only_the_transcript_and_asks_per_label():
@@ -266,6 +390,17 @@ def test_request_sends_only_the_transcript_and_asks_per_label():
 
 def test_devanagari_turns_get_the_hindi_or_marathi_question():
     assert "hindi_or_marathi" in build_jev_request("jev-1.13.0", "मी बरा आहे", ["hi", "mr"])["questions"]
+
+
+def test_questions_say_how_requests_refusals_and_marathi_read():
+    questions = build_jev_request("jev-1.13.0", "मला इंग्रजी येत नाही", ["hi", "mr", "en"])["questions"]
+    assert "request, never a refusal" in questions["refuses_en"]["criteria"]["false"]
+    assert "prefer" in questions["wants_en"]["criteria"]["true"]
+    assert "आहे" in questions["hindi_or_marathi"]["criteria"]["mr"]["signs"]
+    assert "only बोला" in questions["hindi_or_marathi"]["instructions"]["how_to_decide"]
+    assert "कोण" in questions["hindi_or_marathi"]["criteria"]["mr"]["signs"]
+    explicit = build_jev_explicit_request("jev-1.13.0", "Hindi is better for me", "", "", ["hi", "en"])["questions"]
+    assert "prefer" in explicit["wants_hi"]["criteria"]["true"]
 
 
 def test_flatten_answers_reads_the_api_shape():
@@ -439,6 +574,22 @@ async def test_explicit_decide_returns_the_explicit_verdict(monkeypatch):
     state = switcher._post.await_args.args[0]["state"]
     assert state["agent_turn"] == "Which language would you like?"
     assert state["turn"]["live_transcript"] == "Odia."
+
+
+async def test_request_row_shows_what_jev_was_sent(monkeypatch):
+    explicit = _switcher(monkeypatch, labels=("en", "hi"), explicit_only=True)
+    explicit._post = AsyncMock(return_value={"answers": _raw(_explicit(offer="hi", yes=0.95))})
+    with patch(REQUEST_LOG) as log:
+        await explicit.decide("Yes.", "Yes, please.", "en", None, "Shall we continue in Hindi?")
+    row = log.call_args_list[0].kwargs["message"]
+    assert row["agent_turn"] == "Shall we continue in Hindi?"
+    assert row["live_transcript"] == "Yes, please."
+
+    auto = _switcher(monkeypatch)
+    auto._post = AsyncMock(return_value={"answers": _raw(_answers("hi"))})
+    with patch(REQUEST_LOG) as log:
+        await auto.decide("namaste ji", "", "hi", None, "Hello?")
+    assert set(log.call_args_list[0].kwargs["message"]) == {"transcript", "available_languages"}
 
 
 async def test_decide_skips_jev_without_a_detector_transcript(monkeypatch):
