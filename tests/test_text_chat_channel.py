@@ -6,6 +6,7 @@ import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi import WebSocketDisconnect
 
 import bolna.agent_manager.task_manager as task_manager_module
@@ -60,6 +61,48 @@ def test_setup_text_chat_builds_no_transcriber_or_synthesizer():
     assert "transcriber" not in tm.tools and "synthesizer" not in tm.tools
     assert tm.transcriber_provider is None and tm.synthesizer_provider is None and tm.synthesizer_voice is None
     assert llm_config["buffer_size"] == 40
+
+
+@pytest.mark.parametrize(
+    "transcriber, language",
+    [
+        ({"provider": "deepgram", "model": "nova-3", "language": "hi"}, "hi"),
+        ({"provider": "deepgram", "language": "en", "multilingual": {"en": {}, "ta": {}}, "active": "ta"}, "ta"),
+        (None, "en"),
+    ],
+)
+def test_a_chat_takes_the_language_a_call_of_the_same_agent_would(transcriber, language):
+    tm = make_chat_tm()
+    tm.language = "en"  # the default every task manager starts from
+    tm.task_config = {"tools_config": {"llm_agent": None, "transcriber": transcriber}}
+    tm._TaskManager__setup_text_chat()
+    assert tm.language == language
+
+
+async def test_a_dashboard_chat_runs_in_the_agent_language():
+    task_config = {
+        "task_type": "conversation",
+        "toolchain": {"execution": "sequential", "pipelines": [["llm"]]},
+        "tools_config": {
+            "llm_agent": {
+                "agent_type": "simple_llm_agent",
+                "agent_flow_type": "streaming",
+                "llm_config": {"model": "gpt-4.1-mini", "provider": "openai", "max_tokens": 100, "temperature": 0.2},
+            },
+            "synthesizer": {
+                "provider": "elevenlabs",
+                "provider_config": {"voice": "Nila", "voice_id": "test", "model": "eleven_turbo_v2_5"},
+                "stream": True,
+                "buffer_size": 100,
+            },
+            "transcriber": {"provider": "deepgram", "model": "nova-3", "language": "hi", "stream": True},
+            "input": {"provider": "default"},
+            "output": {"provider": "default"},
+        },
+        "task_config": {},
+    }
+    tm = TaskManager("agent", 0, task_config, MagicMock(), turn_based_conversation=True)
+    assert tm.language == "hi"
 
 
 # --- output -----------------------------------------------------------------------------------------------------

@@ -29,6 +29,9 @@ class _FakeOutputHandler:
     def close(self):
         self.closed = True
 
+    def hangup_sent(self):
+        return False
+
 
 def _make_task_manager(input_handler):
     task_manager = TaskManager.__new__(TaskManager)
@@ -90,6 +93,7 @@ async def test_end_call_hangup_teardown_is_not_awaited_inline():
     tm.interruption_manager = MagicMock()
     tm.wait_for_current_message = AsyncMock()
     tm.interruptible_hangup_message = False
+    tm.tools = {"input": MagicMock(input_stream_ended=False)}
 
     hangup_started = asyncio.Event()
 
@@ -123,6 +127,7 @@ async def test_end_call_hangup_failure_is_logged_not_swallowed(caplog):
     tm.interruption_manager = MagicMock()
     tm.wait_for_current_message = AsyncMock()
     tm.interruptible_hangup_message = False
+    tm.tools = {"input": MagicMock(input_stream_ended=False)}
 
     async def _boom():
         raise RuntimeError("teardown exploded")

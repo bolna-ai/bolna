@@ -45,6 +45,8 @@ class StreamSynthesizer(BaseSynthesizer):
 
         # WebSocket state
         self.websocket = None
+        # Set whenever a fresh socket is assigned, so a sender waiting in _wait_for_ws wakes on the connect.
+        self.websocket_ready = asyncio.Event()
         self.sender_task = None
         self.conversation_ended = False
         self.connection_error = None
@@ -135,7 +137,12 @@ class StreamSynthesizer(BaseSynthesizer):
                 )
                 return
             logger.info(f"Waiting for {self.provider_name} WebSocket connection...")
-            await asyncio.sleep(poll_interval)
+            # Woken by the connect itself; the interval only bounds how stale the checks above can get.
+            self.websocket_ready.clear()
+            try:
+                await asyncio.wait_for(self.websocket_ready.wait(), timeout=poll_interval)
+            except asyncio.TimeoutError:
+                pass
 
     async def _send_json(self, payload):
         """Send a JSON payload over the WebSocket. Sets connection_error on failure."""
@@ -403,8 +410,19 @@ class StreamSynthesizer(BaseSynthesizer):
                         break
                 else:
                     self.websocket = result
+                    self.websocket_ready.set()
                     consecutive_failures = 0
             await asyncio.sleep(1)
+
+    async def close_connection(self):
+        """Close the socket without ending the synthesizer: a multilingual leg reopens it on a later switch."""
+        ws, self.websocket = self.websocket, None
+        if ws is None:
+            return
+        try:
+            await ws.close()
+        except Exception as e:
+            logger.info(f"Error closing idle {self.provider_name} WebSocket: {e}")
 
     # ------------------------------------------------------------------
     # cleanup() — cancel tasks and close WS

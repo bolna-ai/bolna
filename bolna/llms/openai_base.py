@@ -5,7 +5,7 @@ from typing import Optional
 
 from openai import BadRequestError, APIError
 
-from bolna.constants import is_reasoning_model
+from bolna.constants import IS_USER_ONLINE_MESSAGE, is_reasoning_model
 from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
 from bolna.helpers.utils import (
     convert_to_request_log,
@@ -16,6 +16,7 @@ from bolna.helpers.utils import (
 from .llm import BaseLLM
 from .message_models import MessageFormatAdapter, strip_internal_keys
 from .routing_stream import read_routing_stream
+from .schema_forced_tool_call import force_tools_by_schema
 from .types import APIParams, LLMStreamChunk, LatencyData, FunctionCallPayload
 from bolna.helpers.function_calling_helpers import record_unresolved_tool_call, redacted_url, resolve_tool_name
 from bolna.helpers.logger_config import configure_logger
@@ -51,7 +52,11 @@ def _strip_server_injected_params(tools):
 def _new_items_start(messages):
     """Index of the first message after the last assistant message, where a chained request begins."""
     for i in range(len(messages) - 1, -1, -1):
-        if messages[i].get("role") == ChatRole.ASSISTANT:
+        # The "are you still there" nudge never went through the model, so it is not on the chain.
+        if (
+            messages[i].get("role") == ChatRole.ASSISTANT
+            and messages[i].get("message_category") != IS_USER_ONLINE_MESSAGE
+        ):
             return i + 1
     return 0
 
@@ -75,6 +80,9 @@ class OpenAICompatibleLLM(BaseLLM):
     # Both are set by subclasses whose self.model is a deployment name rather than the model itself.
     _request_log_model = None
     _model_family = None
+
+    # Set by subclasses whose backend cannot force tool_choice (SCHEMA_FORCED_TOOL_PROVIDERS).
+    _forces_tools_by_schema = False
 
     # A reasoning summary streams ahead of the answer text, so it is opt-in: requesting one costs
     # time to first spoken token on a live call. Set from config by subclasses; None omits it.
@@ -396,7 +404,10 @@ class OpenAICompatibleLLM(BaseLLM):
             model_args.pop("temperature", None)
         else:
             model_args["temperature"] = 0.0
+        forced = force_tools_by_schema(model_args) if self._forces_tools_by_schema else None
         stream, overflowed = await self._route_completion(model_args)
+        if forced:
+            stream = forced.stream(stream)
         return await read_routing_stream(stream, parsed_tools, overflowed)
 
     def invalidate_response_chain(self):
