@@ -60,7 +60,9 @@ async def started_pool(primary, *fallbacks):
         {},
         lazy_legs=True,
         fallbacks={"hi": [FallbackEntry("sarvam", synth.model, lambda synth=synth: synth) for synth in fallbacks]},
-        on_fallback=lambda label, failed, entry, error: switches.append((failed.model, entry.model, str(error))),
+        on_fallback=lambda label, failed, replacement, entry, error: switches.append(
+            (failed.model, entry.model, str(error))
+        ),
     )
     await pool.monitor_connection()
     return pool, switches
