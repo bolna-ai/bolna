@@ -85,7 +85,7 @@ def test_tts_control_limits():
         ("cartesia", "volume", "sonic-3", (0.5, 2.0)),
         ("azuretts", "speed", None, (0.5, 2.0)),
         ("polly", "speed", None, None),
-        ("kalpa", "temperature", None, None),
+        ("kalpa", "temperature", None, (0.0, 1.5)),
         ("not-a-provider", "speed", None, None),
     ],
 )
