@@ -32,6 +32,8 @@ DEFAULT_JEV_TIMEOUT_S = 4.0
 
 # Decision thresholds on Jev's 0-1 answers.
 REQUEST_MIN = 0.5
+# bolna's default LANGUAGE_SWITCH_MIN_CONFIDENCE: an auto-mode request below it would only be gated there.
+SWITCH_MIN = 0.7
 UNNAMED_REQUEST_MIN = 0.85
 REFUSAL_MIN = 0.5
 SUBSTANTIVE_MIN = 0.5
@@ -490,20 +492,22 @@ def _recent_after_last_switch(recent_turns) -> list:
     return recent
 
 
+def _probability(choice: dict) -> float:
+    # Jev rescales a choice's confidence so a guess scores 0: 68% sure between two options reads 0.36.
+    # The probability is what compares with the other answers and the switch threshold.
+    return choice["probabilities"].get(choice["choice"], choice["confidence"])
+
+
 def _spoken_language(a: dict, transcript: str) -> tuple:
     """Jev's language answer, corrected by the English-frame check, the transcript's script and Hindi vs Marathi."""
-    lang, lang_p = a["language"]["choice"], a["language"]["confidence"]
+    lang, lang_p = a["language"]["choice"], _probability(a["language"])
     script = script_of(transcript)
     if a.get("english_frame", 0) >= ENGLISH_FRAME_MIN:
         lang, lang_p = "en", a["english_frame"]
     elif lang in LANGS and lang != "en" and script in SCRIPT_TO_LANG and LANGS[lang]["script"] != script:
         lang = SCRIPT_TO_LANG[script]
     if lang in ("hi", "mr") and "hindi_or_marathi" in a:
-        # Jev rescales a choice's confidence so a guess scores 0: 68% sure between two options reads 0.36.
-        # The probability is what compares with the other confidences and the switch threshold.
-        choice = a["hindi_or_marathi"]
-        lang = choice["choice"]
-        lang_p = choice["probabilities"].get(lang, choice["confidence"])
+        lang, lang_p = a["hindi_or_marathi"]["choice"], _probability(a["hindi_or_marathi"])
     return lang, lang_p
 
 
@@ -550,7 +554,9 @@ def decide_from_answers(
         target = max(wants, key=wants.get)
         if target == active:
             return out(None, 0, False, f"asked for {target}, already active")
-        return out(target, wants[target], True, f"caller asked for {LANGS[target]['name']}")
+        if wants[target] >= SWITCH_MIN:
+            return out(target, wants[target], True, f"caller asked for {LANGS[target]['name']}")
+        note += f" (request for {LANGS[target]['name']} below {SWITCH_MIN})"
 
     if lang == active:
         acknowledgement = a["filler_only"] >= SUBSTANTIVE_MIN
@@ -577,6 +583,8 @@ def decide_from_answers(
     if sum(1 for code, seconds in recent if code == lang and seconds >= DRIFT_MIN_SECONDS) >= DRIFT_MIN_TURNS:
         return out(lang, lang_p, False, f"sustained {LANGS[lang]['name']} across turns")
 
+    # Discounted by substance so acknowledgements stay: a certain language still needs substantive >= 0.7 to clear
+    # bolna's 0.7 bar.
     substantive = (a["has_clause"] + (1 - a["filler_only"])) / 2
     if substantive >= SUBSTANTIVE_MIN:
         return out(lang, lang_p * substantive, False, f"caller speaking {LANGS[lang]['name']}")

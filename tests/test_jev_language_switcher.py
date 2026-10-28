@@ -332,6 +332,28 @@ CASES = [
         None,
         "short acknowledgement",
     ),
+    (
+        "weak-request-in-the-active-language-stays",
+        "इंग्लिश में भी बात कर लेते हैं क्या आप",
+        "",
+        "hi",
+        ["hi", "en"],
+        {**_answers("hi"), "wants_en": 0.6},
+        None,
+        None,
+        "request for English below 0.7",
+    ),
+    (
+        "weak-request-for-the-active-language-still-stays",
+        "बस English में ही रहने दो",
+        "",
+        "en",
+        ["en", "hi"],
+        {**_answers("hi"), "wants_en": 0.6},
+        None,
+        None,
+        "already active",
+    ),
 ]
 
 
@@ -350,6 +372,20 @@ def test_named_request_is_explicit_with_its_own_confidence():
     result = decide_from_answers(_answers("hi", wants="ta"), "Tamil la pesunga", "", "hi", ["hi", "ta"])
     assert result["explicit_request"] is True
     assert result["target_confidence"] == 0.9
+
+
+def test_weak_request_in_the_requested_language_switches_on_what_was_spoken():
+    result = decide_from_answers({**_answers("hi"), "wants_hi": 0.6}, "हिंदी में समझाइए ना थोड़ा", "", "en", ["en", "hi"])
+    assert result["target_language"] == "hi"
+    assert result["target_confidence"] >= 0.7
+    assert "speaking Hindi (request for Hindi below 0.7)" in result["reasoning"]
+
+
+def test_language_choice_reports_its_probability():
+    answers = _answers("ta")
+    answers["language"] = {"choice": "ta", "confidence": 0.62, "probabilities": {"ta": 0.65, "te": 0.35}}
+    result = decide_from_answers(answers, "நான் நாளைக்கு கூப்பிடுறேன்", "", "en", ["en", "ta"])
+    assert result["detection_confidence"] == 0.65
 
 
 def test_hindi_or_marathi_reports_the_choice_probability():
