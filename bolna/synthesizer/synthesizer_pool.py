@@ -184,7 +184,12 @@ class SynthesizerPool:
             logger.error(f"SynthesizerPool: error in _run_generate for '{label}': {e}", exc_info=True)
             if self.synthesizers.get(label) is not synth:
                 return
-            if not await self.fail_over(label, e):
+            try:
+                recovered = await self.fail_over(label, e)
+            except Exception as fallback_error:
+                logger.error(f"SynthesizerPool: moving '{label}' to its fallback failed: {fallback_error}")
+                recovered = False
+            if not recovered:
                 self._output_queue.put_nowait(_GenerateFailed(e))
 
     def settle_open_turn(self, message):
