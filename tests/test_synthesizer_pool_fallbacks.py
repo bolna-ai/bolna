@@ -129,3 +129,20 @@ async def test_the_failed_voices_characters_still_count_toward_usage():
 
     assert pool.get_synthesized_characters() == 65
     await pool.cleanup()
+
+
+async def test_a_fallback_that_cannot_take_over_still_ends_the_call_rather_than_going_silent():
+    class RefusingSynth(FakeSynth):
+        async def push(self, message):
+            raise RuntimeError("fallback rejected the text")
+
+    primary = FakeSynth("sonic-3")
+    pool, _ = await started_pool(primary, RefusingSynth("bulbul:v3"))
+    stream = pool.generate()
+    await pool.push(text("Namaste,"))
+    await next_audio(pool, stream)
+
+    primary.fail(RuntimeError("HTTP 429 too many connections"))
+    with pytest.raises(RuntimeError, match="429"):
+        await asyncio.wait_for(stream.__anext__(), timeout=1)
+    await pool.cleanup()
