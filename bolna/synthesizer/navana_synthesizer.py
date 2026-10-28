@@ -46,10 +46,11 @@ SAMPLE_RATES = (8000, 16000, 24000)
 
 CONNECT_TIMEOUT_S = 10.0
 HTTP_TIMEOUT_S = 30.0
-# How often a sender waiting on a replacement socket looks again; the base's 1s would hold up the reply.
-WS_POLL_S = 0.02
-# How often an idle receiver checks whether the call has failed or ended.
+# How often an idle receiver checks whether the call has failed, ended, or stalled.
 RECEIVER_POLL_S = 0.25
+# A socket that owes audio but has sent no chunk for this long is treated as dropped, or its turn would
+# never end. A chunk normally follows within a few hundred ms.
+STALL_S = 5.0
 
 # Error codes no reconnect can fix, so the call ends with the reason instead of retrying. The rest
 # (idle_timeout, concurrency_limit, server_overloaded, triton_5xx, ...) close the socket and
@@ -108,7 +109,11 @@ class NavanaSynthesizer(StreamSynthesizer):
         self.connect_lock = asyncio.Lock()
         self.events = asyncio.Queue()
         self.readers = set()
+        # Closes left to finish on their own; held here because the event loop keeps only weak references.
+        self.background_tasks = set()
         self.reconnect_task = None
+        # Last send or chunk while frames are owed, for the stall check.
+        self.last_progress = time.monotonic()
 
         # Text held back until it ends a sentence, for the sequence it belongs to.
         self.pending_text = ""
@@ -212,8 +217,26 @@ class NavanaSynthesizer(StreamSynthesizer):
             # Ended when the socket is dropped: by its reader once drained, or by the reconnect.
             self.final_frames.setdefault(frame_seq, []).append(sequence_id)
         else:
-            # Already replaced, and its leftover frames are ignored, so nothing is left to wait for.
+            # Already detached, and its leftover frames are ignored, so nothing is left to wait for.
             self.events.put_nowait(self._end_of_stream(sequence_id))
+
+    def _drain_events(self):
+        """Drop whatever is queued for the generator. In place: receiver() may be waiting on this queue."""
+        while not self.events.empty():
+            self.events.get_nowait()
+
+    def _spawn(self, coro):
+        task = asyncio.create_task(coro)
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
+        return task
+
+    def _redial(self):
+        """Open the next socket now rather than on monitor_connection's next 1 s check."""
+        if self.conversation_ended or self.connection_error:
+            return
+        if self.reconnect_task is None or self.reconnect_task.done():
+            self.reconnect_task = asyncio.create_task(self.establish_connection())
 
     def _settle_owed_turns(self):
         """Drop the socket's state. Owed audio is lost with it, but every turn already closed still
@@ -249,7 +272,7 @@ class NavanaSynthesizer(StreamSynthesizer):
                 self.last_text_sent = True
 
             async with self.send_lock:
-                await self._wait_for_ws(poll_interval=WS_POLL_S)
+                await self._wait_for_ws()
                 if not self._is_ws_connected():
                     return
                 for unit in units:
@@ -276,6 +299,7 @@ class NavanaSynthesizer(StreamSynthesizer):
         self.current_turn_socket = ws
         try:
             await ws.send(json.dumps({"type": "text", "seq": frame_seq, "target_text": unit}))
+            self.last_progress = time.monotonic()
             return True
         except ConnectionClosed:
             # Not fatal: monitor_connection replaces the socket. Frame seqs are never reused, so
@@ -298,8 +322,18 @@ class NavanaSynthesizer(StreamSynthesizer):
             except asyncio.TimeoutError:
                 if self.connection_error:
                     return
+                self._check_stall()
                 continue
             yield item
+
+    def _check_stall(self):
+        """Drop a socket that owes audio but has sent nothing for STALL_S, as if it had closed."""
+        ws = self.websocket
+        if ws is None or not self.frame_owner or time.monotonic() - self.last_progress < STALL_S:
+            return
+        logger.error(f"Navana TTS sent no audio for {STALL_S}s with {len(self.frame_owner)} frames owed")
+        self._spawn(self._close_quietly(ws))
+        self._on_socket_closed(ws)
 
     async def _read(self, ws):
         """Pump one socket's frames into the event queue until it closes."""
@@ -313,7 +347,9 @@ class NavanaSynthesizer(StreamSynthesizer):
                 try:
                     frame = json.loads(message)
                 except ValueError:
-                    logger.error(f"Navana TTS sent a non-JSON text frame: {message!r}")
+                    frame = None
+                if not isinstance(frame, dict):
+                    logger.error(f"Navana TTS sent a text frame that is not a JSON object: {message!r}")
                     continue
                 if frame.get("type") == "audio":
                     header = frame
@@ -322,7 +358,10 @@ class NavanaSynthesizer(StreamSynthesizer):
         except ConnectionClosed:
             pass
         except Exception as e:
+            # The socket is still open, so close it here: otherwise it looks connected, monitor_connection
+            # never replaces it, and senders keep writing to a socket nobody reads.
             logger.error(f"Navana TTS reader stopped: {e!r}")
+            self._spawn(self._close_quietly(ws))
         finally:
             self._on_socket_closed(ws)
 
@@ -330,6 +369,7 @@ class NavanaSynthesizer(StreamSynthesizer):
         # A replaced socket drains frames for a turn the next socket no longer owes.
         if ws is not self.websocket:
             return
+        self.last_progress = time.monotonic()
         seq = header.get("seq")
         owner = self.frame_owner.get(seq)
         if owner is not None and audio and self.should_synthesize_response(owner):
@@ -352,16 +392,26 @@ class NavanaSynthesizer(StreamSynthesizer):
             self.connection_error = f"Navana TTS {code}: {message}"
 
     def _on_socket_closed(self, ws):
-        if ws is self.websocket:
-            self._settle_owed_turns()
+        """The live socket went away under us: idle timeout, server error, or a crashed or stalled reader.
+        The protocol has no keepalive frame, so the replacement dials at once instead of waiting for
+        monitor_connection's next check."""
+        if ws is not self.websocket:
+            return
+        self.websocket = None
+        self._settle_owed_turns()
+        self._redial()
 
     # ------------------------------------------------------------------
     # Interruption
     # ------------------------------------------------------------------
 
     async def handle_interruption(self):
-        """Drop held text; with audio still owed, swap the socket, since only a close stops Navana."""
+        """Drop held text and queued audio; with audio still owed, swap the socket, since only a close
+        stops Navana."""
         self.pending_text, self.pending_sequence_id = "", None
+        # Queued audio, and any queued end, belong to the reply just cut off. Left in place they would be
+        # paired with the next turn's meta, so the caller hears the end of the interrupted reply.
+        self._drain_events()
         if not self.frame_owner:
             # Everything sent has finished rendering, so the socket owes nothing and stays.
             self.final_frames = {}
@@ -369,15 +419,21 @@ class NavanaSynthesizer(StreamSynthesizer):
         ws, self.websocket = self.websocket, None
         self._reset_socket_state()
         logger.info("Navana TTS: replacing the socket to drop an interrupted turn's audio")
-        self.reconnect_task = asyncio.create_task(self._replace_socket(ws))
-
-    async def _replace_socket(self, ws):
         if ws is not None:
             # Not awaited: the close handshake must not delay the replacement.
-            asyncio.create_task(self._close_quietly(ws))
-        result = await self.establish_connection()
-        if result is not None:
-            self.websocket = result
+            self._spawn(self._close_quietly(ws))
+        self._redial()
+
+    async def close_connection(self):
+        """Close a multilingual leg's socket. Also stop a redial a barge-in started, or it would reopen
+        the socket closed here, and drop what is queued for turns the leg will not finish."""
+        if self.reconnect_task is not None:
+            self.reconnect_task.cancel()
+            self.reconnect_task = None
+        self.pending_text, self.pending_sequence_id = "", None
+        self._reset_socket_state()
+        self._drain_events()
+        await super().close_connection()
 
     @staticmethod
     async def _close_quietly(ws):
@@ -398,6 +454,8 @@ class NavanaSynthesizer(StreamSynthesizer):
     async def establish_connection(self):
         # monitor_connection and a barge-in replacement can both get here; only one may connect.
         async with self.connect_lock:
+            if self.conversation_ended:
+                return None
             if self._is_ws_connected():
                 return self.websocket
             return await self._connect()
@@ -424,6 +482,10 @@ class NavanaSynthesizer(StreamSynthesizer):
                     self.connection_error = f"Navana TTS {code}: {message}"
                 await self._close_quietly(websocket)
                 return None
+            if self.conversation_ended:
+                # The call ended during the handshake; installing this socket would keep a session open.
+                await self._close_quietly(websocket)
+                return None
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url} session_id={ready.get('session_id')}")
@@ -431,10 +493,18 @@ class NavanaSynthesizer(StreamSynthesizer):
             # Anything still waiting belongs to the dead socket this one replaces.
             self._settle_owed_turns()
             self.websocket = websocket
+            self.last_progress = time.monotonic()
             reader = asyncio.create_task(self._read(websocket))
             self.readers.add(reader)
             reader.add_done_callback(self.readers.discard)
+            # Wakes senders waiting in _wait_for_ws now, not at its next poll.
+            self.websocket_ready.set()
             return websocket
+        except asyncio.CancelledError:
+            # Not an Exception, so the close below would be skipped and the half-open session leak.
+            if websocket is not None:
+                self._spawn(self._close_quietly(websocket))
+            raise
         except asyncio.TimeoutError:
             logger.error("Timeout while connecting to Navana TTS websocket")
         except InvalidHandshake as e:
@@ -451,9 +521,14 @@ class NavanaSynthesizer(StreamSynthesizer):
         return None
 
     async def cleanup(self):
+        # Before the base closes the socket: a redial finishing during that close would otherwise install
+        # a live socket, and its session, after the call.
+        self.conversation_ended = True
+        if self.reconnect_task is not None:
+            self.reconnect_task.cancel()
         await super().cleanup()
-        for task in (self.reconnect_task, *self.readers):
-            if task is not None and not task.done():
+        for task in self.readers:
+            if not task.done():
                 task.cancel()
 
     # ------------------------------------------------------------------

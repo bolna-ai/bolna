@@ -14,6 +14,12 @@ from bolna.providers import SUPPORTED_SYNTHESIZER_MODELS
 from bolna.synthesizer.navana_synthesizer import NavanaSynthesizer
 
 
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    # A socket closing redials at once, so any test can reach a connect; the handshake tests override this.
+    monkeypatch.setattr(navana.websockets, "connect", AsyncMock(side_effect=OSError("no network in tests")))
+
+
 def _synth(live=None, **kwargs):
     kwargs.setdefault("voice", "Default Female")
     kwargs.setdefault("voice_id", "default_female")
@@ -290,6 +296,8 @@ async def test_a_barge_in_with_audio_owed_replaces_the_socket():
     synth.establish_connection = AsyncMock(side_effect=connect)
     await synth.sender("A long answer that is still rendering.", 1)
     await synth.sender("and more", 1)
+    # Audio already queued but not yet taken by the generator.
+    _deliver(synth, 0, last=False)
 
     live.clear()
     await synth.handle_interruption()
@@ -298,7 +306,7 @@ async def test_a_barge_in_with_audio_owed_replaces_the_socket():
 
     assert old.closed
     assert synth.websocket is replacement
-    # Whatever the old socket still drains is dropped, and the held text went with the turn.
+    # The queued audio and whatever the old socket still drains are dropped; the held text went too.
     _deliver(synth, 0, ws=old)
     assert _drain(synth) == []
     assert synth.pending_text == ""
@@ -313,12 +321,83 @@ async def test_a_barge_in_with_nothing_owed_keeps_the_socket():
     ws = _connected(synth)
     synth.establish_connection = AsyncMock()
     await synth.sender("Short reply.", 1)
+    await synth.sender("", 1, end_of_llm_stream=True)
     _deliver(synth, 0)
 
     await synth.handle_interruption()
     assert synth.websocket is ws
     assert not ws.closed
     synth.establish_connection.assert_not_called()
+    # Its audio and end were still queued; neither may reach the next turn.
+    assert _drain(synth) == []
+
+
+# ── lifecycle ─────────────────────────────────────────────────────────────────
+
+
+def _slow_connect(synth):
+    """A connect that never finishes on its own, so a test can act while the redial is in flight."""
+    synth.establish_connection = AsyncMock(side_effect=lambda: asyncio.Event().wait())
+
+
+async def test_closing_a_leg_stops_its_barge_in_redial_and_drops_its_queue():
+    synth = _synth()
+    _connected(synth)
+    _slow_connect(synth)
+    await synth.sender("A long answer that is still rendering.", 1)
+    _deliver(synth, 0, last=False)
+    await synth.handle_interruption()
+    redial = synth.reconnect_task
+    synth.events.put_nowait(b"left over")
+
+    await synth.close_connection()
+    await asyncio.sleep(0)
+    assert redial.cancelled()
+    assert synth.websocket is None
+    assert _drain(synth) == []
+    assert synth.frame_owner == {}
+
+
+async def test_cleanup_stops_a_redial_in_flight():
+    synth = _synth()
+    _connected(synth)
+    _slow_connect(synth)
+    await synth.sender("A long answer that is still rendering.", 1)
+    await synth.handle_interruption()
+    redial = synth.reconnect_task
+
+    await synth.cleanup()
+    await asyncio.sleep(0)
+    assert redial.cancelled()
+
+
+async def test_a_handshake_that_finishes_after_the_call_ended_is_closed(monkeypatch):
+    ws = FakeWS([json.dumps({"type": "ready", "session_id": "ws-1"})])
+    monkeypatch.setattr(navana.websockets, "connect", AsyncMock(return_value=ws))
+    synth = _synth()
+    synth.conversation_ended = True
+
+    assert await synth._connect() is None
+    assert ws.closed
+    assert synth.websocket is None
+    # And no new handshake starts once the call has ended.
+    assert await synth.establish_connection() is None
+
+
+async def test_a_handshake_cancelled_before_ready_closes_its_socket(monkeypatch):
+    ws = FakeWS()
+    ws.recv = lambda: asyncio.Event().wait()
+    monkeypatch.setattr(navana.websockets, "connect", AsyncMock(return_value=ws))
+    synth = _synth()
+
+    connecting = asyncio.create_task(synth._connect())
+    for _ in range(3):
+        await asyncio.sleep(0)
+    connecting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await connecting
+    await asyncio.sleep(0)
+    assert ws.closed
 
 
 # ── socket loss and errors ────────────────────────────────────────────────────
@@ -373,21 +452,73 @@ async def test_a_final_push_lost_after_the_socket_was_replaced_ends_the_turn_at_
     assert synth.frame_owner == {}
 
 
-async def test_the_reconnect_ends_a_lost_turn_its_finished_reader_left(monkeypatch):
+async def test_the_reconnect_ends_turns_the_dead_socket_left_waiting(monkeypatch):
     synth = _synth()
     ws = _connected(synth)
-    # The reader already drained the socket and finished before the send failed.
-    synth._on_socket_closed(ws)
-    _kill_on_send(ws)
-    await synth.sender("Anything else I can help with?", 1, end_of_llm_stream=True)
-    assert _drain(synth) == []
-
+    await synth.sender("Your payment is confirmed.", 1)
+    await synth.sender("", 1, end_of_llm_stream=True)
     ws.closed = True
+
     ready = json.dumps({"type": "ready", "session_id": "ws-2"})
     monkeypatch.setattr(navana.websockets, "connect", AsyncMock(return_value=FakeWS([ready])))
     await synth.establish_connection()
     assert _drain(synth) == [b"\x00"]
     await synth.cleanup()
+
+
+async def test_a_socket_closing_under_us_detaches_and_redials_at_once():
+    synth = _synth()
+    ws = _connected(synth)
+    synth.establish_connection = AsyncMock(return_value=None)
+
+    synth._on_socket_closed(ws)
+    await synth.reconnect_task
+    assert synth.websocket is None
+    synth.establish_connection.assert_awaited_once()
+
+
+async def test_a_crashed_reader_closes_its_socket_so_it_gets_replaced():
+    synth = _synth()
+    ws = _connected(synth)
+    synth.establish_connection = AsyncMock(return_value=None)
+    ws.inbox = [b"\x00\x00"]
+    synth._on_audio = MagicMock(side_effect=RuntimeError("boom"))
+
+    await synth._read(ws)
+    await asyncio.sleep(0)
+    assert ws.closed
+    assert synth.websocket is None
+    synth.establish_connection.assert_awaited_once()
+
+
+async def test_a_text_frame_that_is_not_an_object_is_skipped():
+    synth = _synth()
+    ws = _connected(synth)
+    await synth.sender("All done.", 1)
+    await synth.sender("", 1, end_of_llm_stream=True)
+    ws.inbox = ["[1, 2]", json.dumps({"type": "audio", "seq": 0, "is_last_chunk": True}), b"\x01\x00"]
+
+    await synth._read(ws)
+    assert _drain(synth)[:2] == [b"\x01\x00", b"\x00"]
+
+
+async def test_a_stalled_socket_is_dropped_and_its_closed_turn_ends():
+    synth = _synth()
+    ws = _connected(synth)
+    synth.establish_connection = AsyncMock(return_value=None)
+    await synth.sender("Your payment is confirmed.", 1)
+    await synth.sender("", 1, end_of_llm_stream=True)
+
+    synth._check_stall()
+    assert synth.websocket is ws
+
+    synth.last_progress -= navana.STALL_S + 1
+    synth._check_stall()
+    await asyncio.sleep(0)
+    assert ws.closed
+    assert synth.websocket is None
+    assert _drain(synth) == [b"\x00"]
+    synth.establish_connection.assert_awaited_once()
 
 
 async def test_a_mid_turn_push_lost_with_its_socket_leaves_the_turn_open():
@@ -437,6 +568,8 @@ async def test_connect_sends_the_hello_and_waits_for_ready(monkeypatch):
     assert synth.websocket is ws
     assert ws.sent[0]["type"] == "hello"
     assert connect.call_args.kwargs["additional_headers"]["Authorization"] == "Bearer test-key"
+    # Senders parked in _wait_for_ws wake on this, not on their next poll.
+    assert synth.websocket_ready.is_set()
     await synth.cleanup()
 
 
