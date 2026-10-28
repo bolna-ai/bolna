@@ -59,7 +59,7 @@ async def started_pool(primary, *fallbacks):
         multilingual_config={},
         lazy_legs=True,
         fallbacks={"hi": list(fallbacks)},
-        on_fallback=lambda label, failed, e, error: switches.append((failed.model, e.model, error)),
+        on_fallback=lambda label, failed, replacement, e, error: switches.append((failed.model, e.model, error)),
     )
     await pool.run()
     return pool, call_queue, switches

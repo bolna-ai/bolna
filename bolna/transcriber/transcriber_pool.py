@@ -96,7 +96,7 @@ class TranscriberPool:
                            TaskManager drains it per turn via take_lid_transcript().
             lazy_legs: connect only the active leg; switch() opens the target and closes the leg it leaves.
             fallbacks: label -> the providers to try, in order, when that label's provider fails.
-            on_fallback: callback(label, failed, entry, error) run as a label moves to its next provider.
+            on_fallback: callback(label, failed, replacement, entry, error) run as a label moves to its next provider.
         """
         self.transcribers = transcribers
         self.shared_input_queue = shared_input_queue
@@ -665,7 +665,7 @@ class TranscriberPool:
                 logger.warning(f"TranscriberPool: '{label}' moved to its next provider after: {error}")
                 if self.on_fallback is not None:
                     try:
-                        self.on_fallback(label, failed, entry, error)
+                        self.on_fallback(label, failed, replacement, entry, error)
                     except Exception as e:
                         logger.error(f"TranscriberPool: fallback callback failed: {e}")
                 return True

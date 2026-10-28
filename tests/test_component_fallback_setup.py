@@ -176,26 +176,46 @@ async def test_an_llm_switch_is_recorded_and_the_call_follows_the_model_now_serv
     assert tm.on_turn_usage is None and tm.on_overflow is None
 
 
-async def test_an_asr_switch_records_what_the_failed_provider_served_and_the_call_follows_the_new_one():
+async def test_an_asr_switch_is_recorded_with_what_the_new_provider_served_and_the_call_follows_it():
     tm = setup_tm({})
     tm.transcriber_provider = "deepgram"
     tm._cb_transcriber_connect_reported = True
     tm._report_provider_health = AsyncMock()
     tm._cb_tasks = set()
-    bind(tm, "_TaskManager__on_transcriber_fallback", "_TaskManager__spawn_health_report")
-    failed = MagicMock(model="nova-3")
-    failed.billed_audio_s.return_value = 41.25
+    tm._fallback_replacements = []
+    tm.llm_latencies = MagicMock(turn_latencies=[])
+    bind(tm, "_TaskManager__on_transcriber_fallback", "_TaskManager__spawn_health_report", "fallback_events_with_usage")
+    replacement = MagicMock()
     entry = MagicMock(provider="sarvam", model="saaras:v3")
 
-    tm._TaskManager__on_transcriber_fallback("hi", failed, entry, "HTTP 429")
+    tm._TaskManager__on_transcriber_fallback("hi", MagicMock(model="nova-3"), replacement, entry, "HTTP 429")
     await asyncio.sleep(0)
+    replacement.billed_audio_s.return_value = 41.25
 
-    (event,) = tm.fallback_events
+    (event,) = tm.fallback_events_with_usage()
     assert (event["from"], event["to"]) == (
         {"provider": "deepgram", "model": "nova-3"},
         {"provider": "sarvam", "model": "saaras:v3"},
     )
-    assert event["failed_usage"] == {"audio_s": 41.25}
+    assert event["served_usage"] == {"audio_s": 41.25}
     assert tm.transcriber_provider == "sarvam"
     assert tm._cb_transcriber_connect_reported is False
     tm._report_provider_health.assert_awaited_once_with("transcriber", "deepgram", "nova-3", False)
+
+
+def test_each_llm_fallback_is_credited_with_the_turns_it_answered():
+    tm = setup_tm({})
+    tm._fallback_replacements = []
+    tm.llm_latencies = MagicMock(
+        turn_latencies=[
+            {"sequence_id": seq, "input_tokens": 100 * seq, "output_tokens": seq, "cached_tokens": 0}
+            for seq in (1, 2, 3, 4)
+        ]
+    )
+    bind(tm, "fallback_events_with_usage")
+    tm.record_fallback("llm", {}, {"model": "second"}, "http_429", "", meta_info={"sequence_id": 2})
+    tm.record_fallback("llm", {}, {"model": "third"}, "http_503", "", meta_info={"sequence_id": 4})
+
+    second, third = tm.fallback_events_with_usage()
+    assert second["served_usage"] == {"input_tokens": 500, "output_tokens": 5, "cached_tokens": 0, "turns": 2}
+    assert third["served_usage"] == {"input_tokens": 400, "output_tokens": 4, "cached_tokens": 0, "turns": 1}
