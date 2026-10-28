@@ -219,3 +219,30 @@ def test_each_llm_fallback_is_credited_with_the_turns_it_answered():
     second, third = tm.fallback_events_with_usage()
     assert second["served_usage"] == {"input_tokens": 500, "output_tokens": 5, "cached_tokens": 0, "turns": 2}
     assert third["served_usage"] == {"input_tokens": 400, "output_tokens": 4, "cached_tokens": 0, "turns": 1}
+
+
+async def test_a_tts_switch_names_both_voices_as_request_logs_do_and_the_call_speaks_as_the_new_one():
+    tm = setup_tm({})
+    tm.synthesizer_provider = "cartesia"
+    tm._report_provider_health = AsyncMock()
+    tm._cb_tasks = set()
+    tm._fallback_replacements = []
+    tm.llm_latencies = MagicMock(turn_latencies=[])
+    bind(tm, "_TaskManager__on_synthesizer_fallback", "_TaskManager__spawn_health_report", "fallback_events_with_usage")
+    failed, replacement = MagicMock(), MagicMock()
+    failed.get_engine.return_value = "sonic-3"
+    replacement.get_engine.return_value = "bulbul:v3"
+    config = {"provider": "sarvam", "provider_config": {"voice": "Priya", "voice_id": "priya", "model": "bulbul:v3"}}
+    entry = MagicMock(provider="sarvam", model="bulbul:v3", config=config)
+
+    tm._TaskManager__on_synthesizer_fallback("hi", failed, replacement, entry, RuntimeError("HTTP 429"))
+    await asyncio.sleep(0)
+    replacement.get_synthesized_characters.return_value = 310
+
+    (event,) = tm.fallback_events_with_usage()
+    assert (event["from"], event["to"]) == (
+        {"provider": "cartesia", "model": "sonic-3"},
+        {"provider": "sarvam", "model": "bulbul:v3"},
+    )
+    assert event["served_usage"] == {"characters": 310}
+    assert (tm.synthesizer_provider, tm.synthesizer_voice_id) == ("sarvam", "priya")

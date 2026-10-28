@@ -2214,11 +2214,12 @@ class TaskManager(BaseManager):
         return entries
 
     def __on_synthesizer_fallback(self, label, failed, replacement, entry, error):
-        failed_info = {"provider": self.synthesizer_provider, "model": getattr(failed, "model", None)}
+        # The engine is what request logs name each voice by, so usage on either side of the switch matches them.
+        failed_info = {"provider": self.synthesizer_provider, "model": failed.get_engine()}
         self.record_fallback(
             "synthesizer",
             failed_info,
-            {"provider": entry.provider, "model": entry.model},
+            {"provider": entry.provider, "model": replacement.get_engine()},
             reason="connection_error",
             error=str(error) if error else None,
             replacement=replacement,
