@@ -24,6 +24,10 @@ class BaseLLM:
         """
         raise NotImplementedError(f"{type(self).__name__} does not support graph routing")
 
+    def fail_fast(self):
+        """Stop retrying a failed request in place: a fallback model serves the turn instead. No-op by default."""
+        pass
+
     def invalidate_response_chain(self):
         """Reset stateful response chaining (e.g., previous_response_id).
 
