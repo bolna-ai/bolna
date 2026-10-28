@@ -251,6 +251,7 @@ async def test_deepgram_pool_reconnects_bill_each_connection_once():
 def _pool(**legs):
     pool = TranscriberPool.__new__(TranscriberPool)
     pool.transcribers = legs
+    pool.retired = []
     return pool
 
 
