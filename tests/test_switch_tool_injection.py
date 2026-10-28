@@ -68,3 +68,10 @@ def test_absent_flag_means_legacy_and_gets_the_tool():
     tm.language_switcher = None
     _constructor_gate(tm)
     assert tm.kwargs["api_tools"]["tools_params"].get("switch_language") == {}
+
+
+def test_a_one_language_pool_holding_only_fallbacks_gets_no_switch_tool():
+    tm = _tm(llm_language_switch=False)
+    tm.tools["transcriber"].labels = ["hi"]
+    _constructor_gate(tm)
+    assert tm.kwargs.get("api_tools") is None
