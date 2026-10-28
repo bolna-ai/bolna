@@ -301,10 +301,9 @@ class KalpaConfig(BaseModel):
     voice: str = "Arjun"
     voice_id: Optional[str] = None
     model: str = "kalpa-tts-1"
-    temperature: Optional[float] = None
-    acoustic_temperature: Optional[float] = None
-    max_new_tokens: Optional[int] = None
-    audio_quality: Optional[str] = None
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=1.5)
+    acoustic_temperature: Optional[float] = Field(default=None, ge=0.0, le=1.5)
+    audio_quality: Optional[Literal["low", "medium", "high"]] = None
     chunk_length_schedule: Optional[List[int]] = None
 
 

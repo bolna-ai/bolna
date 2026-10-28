@@ -374,12 +374,13 @@ class LanguageSwitcher:
             text = text[start : end + 1]
         return json.loads(text)
 
-    def _log_request(self, transcript: str, sent_at: float) -> dict:
-        """Stamp the request row at send time and return the meta both rows share."""
+    def _log_request(self, transcript: str, sent_at: float, also_sent: dict | None = None) -> dict:
+        """Stamp the request row at send time and return the meta both rows share. also_sent: whatever else the
+        judge was given with the transcript (the agent's last turn, the live transcript), so the row shows it."""
         meta_info = {"request_id": str(uuid.uuid4())}
         try:
             convert_to_request_log(
-                message={"transcript": transcript, "available_languages": self.available_labels},
+                message={"transcript": transcript, "available_languages": self.available_labels, **(also_sent or {})},
                 meta_info=meta_info,
                 component=LogComponent.LLM_LANGUAGE_SWITCH,
                 direction=LogDirection.REQUEST,
