@@ -386,13 +386,20 @@ async def test_a_handshake_that_finishes_after_the_call_ended_is_closed(monkeypa
 
 async def test_a_handshake_cancelled_before_ready_closes_its_socket(monkeypatch):
     ws = FakeWS()
-    ws.recv = lambda: asyncio.Event().wait()
+    waiting_for_ready = asyncio.Event()
+
+    async def recv():
+        waiting_for_ready.set()
+        await asyncio.Event().wait()
+
+    ws.recv = recv
     monkeypatch.setattr(navana.websockets, "connect", AsyncMock(return_value=ws))
     synth = _synth()
 
     connecting = asyncio.create_task(synth._connect())
-    for _ in range(3):
-        await asyncio.sleep(0)
+    # Cancel only once the handshake waits on ready: on 3.10, wait_for swallows a cancel that lands
+    # in the same loop turn its inner awaitable finishes, so counting sleep(0)s is version-dependent.
+    await waiting_for_ready.wait()
     connecting.cancel()
     with pytest.raises(asyncio.CancelledError):
         await connecting
