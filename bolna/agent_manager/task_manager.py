@@ -2036,6 +2036,7 @@ class TaskManager(BaseManager):
             {"provider": entry.provider, "model": entry.model},
             reason="connection_error",
             error=str(error) if error else None,
+            failed_usage={"audio_s": round(failed.billed_audio_s(), 4)},
         )
         self.__spawn_health_report("transcriber", failed_info["provider"], failed_info["model"])
         self.transcriber_provider = entry.provider
@@ -2218,6 +2219,7 @@ class TaskManager(BaseManager):
             {"provider": entry.provider, "model": entry.model},
             reason="connection_error",
             error=str(error) if error else None,
+            failed_usage={"characters": failed.get_synthesized_characters()},
         )
         self.__spawn_health_report("synthesizer", failed_info["provider"], failed_info["model"])
         self.__set_synthesizer_identity(
@@ -2287,7 +2289,8 @@ class TaskManager(BaseManager):
         # The agent's own backend no longer serves this call, so its load meters stop.
         self.on_turn_usage = self.on_overflow = None
 
-    def record_fallback(self, component, failed, served, reason, error, meta_info=None):
+    def record_fallback(self, component, failed, served, reason, error, meta_info=None, failed_usage=None):
+        """failed_usage is what the failed provider served before the switch, which request logs do not split."""
         self.fallback_events.append(
             {
                 "component": component,
@@ -2295,6 +2298,7 @@ class TaskManager(BaseManager):
                 "to": served,
                 "reason": reason,
                 "error": error,
+                "failed_usage": failed_usage,
                 "sequence_id": (meta_info or {}).get("sequence_id"),
                 "turn_id": (meta_info or {}).get("turn_id"),
                 "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),

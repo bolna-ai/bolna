@@ -174,3 +174,28 @@ async def test_an_llm_switch_is_recorded_and_the_call_follows_the_model_now_serv
     tm._report_provider_health.assert_awaited_once_with("llm", "azure", "azure/gpt-4.1-mini", False)
     assert (tm.llm_config["provider"], tm.llm_config["model"]) == ("openai", "gpt-4.1-mini")
     assert tm.on_turn_usage is None and tm.on_overflow is None
+
+
+async def test_an_asr_switch_records_what_the_failed_provider_served_and_the_call_follows_the_new_one():
+    tm = setup_tm({})
+    tm.transcriber_provider = "deepgram"
+    tm._cb_transcriber_connect_reported = True
+    tm._report_provider_health = AsyncMock()
+    tm._cb_tasks = set()
+    bind(tm, "_TaskManager__on_transcriber_fallback", "_TaskManager__spawn_health_report")
+    failed = MagicMock(model="nova-3")
+    failed.billed_audio_s.return_value = 41.25
+    entry = MagicMock(provider="sarvam", model="saaras:v3")
+
+    tm._TaskManager__on_transcriber_fallback("hi", failed, entry, "HTTP 429")
+    await asyncio.sleep(0)
+
+    (event,) = tm.fallback_events
+    assert (event["from"], event["to"]) == (
+        {"provider": "deepgram", "model": "nova-3"},
+        {"provider": "sarvam", "model": "saaras:v3"},
+    )
+    assert event["failed_usage"] == {"audio_s": 41.25}
+    assert tm.transcriber_provider == "sarvam"
+    assert tm._cb_transcriber_connect_reported is False
+    tm._report_provider_health.assert_awaited_once_with("transcriber", "deepgram", "nova-3", False)
