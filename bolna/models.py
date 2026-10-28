@@ -880,6 +880,8 @@ class LlmAgent(BaseModel):
 
         expected_type = valid_config_types[agent_type]
 
+        if isinstance(value, expected_type):
+            return value
         if not isinstance(value, dict):
             raise ValueError(f"llm_config must be a dict, got {type(value)}")
 
