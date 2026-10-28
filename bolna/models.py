@@ -69,6 +69,13 @@ def validate_attribute(value, allowed_values, value_type="provider"):
     return value
 
 
+def no_nested_fallbacks(entries):
+    """A fallback entry is a single provider; only the primary carries the list."""
+    if any(entry.fallbacks for entry in entries or []):
+        raise ValueError("A fallback entry cannot have fallbacks of its own.")
+    return entries
+
+
 def validate_reasoning_effort_for_model(model: str, reasoning_effort: str) -> None:
     if "gpt" not in model:
         return
@@ -402,10 +409,18 @@ class Transcriber(BaseModel):
     vad_threshold: Optional[float] = 0.5
     vad_prefix_padding_ms: Optional[int] = 300
     assemblyai_config: Optional[AssemblyAITranscriberConfig] = None
+    # Tried in order when the provider in use fails mid-call.
+    fallbacks: Optional[Annotated[List["Transcriber"], AfterValidator(no_nested_fallbacks)]] = None
 
     @field_validator("provider")
     def validate_model(cls, value):
         return validate_attribute(value, TranscriberProvider.all_values())
+
+    @model_validator(mode="after")
+    def fallbacks_belong_to_a_language(self):
+        if self.fallbacks and self.multilingual:
+            raise ValueError("A multilingual transcriber sets fallbacks per language, inside multilingual.")
+        return self
 
 
 class PronunciationRule(BaseModel):
@@ -441,6 +456,8 @@ class Synthesizer(BaseModel):
     caching: Optional[bool] = True
     # Word -> say-as pairs to build a provider dictionary from; synthesis applies dictionaries by ID only.
     pronunciation_rules: Optional[PronunciationRules] = None
+    # Tried in order when the provider in use fails mid-call.
+    fallbacks: Optional[Annotated[List["Synthesizer"], AfterValidator(no_nested_fallbacks)]] = None
 
     @model_validator(mode="before")
     def preprocess(cls, values):
@@ -592,10 +609,31 @@ class Llm(BaseModel):
         return self
 
 
+class LlmFallback(BaseModel):
+    """Another model to serve the conversation; every other LLM setting stays the agent's own."""
+
+    provider: str
+    model: str
+    reasoning_effort: Optional[ReasoningEffort] = None
+    verbosity: Optional[Verbosity] = None
+
+    @field_validator("provider")
+    def validate_provider(cls, value):
+        return validate_attribute(value, LLMProvider.all_values())
+
+    @model_validator(mode="after")
+    def validate_reasoning_effort_for_model(self):
+        if self.reasoning_effort is not None:
+            validate_reasoning_effort_for_model(self.model, self.reasoning_effort.value)
+        return self
+
+
 class SimpleLlmAgent(Llm):
     agent_flow_type: Optional[str] = "streaming"  # It is used for backwards compatibility
     extraction_details: Optional[str] = None
     summarization_details: Optional[str] = None
+    # Tried in order when a turn fails before any output.
+    fallbacks: Optional[List[LlmFallback]] = None
 
 
 class Node(BaseModel):
