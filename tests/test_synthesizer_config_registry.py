@@ -89,7 +89,6 @@ EXPECTED_FIELDS = {
         "model": False,
         "temperature": False,
         "acoustic_temperature": False,
-        "max_new_tokens": False,
         "audio_quality": False,
         "chunk_length_schedule": False,
     },
