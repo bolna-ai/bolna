@@ -58,7 +58,7 @@ class SynthesizerPool:
             lazy_legs: connect only the legs in use instead of every leg for the whole call.
             record_event: optional callback taking a telemetry dict (leg opens, switches, closes).
             fallbacks: label -> FallbackEntry list, the providers to try in order when that label's synth fails.
-            on_fallback: callback(label, failed, entry, error) run as a label moves to its next provider.
+            on_fallback: callback(label, failed, replacement, entry, error) run as a label moves to its next provider.
         """
         self.synthesizers = synthesizers
 
@@ -216,7 +216,7 @@ class SynthesizerPool:
                 logger.warning(f"SynthesizerPool: '{label}' moved to its next provider after: {error}")
                 if self.on_fallback is not None:
                     try:
-                        self.on_fallback(label, failed, entry, error)
+                        self.on_fallback(label, failed, replacement, entry, error)
                     except Exception as e:
                         logger.error(f"SynthesizerPool: fallback callback failed: {e}")
                 for message in self.open_turn:

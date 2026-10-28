@@ -403,6 +403,8 @@ class TaskManager(BaseManager):
         self.transcriber_error_events: list[dict] = []
         # Each time a component moved to its next configured fallback.
         self.fallback_events: list[dict] = []
+        # The transcriber or synthesizer each event moved to, read for what it served at the end of the call.
+        self._fallback_replacements: list[tuple[dict, object]] = []
         self.blocked_audio_events: list[dict] = []
         self._blocked_sequences: set = set()  # dedup: only record first block per sequence
         self._sent_audio_sequences: set = set()
@@ -2028,7 +2030,7 @@ class TaskManager(BaseManager):
             entries.append(FallbackEntry(entry.get("provider") or entry.get("model"), entry.get("model"), build))
         return entries
 
-    def __on_transcriber_fallback(self, label, failed, entry, error):
+    def __on_transcriber_fallback(self, label, failed, replacement, entry, error):
         failed_info = {"provider": self.transcriber_provider, "model": getattr(failed, "model", None)}
         self.record_fallback(
             "transcriber",
@@ -2036,7 +2038,7 @@ class TaskManager(BaseManager):
             {"provider": entry.provider, "model": entry.model},
             reason="connection_error",
             error=str(error) if error else None,
-            failed_usage={"audio_s": round(failed.billed_audio_s(), 4)},
+            replacement=replacement,
         )
         self.__spawn_health_report("transcriber", failed_info["provider"], failed_info["model"])
         self.transcriber_provider = entry.provider
@@ -2211,7 +2213,7 @@ class TaskManager(BaseManager):
             entries.append(FallbackEntry(entry["provider"], model, build, config=entry))
         return entries
 
-    def __on_synthesizer_fallback(self, label, failed, entry, error):
+    def __on_synthesizer_fallback(self, label, failed, replacement, entry, error):
         failed_info = {"provider": self.synthesizer_provider, "model": getattr(failed, "model", None)}
         self.record_fallback(
             "synthesizer",
@@ -2219,7 +2221,7 @@ class TaskManager(BaseManager):
             {"provider": entry.provider, "model": entry.model},
             reason="connection_error",
             error=str(error) if error else None,
-            failed_usage={"characters": failed.get_synthesized_characters()},
+            replacement=replacement,
         )
         self.__spawn_health_report("synthesizer", failed_info["provider"], failed_info["model"])
         self.__set_synthesizer_identity(
@@ -2289,21 +2291,43 @@ class TaskManager(BaseManager):
         # The agent's own backend no longer serves this call, so its load meters stop.
         self.on_turn_usage = self.on_overflow = None
 
-    def record_fallback(self, component, failed, served, reason, error, meta_info=None, failed_usage=None):
-        """failed_usage is what the failed provider served before the switch, which request logs do not split."""
-        self.fallback_events.append(
-            {
-                "component": component,
-                "from": failed,
-                "to": served,
-                "reason": reason,
-                "error": error,
-                "failed_usage": failed_usage,
-                "sequence_id": (meta_info or {}).get("sequence_id"),
-                "turn_id": (meta_info or {}).get("turn_id"),
-                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
-            }
-        )
+    def record_fallback(self, component, failed, served, reason, error, meta_info=None, replacement=None):
+        event = {
+            "component": component,
+            "from": failed,
+            "to": served,
+            "reason": reason,
+            "error": error,
+            "sequence_id": (meta_info or {}).get("sequence_id"),
+            "turn_id": (meta_info or {}).get("turn_id"),
+            "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+        }
+        self.fallback_events.append(event)
+        if replacement is not None:
+            self._fallback_replacements.append((event, replacement))
+
+    def fallback_events_with_usage(self):
+        """Each fallback event with what the provider it moved to served for the rest of the call."""
+        for event, replacement in self._fallback_replacements:
+            if event["component"] == "transcriber":
+                event["served_usage"] = {"audio_s": round(replacement.billed_audio_s(), 4)}
+            else:
+                event["served_usage"] = {"characters": replacement.get_synthesized_characters()}
+        llm_events = [event for event in self.fallback_events if event["component"] == "llm"]
+        for index, event in enumerate(llm_events):
+            # A switch re-runs the failed turn, so the entry serves from that turn until the next switch.
+            start = event["sequence_id"] or 0
+            end = llm_events[index + 1]["sequence_id"] if index + 1 < len(llm_events) else None
+            usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "turns": 0}
+            for turn in self.llm_latencies.turn_latencies:
+                sequence_id = turn.get("sequence_id")
+                if sequence_id is None or sequence_id < start or (end is not None and sequence_id >= end):
+                    continue
+                for key in ("input_tokens", "output_tokens", "cached_tokens"):
+                    usage[key] += turn.get(key) or 0
+                usage["turns"] += 1
+            event["served_usage"] = usage
+        return list(self.fallback_events)
 
     def __spawn_health_report(self, service, provider, model):
         """A failure the call survived still counts against the provider that failed."""
@@ -9970,7 +9994,7 @@ class TaskManager(BaseManager):
                     "lid_detection_events": list(self.__snapshot_lid_events()),
                     "asr_lid_events": self._collect_flux_lid_events(),
                     "transcriber_error_events": list(self.transcriber_error_events),
-                    "fallback_events": list(self.fallback_events),
+                    "fallback_events": self.fallback_events_with_usage(),
                     "transcriber_reconnect_count": getattr(self.tools.get("transcriber"), "reconnect_count", 0),
                     "blocked_audio_events": list(self.blocked_audio_events),
                     "tts_audio_quality": self.__tts_audio_quality(output["latency_dict"]["synthesizer_chunk_marks"]),
