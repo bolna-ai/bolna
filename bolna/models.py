@@ -26,6 +26,7 @@ from .enums import (
     ExpressionOperator,
     ExpressionLogic,
     EdgeConditionType,
+    EdgeOrder,
     NodeType,
     VariableType,
 )
@@ -685,7 +686,8 @@ class GraphEdge(BaseModel):
     # Optional parameters to collect during transition
     # Name -> type, e.g. {"city": "string"}, or name -> GraphEdgeParameter for a per-key definition.
     parameters: Optional[Dict[str, GraphEdgeParameterSpec]] = None
-    # lower = evaluated first within a tier (expression/intent/unconditional); does not rank across tiers.
+    # lower = evaluated first within a tier (expression/intent/unconditional); ranks an intent edge
+    # against an expression edge only on a node with edge_order "priority".
     # Defaults: expression/unconditional=0, llm=100
     priority: Optional[int] = None
 
@@ -735,6 +737,7 @@ class GraphNode(BaseModel):
     routing_model: Optional[str] = None
     # Per-node routing effort; None inherits the agent's routing_reasoning_effort.
     routing_reasoning_effort: Optional[ReasoningEffort] = None
+    edge_order: EdgeOrder = EdgeOrder.TIERED
     examples: Optional[Dict[str, str]] = None
     edges: List[GraphEdge] = Field(default_factory=list)
     function_call: Optional[str] = None

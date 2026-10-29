@@ -341,6 +341,14 @@ class NodeType(str, Enum):
     ROUTER = "router"
 
 
+class EdgeOrder(str, Enum):
+    """How a node ranks its edges. TIERED: expression, then intent, then unconditional, with
+    priority ordering edges within a tier. PRIORITY: an intent edge can outrank an expression."""
+
+    TIERED = "tiered"
+    PRIORITY = "priority"
+
+
 class S2SProvider(str, Enum):
     """Enum for speech-to-speech providers."""
 

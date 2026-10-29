@@ -24,7 +24,15 @@ from bolna.helpers.utils import (
     static_node_ends_call,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
-from bolna.enums import ChatRole, EdgeConditionType, ExpressionOperator, LLMProvider, NodeType, ToolScope
+from bolna.enums import (
+    ChatRole,
+    EdgeConditionType,
+    EdgeOrder,
+    ExpressionOperator,
+    LLMProvider,
+    NodeType,
+    ToolScope,
+)
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import AzureLLM, OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -56,6 +64,7 @@ logger = configure_logger(__name__)
 
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
+_OUTRANKING_INTENTS_TRACE = "intent edges ranked above it checked first"
 # Root identifier in either syntax, so {{prior.loans}} still validates against recipient_data["prior"].
 _PROMPT_VAR_PATTERN = re.compile(r"\{\{?\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z0-9_]+|\[[^\[\]{}]+\])*\s*\}\}?")
 _ROUTER_REASONING_DESC = "Brief explanation of why this routing decision was made"
@@ -727,9 +736,26 @@ class GraphAgent(BaseAgent):
             else:
                 llm.append(edge)
 
-        deterministic.sort(key=lambda e: e["priority"] if e.get("priority") is not None else 0)
-        llm.sort(key=lambda e: e["priority"] if e.get("priority") is not None else 100)
+        deterministic.sort(key=self._edge_priority)
+        llm.sort(key=self._edge_priority)
         return deterministic, llm
+
+    @staticmethod
+    def _edge_priority(edge: dict) -> int:
+        """The author's priority, else the type default: expression/unconditional 0, intent 100."""
+        if edge.get("priority") is not None:
+            return edge["priority"]
+        if edge.get("condition_type") in (EdgeConditionType.EXPRESSION, EdgeConditionType.UNCONDITIONAL):
+            return 0
+        return 100
+
+    def _intents_outranking(self, node: dict, matched_expression: Optional[dict], intent_edges: list) -> list:
+        """Intent edges ranked strictly above the matched expression, on a node that orders its
+        edges by priority. A tie goes to the expression."""
+        if matched_expression is None or node.get("edge_order") != EdgeOrder.PRIORITY:
+            return []
+        bar = self._edge_priority(matched_expression)
+        return [edge for edge in intent_edges if self._edge_priority(edge) < bar]
 
     def _evaluate_deterministic_edges(self, edges: list) -> Tuple[Optional[dict], List[str]]:
         """Return (first matching deterministic edge or None, per-edge evaluation traces)."""
@@ -838,7 +864,7 @@ class GraphAgent(BaseAgent):
         unconditional = [e for e in node.get("edges", []) if e.get("condition_type") == EdgeConditionType.UNCONDITIONAL]
         if not unconditional:
             return None
-        return min(unconditional, key=lambda e: e["priority"] if e.get("priority") is not None else 0)
+        return min(unconditional, key=GraphAgent._edge_priority)
 
     def _consume_routing_tail(self):
         tail, self._pending_routing_tail = self._pending_routing_tail, None
@@ -899,7 +925,8 @@ class GraphAgent(BaseAgent):
 
     async def _resolve_router_chain(self, history: list) -> List[dict]:
         """Hop silently through routers to a speaking node, one routing_info per hop.
-        Per hop: expression, then one intent-LLM call, then the unconditional catch-all.
+        Per hop: expression, then one intent-LLM call, then the unconditional catch-all. On a
+        router with edge_order "priority", intent edges ranked above the matched expression come first.
         The visited-set bounds the hops so the chain always terminates."""
         hops = []
         visited = set()
@@ -925,12 +952,16 @@ class GraphAgent(BaseAgent):
             deterministic_edges, intent_edges = self._classify_edges(router_node.get("edges", []))
             catch_all = self._catch_all_edge(router_node)
             edge, eval_trace = self._match_expression_edge(router_node, deterministic_edges)
+            # A matched expression is the default unless the node ranks intent edges above it.
+            contenders = intent_edges if edge is None else self._intents_outranking(router_node, edge, intent_edges)
+            if edge is not None and contenders:
+                eval_trace = f"{eval_trace}; {_OUTRANKING_INTENTS_TRACE}"
 
             # Telemetry from an intent call that returned no match, carried onto the
-            # catch-all hop so its tokens are still counted and the call is still logged.
+            # deterministic hop so its tokens are still counted and the call is still logged.
             spent_messages = spent_tools = spent_usage = None
 
-            if edge is None and intent_edges:
+            if contenders:
                 (
                     next_node_id,
                     extracted_params,
@@ -941,7 +972,7 @@ class GraphAgent(BaseAgent):
                     confidence,
                     routing_usage,
                 ) = await self._decide_next_node_llm(
-                    router_node, intent_edges, history, hop_start, default_edge=catch_all
+                    router_node, contenders, history, hop_start, default_edge=edge or catch_all
                 )
                 if next_node_id:
                     self._advance_to_node(next_node_id, entry_index=len(history))
@@ -962,6 +993,7 @@ class GraphAgent(BaseAgent):
                             extracted_params=extracted_params,
                             routing_messages=routing_messages,
                             routing_tools=routing_tools,
+                            routing_expression=eval_trace,
                             routing_usage=routing_usage,
                         )
                     )
@@ -1250,7 +1282,8 @@ class GraphAgent(BaseAgent):
         Optional[dict],
     ]:
         """Precedence: expression edges, then intent edges via one LLM call, then the
-        unconditional default. Without an unconditional edge the node may stay."""
+        unconditional default. Without an unconditional edge the node may stay. On a node with
+        edge_order "priority", intent edges ranked above the matched expression are tried first."""
         self._begin_routing_turn()
         start_time = time.perf_counter()
         self._last_deterministic_eval = None
@@ -1274,6 +1307,21 @@ class GraphAgent(BaseAgent):
 
         # Tier 1: expression edges
         matched_edge, self._last_deterministic_eval = self._match_expression_edge(current_node, deterministic_edges)
+
+        # Intent edges ranked above the match get one LLM call with the match as the default;
+        # an LLM that returns no decision leaves the match standing.
+        r_messages = r_tools = r_usage = None
+        outranking = self._intents_outranking(current_node, matched_edge, intent_edges)
+        if outranking:
+            self._last_deterministic_eval = f"{self._last_deterministic_eval}; {_OUTRANKING_INTENTS_TRACE}"
+            result = await self._decide_next_node_llm(
+                current_node, outranking, history, start_time, default_edge=matched_edge
+            )
+            if result[0] is not None:
+                return result
+            r_messages, r_tools, r_usage = result[3], result[4], result[7]
+            self._last_deterministic_eval = f"{self._last_deterministic_eval}; intent: no match"
+
         if matched_edge:
             latency_ms = (time.perf_counter() - start_time) * 1000
             ct = matched_edge.get("condition_type", EdgeConditionType.EXPRESSION)
@@ -1282,7 +1330,7 @@ class GraphAgent(BaseAgent):
                 f"Routing decision (expression) on node '{self.current_node_id}': "
                 f"-> {matched_edge['to_node_id']} | {self._last_deterministic_eval} (latency: {latency_ms:.1f}ms)"
             )
-            return matched_edge["to_node_id"], None, latency_ms, None, None, reasoning, 1.0, None
+            return matched_edge["to_node_id"], None, latency_ms, r_messages, r_tools, reasoning, 1.0, r_usage
 
         # Tier 2: intent edges via one LLM call; the catch-all is offered as the default (no stay).
         if intent_edges:
