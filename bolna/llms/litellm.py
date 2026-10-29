@@ -249,6 +249,11 @@ class LiteLLM(BaseLLM):
                 cached = getattr(details, "cached_tokens", 0) if details is not None else 0
                 if cached:
                     metadata["cached_tokens"] = cached
+                # Anthropic and Bedrock bill cache writes above the input rate; prompt_tokens already
+                # includes them, so this only marks which share of input they are.
+                written = getattr(details, "cache_creation_tokens", 0) if details is not None else 0
+                if written:
+                    metadata["cache_write_tokens"] = written
             return text, metadata
         else:
             return text

@@ -79,7 +79,13 @@ class LanguageSwitcher:
         self.latency_ms = None
         self.hedge_won = False  # last decide was answered by the hedged request, not the first
         # Judge spend for the whole call (decides + prewarm); persisted via the lid_usage record.
-        self.usage_totals = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "requests": 0}
+        self.usage_totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "requests": 0,
+        }
         self.last_usage = None
         self.models_used: list = []
         # Dedicated creds, NOT the agent's — an Azure/OpenAI agent would 404 the switch model.
@@ -145,7 +151,7 @@ class LanguageSwitcher:
             self.models_used.append(self.model)
         if not usage:
             return
-        for key in ("input_tokens", "output_tokens", "cached_tokens"):
+        for key in ("input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens"):
             self.usage_totals[key] += int(usage.get(key) or 0)
         self.last_usage = usage
 

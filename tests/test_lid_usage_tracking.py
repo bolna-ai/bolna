@@ -25,7 +25,7 @@ def make_switcher(payload, usage=None):
 
 async def test_decide_tallies_judge_usage():
     payload = json.dumps({"target_language": None, "reasoning": "stay"})
-    usage = {"input_tokens": 5500, "output_tokens": 60, "cached_tokens": 5000}
+    usage = {"input_tokens": 5500, "output_tokens": 60, "cached_tokens": 5000, "cache_write_tokens": 300}
     switcher, _ = make_switcher(payload, usage)
     await switcher.decide("hello", "hello", "en")
     await switcher.decide("namaste", "namaste", "en")
@@ -33,8 +33,33 @@ async def test_decide_tallies_judge_usage():
         "input_tokens": 11000,
         "output_tokens": 120,
         "cached_tokens": 10000,
+        "cache_write_tokens": 600,
         "requests": 2,
     }
+
+
+async def test_litellm_metadata_marks_cache_reads_and_writes():
+    """Bedrock via LiteLLM folds reads and writes into prompt_tokens; both must be split out."""
+    from litellm.types.utils import Choices, Message, ModelResponse, PromptTokensDetailsWrapper, Usage
+
+    from bolna.llms.litellm import LiteLLM
+
+    completion = ModelResponse(
+        choices=[Choices(message=Message(content="{}", role="assistant"))],
+        usage=Usage(
+            prompt_tokens=4500,
+            completion_tokens=10,
+            total_tokens=4510,
+            prompt_tokens_details=PromptTokensDetailsWrapper(
+                cached_tokens=4000, cache_creation_tokens=300, text_tokens=200
+            ),
+        ),
+    )
+    llm = LiteLLM(model="bedrock/in.anthropic.claude-haiku-4-5-20251001-v1:0")
+    with patch("bolna.llms.litellm.acompletion", AsyncMock(return_value=completion)):
+        _, metadata = await llm.generate([{"role": "user", "content": "hi"}], ret_metadata=True)
+
+    assert metadata == {"input_tokens": 4500, "output_tokens": 10, "cached_tokens": 4000, "cache_write_tokens": 300}
 
 
 async def test_csv_response_row_carries_tokens():
@@ -119,6 +144,7 @@ def make_tm(events=None, seconds=63.0, switcher=True):
             "input_tokens": 11000,
             "output_tokens": 120,
             "cached_tokens": 10000,
+            "cache_write_tokens": 600,
             "requests": 2,
         }
     else:
@@ -134,6 +160,7 @@ def test_snapshot_appends_one_usage_record():
     usage = [e for e in events if e.get("type") == "lid_usage"]
     assert len(usage) == 1
     assert usage[0]["judge_input_tokens"] == 11000
+    assert usage[0]["judge_cache_write_tokens"] == 600
     assert usage[0]["judge_requests"] == 2
     assert usage[0]["detector_audio_seconds"] == 63.0
     assert usage[0]["judge_model"] == "bedrock/haiku"

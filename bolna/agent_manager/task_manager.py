@@ -6540,6 +6540,7 @@ class TaskManager(BaseManager):
                     "judge_input_tokens": switcher.usage_totals.get("input_tokens", 0),
                     "judge_output_tokens": switcher.usage_totals.get("output_tokens", 0),
                     "judge_cached_tokens": switcher.usage_totals.get("cached_tokens", 0),
+                    "judge_cache_write_tokens": switcher.usage_totals.get("cache_write_tokens", 0),
                 }
             )
         events.append(record)
