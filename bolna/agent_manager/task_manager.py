@@ -5545,6 +5545,8 @@ class TaskManager(BaseManager):
             # the only voicemail signal the call produces.
             self._trigger_voicemail_check(transcriber_message, meta_info, is_final=True)
             self._retire_dropped_response(meta_info, "welcome_still_playing")
+            if isinstance(self.tools.get("transcriber"), TranscriberPool):
+                self.tools["transcriber"].take_lid_transcript()  # its detector copy too, or the next turn carries it
             return
 
         if self._speech_started_before_welcome:
@@ -6449,14 +6451,14 @@ class TaskManager(BaseManager):
         return saw_tags, foreign, foreign_max_s
 
     def __spoken_over_welcome(self, pool) -> bool:
-        """Whether the newest buffered speech began before the welcome ended; never raises, or the watcher exits."""
+        """Whether any buffered speech (so the oldest) began before the welcome ended; never raises, or the watcher exits."""
         try:
             input_handler = self.tools["input"]
             if not input_handler.welcome_message_played():
                 return True
-            newest = pool.lid_buffer_segments()[-1]
+            oldest = pool.lid_buffer_segments()[0]
             # By start (arrival minus audio), not arrival: the detector can deliver after the welcome ends.
-            return (newest["ts"] - newest["audio_s"]) * 1000 < input_handler.welcome_message_played_ts
+            return (oldest["ts"] - oldest["audio_s"]) * 1000 < input_handler.welcome_message_played_ts
         except (AttributeError, IndexError, KeyError, TypeError):
             return False  # no welcome timestamp or segment timing: judge it as before
 
