@@ -1,6 +1,7 @@
-"""Deepgram can re-send the caller's just-finalized sentence as a fresh interim while the agent's
-reply to it is playing. That repeat is not new speech and must not barge in: it cut the reply and,
-since the repeat never finalizes, nothing regenerated and the agent went silent.
+"""Deepgram can re-send the caller's just-finalized sentence while the agent's reply to it is
+playing, as a fresh interim or as a late speech final after bolna force-finalized the turn. That
+repeat is not new speech and must not barge in: it cuts the reply, and the regenerated identical
+reply is then dropped as a duplicate, so the caller hears silence.
 """
 
 import asyncio
@@ -17,6 +18,13 @@ def _interim(content):
     return {
         "data": {"type": "interim_transcript_received", "content": content},
         "meta_info": {"io": "freeswitch", "sequence_id": 2},
+    }
+
+
+def _final(content, was_eager=False):
+    return {
+        "data": {"type": "transcript", "content": content, "was_eager": was_eager},
+        "meta_info": {"io": "plivo", "sequence_id": 2},
     }
 
 
@@ -53,25 +61,39 @@ def _make_tm(*, history, audio_playing, response_in_pipeline=False, regen_armed=
     tm.interruption_manager.should_trigger_interruption = MagicMock(return_value=True)
     # production: the repeat landed 1.0s after the final
     tm.interruption_manager.get_time_since_utterance_end = MagicMock(return_value=ms_since_final)
+    tm.interruption_manager.is_false_interruption = MagicMock(return_value=False)
     tm._TaskManager__cleanup_downstream_tasks = AsyncMock()
     tm._end_call_on_component_error = AsyncMock()
+    tm._maybe_update_tts_language = AsyncMock()
+    tm._report_component_health = AsyncMock()
+    tm._handle_transcriber_output = AsyncMock()
+    tm.eager_llm_task = None
     tm.task_config = {"tools_config": {"transcriber": {"provider": "deepgram"}}}
     tm._should_ignore_transcriber_input = TaskManager._should_ignore_transcriber_input.__get__(tm, TaskManager)
+    tm._is_redelivered_transcript = TaskManager._is_redelivered_transcript.__get__(tm, TaskManager)
     tm._listen_transcriber = TaskManager._listen_transcriber.__get__(tm, TaskManager)
     return tm
 
 
-async def _drive(tm, *contents):
-    for content in contents:
-        await tm.transcriber_output_queue.put(_interim(content))
+async def _run(tm, *messages):
+    for message in messages:
+        await tm.transcriber_output_queue.put(message)
     try:
         await asyncio.wait_for(tm._listen_transcriber(), timeout=0.3)
     except asyncio.TimeoutError:
         pass
 
 
+async def _drive(tm, *contents):
+    await _run(tm, *(_interim(content) for content in contents))
+
+
 def _barged_in(tm):
     return tm._TaskManager__cleanup_downstream_tasks.await_count > 0
+
+
+def _took_new_turn(tm):
+    return tm._handle_transcriber_output.await_count > 0
 
 
 async def test_repeat_of_answered_question_while_reply_plays_does_not_barge_in():
@@ -122,6 +144,44 @@ async def test_existing_guard_before_first_audio_still_skips():
     await _drive(tm, QUESTION)
     assert not _barged_in(tm)
     tm.interruption_manager.should_trigger_interruption.assert_not_called()
+
+
+async def test_late_final_of_answered_turn_while_reply_plays_is_skipped():
+    # production: the turn was force-finalized from its last interim, and Deepgram's own final
+    # for the same words landed 1.6s later, just after the reply started playing
+    tm = _make_tm(history=_history(), audio_playing=True, ms_since_final=1600)
+    await _run(tm, _final(f" {QUESTION}"))
+    assert not _took_new_turn(tm)
+    # the skipped final must not move the caller's stop time or the grace period anchor
+    tm.interruption_manager.on_user_speech_ended.assert_called_once_with(update_utterance_time=False)
+
+
+async def test_late_final_before_reply_audio_is_skipped():
+    tm = _make_tm(history=_history(reply_committed=False), audio_playing=False, response_in_pipeline=True)
+    await _run(tm, _final(f" {QUESTION}"))
+    assert not _took_new_turn(tm)
+
+
+async def test_final_with_new_words_while_reply_plays_is_a_new_turn():
+    tm = _make_tm(history=_history(), audio_playing=True, ms_since_final=1600)
+    await _run(tm, _final(" no wait I meant tomorrow"))
+    assert _took_new_turn(tm)
+
+
+async def test_final_repeat_long_after_the_last_final_is_a_new_turn():
+    tm = _make_tm(history=_history(), audio_playing=True, ms_since_final=3000)
+    await _run(tm, _final(f" {QUESTION}"))
+    assert _took_new_turn(tm)
+
+
+async def test_end_of_turn_confirming_eager_reply_still_promotes_it():
+    # the eager path already appended this text as the last user row and has a reply in flight
+    tm = _make_tm(history=_history(reply_committed=False), audio_playing=False, response_in_pipeline=True)
+    eager_task = MagicMock()
+    tm.eager_llm_task = eager_task
+    tm.eager_meta_info = {"sequence_id": 2}
+    await _run(tm, _final(f" {QUESTION}", was_eager=True))
+    assert tm.llm_task is eager_task
 
 
 class TestRepeatsLastUserTurn:

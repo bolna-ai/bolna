@@ -38,6 +38,8 @@ def _make_tm(*, audio_playing, response_in_pipeline, function_call_in_flight=Fal
     tm.tools["input"].welcome_message_played = MagicMock(return_value=True)
     tm.tools["input"].is_audio_being_played_to_user = MagicMock(return_value=audio_playing)
     tm.interruption_manager = InterruptionManager(number_of_words_for_interruption=2)
+    tm.conversation_history.is_duplicate_user = MagicMock(return_value=False)
+    tm.conversation_history.repeats_last_user_turn = MagicMock(return_value=False)
     tm._maybe_update_tts_language = AsyncMock()
     tm._handle_transcriber_output = AsyncMock()
     tm._TaskManager__get_updated_meta_info = MagicMock(side_effect=lambda m: m)
@@ -46,6 +48,7 @@ def _make_tm(*, audio_playing, response_in_pipeline, function_call_in_flight=Fal
     tm._report_component_health = AsyncMock()
     tm.task_config = {"tools_config": {"transcriber": {"provider": "deepgram"}}}
     tm._should_ignore_transcriber_input = TaskManager._should_ignore_transcriber_input.__get__(tm, TaskManager)
+    tm._is_redelivered_transcript = TaskManager._is_redelivered_transcript.__get__(tm, TaskManager)
     tm._listen_transcriber = TaskManager._listen_transcriber.__get__(tm, TaskManager)
     return tm
 

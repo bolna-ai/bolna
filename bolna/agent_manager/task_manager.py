@@ -5481,6 +5481,17 @@ class TaskManager(BaseManager):
         """True while the settle-window timer is pending — a generation is owed for this turn."""
         return self.regen_settle_task is not None and not self.regen_settle_task.done()
 
+    def _is_redelivered_transcript(self, transcript: str) -> bool:
+        """True when the transcriber re-sends the caller's last turn: not new speech, even while its reply plays."""
+        return (
+            (self.response_in_pipeline or self.regen_settle_armed())
+            and self.conversation_history.is_duplicate_user(transcript)
+        ) or (
+            self.tools["input"].is_audio_being_played_to_user()
+            and self.conversation_history.repeats_last_user_turn(transcript)
+            and 0 <= self.interruption_manager.get_time_since_utterance_end() < REDELIVERED_TRANSCRIPT_WINDOW_MS
+        )
+
     def regen_settle_can_fire(self):
         """False for excluded transcribers: no final can land inside the window, so waiting only costs."""
         transcriber = self.tools.get("transcriber")
@@ -5828,17 +5839,7 @@ class TaskManager(BaseManager):
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
                         transcript_content = message["data"].get("content", "")
 
-                        # Re-delivery of an already-processed transcript isn't new speech, even while its reply plays.
-                        if (
-                            (self.response_in_pipeline or self.regen_settle_armed())
-                            and self.conversation_history.is_duplicate_user(transcript_content)
-                        ) or (
-                            self.tools["input"].is_audio_being_played_to_user()
-                            and self.conversation_history.repeats_last_user_turn(transcript_content)
-                            and 0
-                            <= self.interruption_manager.get_time_since_utterance_end()
-                            < REDELIVERED_TRANSCRIPT_WINDOW_MS
-                        ):
+                        if self._is_redelivered_transcript(transcript_content):
                             logger.info(
                                 "Skipping interruption: Deepgram late delivery of already-processing transcript: %s",
                                 transcript_content,
@@ -6007,6 +6008,16 @@ class TaskManager(BaseManager):
                             self.response_in_pipeline,
                             safe_log_text(transcript_content),
                         )
+
+                        # An EndOfTurn confirming an eager turn carries that turn's text by design.
+                        if not message["data"].get("was_eager") and self._is_redelivered_transcript(transcript_content):
+                            logger.info(
+                                "Skipping speech final: late delivery of already-processed transcript: %s",
+                                transcript_content,
+                            )
+                            self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
+                            self._speech_started_before_welcome = False
+                            continue
 
                         # response_in_pipeline deliberately not counted: with no audio playing yet, a short
                         # speech_final is a split-utterance tail — _handle_transcriber_output merges it.

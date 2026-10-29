@@ -128,6 +128,7 @@ def _make_tm(
     tm._end_call_on_component_error = AsyncMock()
     tm.task_config = {"tools_config": {"transcriber": {"provider": "deepgram"}}}
     tm._should_ignore_transcriber_input = TaskManager._should_ignore_transcriber_input.__get__(tm, TaskManager)
+    tm._is_redelivered_transcript = TaskManager._is_redelivered_transcript.__get__(tm, TaskManager)
     tm._listen_transcriber = TaskManager._listen_transcriber.__get__(tm, TaskManager)
     return tm
 
