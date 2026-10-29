@@ -110,8 +110,9 @@ class DeepgramTranscriber(BaseTranscriber):
         self.speech_end_time = None
         self._turn_first_speech_epoch_ms = None  # epoch ms of first SpeechStarted per turn
         self._turn_pending = False  # True after SpeechStarted until first real interim confirms speech
-        # Deepgram audio seconds where the latest transcribed word ended.
+        # Deepgram audio seconds where the latest transcribed word ended, in any frame and in an is_final frame.
         self.latest_word_end = None
+        self.latest_final_word_end = None
         # Audio already sent as a force-finalized turn; Deepgram's own final for it must not open a second turn.
         self.force_finalized_until = None
         self.current_turn_interim_details = []
@@ -418,7 +419,10 @@ class DeepgramTranscriber(BaseTranscriber):
 
         # Send to queue (unblocks _listen_transcriber)
         await self.push_to_transcriber_queue(create_ws_data_packet(data, self.meta_info))
-        self.force_finalized_until = self.latest_word_end
+        # Sent finals leave out the trailing interim, whose words Deepgram must still deliver.
+        self.force_finalized_until = (
+            self.latest_final_word_end if self.final_transcript.strip() else self.latest_word_end
+        )
 
         # Reset state (same as normal UtteranceEnd)
         self._reset_turn_state()
@@ -725,6 +729,8 @@ class DeepgramTranscriber(BaseTranscriber):
                         self.force_finalized_until = None
                     if words:
                         self.latest_word_end = words[-1]["end"]
+                        if msg.get("is_final"):
+                            self.latest_final_word_end = words[-1]["end"]
 
                     if transcript.strip():
                         if self._turn_pending:
@@ -1278,6 +1284,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.reset_audio_frame_state()
         self.reset_billed_audio()
         self.latest_word_end = None
+        self.latest_final_word_end = None
         self.force_finalized_until = None
         try:
             start_time = timestamp_ms()

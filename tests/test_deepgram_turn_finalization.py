@@ -290,3 +290,19 @@ def test_reconnect_forgets_the_force_finalized_audio_span():
     later = asyncio.run(scenario())
 
     assert _transcripts(later) == [" hello"]
+
+
+def test_interim_words_left_out_of_a_force_finalize_still_reach_the_llm():
+    q = asyncio.Queue()
+    t = _make_nova(output_queue=q)
+
+    async def scenario():
+        await _drain(t, [_spoken("inr seven lakhs", 65.5, 66.8, is_final=True), _spoken("fifty thousand", 66.9, 68.0)])
+        # Finals were received, so only they are sent; the trailing interim is not.
+        await t._force_finalize_utterance()
+        return await _drain(t, [_spoken("fifty thousand", 66.92, 68.03, is_final=True, speech_final=True)])
+
+    later = asyncio.run(scenario())
+
+    assert q.get_nowait()["data"]["content"] == "inr seven lakhs"
+    assert _transcripts(later) == [" fifty thousand"]
