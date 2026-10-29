@@ -20,6 +20,8 @@ from bolna.helpers.utils import (
     render_prompt,
     enrich_context_with_time_variables,
     get_md5_hash,
+    is_mid_call_update_row,
+    is_mid_call_update_turn,
     select_message_by_language,
     static_node_ends_call,
 )
@@ -799,10 +801,19 @@ class GraphAgent(BaseAgent):
     def _compute_turn_counts(self, history: list) -> tuple:
         """Count (node_turns, total_turns) from history. A node just entered this
         turn (entry_index == len(history), as during a router hop) has 0 node turns."""
-        total_turns = sum(1 for msg in history if msg.get("role") == "user")
+        total_turns = sum(1 for msg in history if self._is_caller_turn(msg))
         node_history = history[self.current_node_entry_index :]
-        node_turns = sum(1 for msg in node_history if msg.get("role") == "user")
+        node_turns = sum(1 for msg in node_history if self._is_caller_turn(msg))
         return node_turns, total_turns
+
+    @staticmethod
+    def _is_caller_turn(msg: dict) -> bool:
+        """A user row the caller said; mid-call update notes come from an external system."""
+        return msg.get("role") == "user" and not is_mid_call_update_row(msg)
+
+    def is_on_router(self) -> bool:
+        """The current node is a router, which routes on the next turn's text."""
+        return self._node_type_of(self.get_node_by_id(self.current_node_id)) == NodeType.ROUTER
 
     def _enrich_routing_context(self, history: list) -> None:
         """Refresh time variables and turn counts in context_data for expression evaluation."""
@@ -1051,7 +1062,7 @@ class GraphAgent(BaseAgent):
             and not self._active_node_first_response_delivered
         )
 
-    def _hold_routing_info(self, is_silence_trigger: bool) -> dict:
+    def _hold_routing_info(self, is_silence_trigger: bool, reason: str = "first_response_undelivered") -> dict:
         return {
             "previous_node": self.current_node_id,
             "current_node": self.current_node_id,
@@ -1065,7 +1076,7 @@ class GraphAgent(BaseAgent):
             "node_history": list(self.node_history),
             "routing_messages": None,
             "routing_tools": None,
-            "reasoning": f"{_DETERMINISTIC_REASONING_PREFIX}hold:first_response_undelivered",
+            "reasoning": f"{_DETERMINISTIC_REASONING_PREFIX}hold:{reason}",
             "confidence": 1.0,
             "node_type": self._node_type_of(self.get_node_by_id(self.current_node_id)),
             "is_silence_trigger": is_silence_trigger,
@@ -1169,17 +1180,18 @@ class GraphAgent(BaseAgent):
                 elif role == "tool":
                     content = msg.get("content", "")
                     messages.append({"role": "tool", "tool_call_id": msg.get("tool_call_id", ""), "content": content})
-                elif role == "user" and msg.get("content"):
+                elif self._is_caller_turn(msg) and msg.get("content"):
                     messages.append({"role": "user", "content": msg["content"]})
         else:
             for msg in node_history:
                 role = msg.get("role")
                 content = msg.get("content")
-                if role in ("user", "assistant") and content:
+                if (role == "assistant" or self._is_caller_turn(msg)) and content:
                     messages.append({"role": role, "content": content})
 
         if len(messages) == 1:
-            user_message = history[-1].get("content", "") if history else ""
+            last = history[-1] if history else None
+            user_message = last.get("content", "") if last and not is_mid_call_update_row(last) else ""
             if user_message:
                 messages.append({"role": "user", "content": user_message})
 
@@ -1488,7 +1500,8 @@ class GraphAgent(BaseAgent):
     async def _stream_node_reply(self, node_llm, node, messages, meta_info, synthesize, tool_choice, tools):
         """Stream the node's reply; on an end_call node's closing turn, flag it so the task manager
         hangs up once the reply has played."""
-        ends_call = self._ends_call(node)
+        # A mid-call update turn answers an external system, never the caller's goodbye.
+        ends_call = self._ends_call(node) and not is_mid_call_update_turn(meta_info)
         if ends_call:
             # A chained Responses request does not resend the system prompt, which carries the closing instruction.
             node_llm.invalidate_response_chain()
@@ -1543,7 +1556,7 @@ class GraphAgent(BaseAgent):
             node_prompt = update_prompt_with_context(node_prompt, prompt_context)
         # The call ends after this reply, so a question here would be cut off by the hangup. Part of the
         # system prompt, not its own message: Gemini keeps only the last system message.
-        if self._ends_call(current_node):
+        if self._ends_call(current_node) and not is_mid_call_update_turn(meta_info):
             node_prompt = f"{node_prompt}\n\n{_END_NODE_INSTRUCTION}"
 
         if self.agent_information:
@@ -1562,7 +1575,8 @@ class GraphAgent(BaseAgent):
         # than the system prompt, keeping [system + history] a cacheable prefix.
         rag_message = None
         rag_config = self.rag_configs.get(self.current_node_id) or self.global_rag_config
-        if rag_config and rag_config.get("collections"):
+        # An update note is no caller question to search on.
+        if rag_config and rag_config.get("collections") and not (history and is_mid_call_update_row(history[-1])):
             try:
                 client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
                 latest_message = history[-1]["content"] if history else ""
@@ -1705,13 +1719,19 @@ class GraphAgent(BaseAgent):
             is_silence_trigger = bool(message and message[-1].get("content", "").startswith("[silence]"))
             if is_silence_trigger:
                 self._silence_repeats += 1
+            is_mid_call_update = bool(message and is_mid_call_update_row(message[-1]))
 
             # Entry-node dispatch: the turn begins on a router start node. Resolve it
             # and let the resolved node speak this turn — do NOT re-route it through
             # decide_next (that would stack another routing call and could transition it
             # away before it speaks, unlike a router reached mid-turn by a transition).
             active_node = self.get_node_by_id(self.current_node_id)
-            if self._node_type_of(active_node) == NodeType.ROUTER:
+            if is_mid_call_update:
+                # An external update is context for the current node, never a reason to leave it; the task
+                # manager holds updates while a router is current, so a router here only goes quiet.
+                logger.info(f"Mid-call update on node '{self.current_node_id}'; holding, not routing")
+                yield {"routing_info": self._hold_routing_info(is_silence_trigger, reason="mid_call_update")}
+            elif self._node_type_of(active_node) == NodeType.ROUTER:
                 for hop in await self._resolve_router_chain(message):
                     yield {"routing_info": hop}
             elif self._should_hold_for_first_delivery(active_node):
@@ -1795,6 +1815,9 @@ class GraphAgent(BaseAgent):
             messages = await self._build_messages(message, meta_info=meta_info)
             yield {"messages": messages}
             tool_choice = self._get_tool_choice_for_node(history=message)
+            if is_mid_call_update_turn(meta_info):
+                # Website text started this turn, never the caller: reply, but call no tool.
+                tool_choice = "none"
             forced_name = tool_choice["function"]["name"] if isinstance(tool_choice, dict) else None
             node_tools = self._tools_for_node(current_node, forced_name)
             node_llm = self._conversation_llm_for(current_node)

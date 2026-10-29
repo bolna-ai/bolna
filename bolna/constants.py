@@ -92,6 +92,26 @@ STALL_HANGUP_HARD_CAP_S = 60.0
 # speech and restarts the silence clock, so without a cap a node re-prompt shorter than
 # hangup_after_silence keeps a silent caller on the line until the max call duration.
 DEFAULT_MAX_SILENCE_REPEATS = 2
+# Mid-call updates: an external system working for the caller (e.g. a browser filling a form)
+# sends events the agent must hear. Their fields ride under MID_CALL_UPDATE_PROPERTY, so a
+# customer's own event properties are never taken for one. Each reaches the LLM as a hidden note
+# starting with MID_CALL_UPDATE_PREFIX, marked on its history row by MID_CALL_UPDATE_CATEGORY, in a
+# turn flagged by MID_CALL_UPDATE_META_KEY that calls no tools: the note is website text, never the
+# caller. While updates arrive, the silence checks hold for the grace window.
+MID_CALL_UPDATE_PROPERTY = "bolna_mid_call_update"
+MID_CALL_UPDATE_CATEGORY = "mid_call_update"
+MID_CALL_UPDATE_META_KEY = "mid_call_update"
+MID_CALL_UPDATE_PREFIX = "[update:"
+MID_CALL_UPDATE_EVENT_PATTERN = r"[a-z][a-z0-9_]{0,39}"
+MID_CALL_UPDATE_MAX_CHARS = 600
+MID_CALL_ACTIVITY_GRACE_S = 30.0
+MID_CALL_UPDATE_POLL_S = 0.2
+# A pending update waits for this much quiet on both sides, so it never talks over a caller's answer.
+MID_CALL_UPDATE_QUIET_S = 1.5
+# An update the caller spoke over before hearing any of it is said again, this many times at most.
+MID_CALL_UPDATE_MAX_TRIES = 3
+# Updates hold the silence checks for at most this long past the last real speech.
+MID_CALL_MAX_HOLD_S = 120.0
 # Max time to wait for one LLM reply (_run_llm_task). If the LLM never comes back - no reply,
 # no error, it just hangs - force it to fail after this many seconds and hang up, instead of
 # leaving the call stuck forever. BOLNA-2563.

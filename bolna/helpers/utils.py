@@ -31,6 +31,8 @@ from bolna.constants import (
     PRE_FUNCTION_CALL_MESSAGE,
     TRANSFERING_CALL_FILLER,
     END_CALL_FUNCTION_PREFIX,
+    MID_CALL_UPDATE_CATEGORY,
+    MID_CALL_UPDATE_META_KEY,
 )
 from bolna.enums import LogComponent, LogDirection, SynthesizerProvider, UsageSource
 from bolna.prompts import DATE_PROMPT
@@ -484,6 +486,16 @@ def is_s2s_agent(task):
     if not isinstance(task, dict):
         return False
     return bool((task.get("tools_config") or {}).get("s2s"))
+
+
+def is_mid_call_update_row(message) -> bool:
+    """A history row holding a mid-call update note. Marked by its category, which no caller row can carry."""
+    return isinstance(message, dict) and message.get("message_category") == MID_CALL_UPDATE_CATEGORY
+
+
+def is_mid_call_update_turn(meta_info) -> bool:
+    """A turn started by a mid-call update rather than by the caller."""
+    return bool(meta_info and meta_info.get(MID_CALL_UPDATE_META_KEY))
 
 
 def format_messages(messages, use_system_prompt=False, include_tools=False):

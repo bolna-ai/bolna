@@ -61,6 +61,7 @@ def _make_tm(mode, *, has_transfer, provider="trunk"):
     tm.last_transmitted_timestamp = time.time() - cfg["silent_for"]
     tm.time_since_last_spoken_human_word = time.time() - cfg["silent_for"]
     tm.hangup_triggered = False
+    tm.external_activity_until = 0.0
     tm.has_transfer = has_transfer
     tm._trunk_transfer_refused = False
     tm.llm_task = None

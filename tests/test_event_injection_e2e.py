@@ -215,6 +215,11 @@ def _make_task_manager(agent=None, **overrides):
     tm._end_of_conversation_in_progress = False
     tm.hangup_detail = None
     tm.event_listener_task = None
+    tm.mid_call_events = False
+    tm.mid_call_update_task = None
+    tm.pending_mid_call_updates = {}
+    tm.mid_call_update_signal = asyncio.Event()
+    tm.external_activity_until = 0.0
 
     for k, v in overrides.items():
         setattr(tm, k, v)
