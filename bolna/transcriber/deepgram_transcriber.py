@@ -110,6 +110,10 @@ class DeepgramTranscriber(BaseTranscriber):
         self.speech_end_time = None
         self._turn_first_speech_epoch_ms = None  # epoch ms of first SpeechStarted per turn
         self._turn_pending = False  # True after SpeechStarted until first real interim confirms speech
+        # Deepgram audio seconds where the latest transcribed word ended.
+        self.latest_word_end = None
+        # Audio already sent as a force-finalized turn; Deepgram's own final for it must not open a second turn.
+        self.force_finalized_until = None
         self.current_turn_interim_details = []
         self.audio_frame_timestamps = []  # List of (frame_start, frame_end, send_timestamp)
         # Wall-clock epoch-ms send time of the audio behind the latest transcript content
@@ -414,6 +418,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
         # Send to queue (unblocks _listen_transcriber)
         await self.push_to_transcriber_queue(create_ws_data_packet(data, self.meta_info))
+        self.force_finalized_until = self.latest_word_end
 
         # Reset state (same as normal UtteranceEnd)
         self._reset_turn_state()
@@ -705,6 +710,21 @@ class DeepgramTranscriber(BaseTranscriber):
                 elif msg["type"] == "Results":
                     transcript = msg["channel"]["alternatives"][0]["transcript"]
                     deepgram_request_id = msg.get("metadata", {}).get("request_id")
+                    words = msg["channel"]["alternatives"][0].get("words") or []
+                    if words and self.force_finalized_until is not None:
+                        if all(word["start"] < self.force_finalized_until for word in words):
+                            logger.info(
+                                "Dropping Deepgram re-delivery of force-finalized audio: %r (ends %s, sent up to %s)",
+                                transcript,
+                                words[-1]["end"],
+                                self.force_finalized_until,
+                            )
+                            if msg.get("speech_final"):
+                                self.force_finalized_until = None
+                            continue
+                        self.force_finalized_until = None
+                    if words:
+                        self.latest_word_end = words[-1]["end"]
 
                     if transcript.strip():
                         if self._turn_pending:
@@ -1257,6 +1277,8 @@ class DeepgramTranscriber(BaseTranscriber):
         # map new positions onto old wall-clock times.
         self.reset_audio_frame_state()
         self.reset_billed_audio()
+        self.latest_word_end = None
+        self.force_finalized_until = None
         try:
             start_time = timestamp_ms()
             try:

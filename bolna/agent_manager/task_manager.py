@@ -2755,6 +2755,10 @@ class TaskManager(BaseManager):
                                 response_heard = ""
                                 logger.info(f"turn_id={t_id}: nothing heard")
 
+            # The duplicate check must compare a regenerated reply with what the caller heard, not what was sent.
+            if self._last_spoken_assistant and self._last_spoken_assistant[0] == target_turn_id:
+                self._last_spoken_assistant = (target_turn_id, response_heard) if response_heard else None
+
             if target_response_uid is not None and response_heard:
                 logger.info(
                     f"sync_history: materializing assistant turn from heard audio | turn_id={target_turn_id} response_uid={target_response_uid} "
@@ -2808,6 +2812,9 @@ class TaskManager(BaseManager):
             self.regen_settle_task.cancel()
         self.regen_settle_payload = None
         await self.tools["output"].handle_interruption()
+        # That cleared the pending final-chunk mark, whose echo is the only other thing that turns this flag off.
+        if self.tools["input"].is_audio_being_played_to_user():
+            self.tools["input"].update_is_audio_being_played(False, AudioPlaybackReason.DOWNSTREAM_CLEANUP)
         # Before handle_interruption, which may itself drop the open turn's timer without recording it.
         self.tools["synthesizer"].abandon_open_turn()
         await self.tools["synthesizer"].handle_interruption()

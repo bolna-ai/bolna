@@ -376,3 +376,59 @@ async def test_a_caller_repeating_themselves_after_the_reply_played_is_answered_
 
 async def test_a_restatement_of_a_final_that_overlapped_the_reply_is_still_suppressed():
     assert await _second_identical_exchange(reply_in_flight=True) is True
+
+
+# The caller's sentence was finalized twice. The second final cut the first reply 10ms in, before any of it was
+# heard, and the regen produced the same reply. Suppressing it as "already spoken" left the caller in silence.
+SAID_ONCE = "inr seven lakhs fifty thousand"
+NEXT_QUESTION = "Got it. Could you please share your expected annual compensation in lakhs per annum?"
+
+
+class _NothingAckedYet:
+    def get_heard_text_for_response(self, _uid):
+        return ""
+
+    def get_heard_text_for_turn(self, _turn_id):
+        return ""
+
+
+async def _reply_cut_then_regenerated(heard):
+    tm = _live_manager()
+    tm.tools["input"].get_response_heard_for_response.return_value = heard
+    tm.tools["input"].get_response_heard_for_turn.return_value = heard
+    tm.mark_event_meta_data = _NothingAckedYet()
+    tm._active_llm_client = lambda: None
+
+    first = await _caller_says(tm, SAID_ONCE, turn=4, reply_in_flight=False)
+    TaskManager._stage_assistant_history(tm, first, NEXT_QUESTION)
+    TaskManager._commit_staged_assistant_history(tm, 4)
+
+    # The re-final's cleanup cuts the reply: its first chunk is still unplayed.
+    sent_at = 1000.0
+    unplayed = [
+        (
+            "m1",
+            {
+                "type": "",
+                "text_synthesized": "Got it.",
+                "turn_id": 4,
+                "sequence_id": 4,
+                "response_uid": "r4",
+                "duration": 0.6,
+                "sent_ts": sent_at,
+            },
+        )
+    ]
+    await tm.sync_history(unplayed, interruption_processed_at=sent_at)
+
+    second = await _caller_says(tm, " " + SAID_ONCE, turn=5, reply_in_flight=True)
+    TaskManager._stage_assistant_history(tm, second, NEXT_QUESTION)
+    return _is_duplicate(tm, 5, second)
+
+
+async def test_a_regen_of_a_reply_cut_before_it_was_heard_is_spoken():
+    assert await _reply_cut_then_regenerated(heard="") is False
+
+
+async def test_a_regen_of_a_reply_the_caller_heard_is_still_suppressed():
+    assert await _reply_cut_then_regenerated(heard=NEXT_QUESTION) is True

@@ -188,3 +188,105 @@ def test_new_speech_after_speech_final_carries_only_the_new_words():
     asyncio.run(scenario())
 
     assert q.get_nowait()["data"]["content"] == "actually never mind"
+
+
+def _spoken(transcript, start, end, is_final=False, speech_final=False):
+    """A Results frame with per-word timings, as Nova sends them."""
+    tokens = transcript.split()
+    step = (end - start) / len(tokens)
+    words = [
+        {"word": w, "start": round(start + i * step, 3), "end": round(start + (i + 1) * step, 3)}
+        for i, w in enumerate(tokens)
+    ]
+    return json.dumps(
+        {
+            "type": "Results",
+            "channel": {"alternatives": [{"transcript": transcript, "words": words}]},
+            "is_final": is_final,
+            "speech_final": speech_final,
+            "start": start,
+            "duration": end - start,
+            "metadata": {"request_id": "test-request"},
+        }
+    )
+
+
+SAID_ONCE = "inr seven lakhs fifty thousand"
+
+
+def _interims(packets):
+    return [
+        p["data"]["content"]
+        for p in packets
+        if isinstance(p["data"], dict) and p["data"].get("type") == "interim_transcript_received"
+    ]
+
+
+def _force_finalized_then(frames):
+    """The caller's sentence stalls in interims, the timeout force-finalizes it, then `frames` arrive."""
+    q = asyncio.Queue()
+    t = _make_nova(output_queue=q)
+
+    async def scenario():
+        await _drain(t, [_spoken(SAID_ONCE, 65.5, 68.0)])
+        await t._force_finalize_utterance()
+        return await _drain(t, frames)
+
+    later = asyncio.run(scenario())
+    forced = [q.get_nowait()["data"]["content"] for _ in range(q.qsize())]
+    return t, forced, later
+
+
+def test_deepgram_redelivering_a_force_finalized_sentence_is_not_a_second_turn():
+    t, forced, later = _force_finalized_then(
+        [
+            _spoken(SAID_ONCE, 65.5, 68.0),
+            json.dumps({"type": "SpeechStarted", "timestamp": 68.2}),
+            _spoken(SAID_ONCE, 65.52, 68.05, is_final=True, speech_final=True),
+        ]
+    )
+
+    assert forced == [SAID_ONCE]
+    assert _interims(later) == []
+    assert _transcripts(later) == []
+    assert t.turn_counter == 1
+    assert t.force_finalized_until is None
+
+
+def test_new_words_after_a_force_finalize_open_a_new_turn():
+    t, forced, later = _force_finalized_then(
+        [_spoken("rupees per annum", 68.4, 69.2, is_final=True, speech_final=True)]
+    )
+
+    assert forced == [SAID_ONCE]
+    assert _transcripts(later) == [" rupees per annum"]
+    assert t.turn_counter == 2
+
+
+def test_a_redelivery_that_adds_new_words_is_handled_as_before():
+    t, forced, later = _force_finalized_then(
+        [_spoken(SAID_ONCE + " rupees", 65.5, 68.6, is_final=True, speech_final=True)]
+    )
+
+    assert _transcripts(later) == [" " + SAID_ONCE + " rupees"]
+    assert t.force_finalized_until is None
+
+
+def test_reconnect_forgets_the_force_finalized_audio_span():
+    q = asyncio.Queue()
+    t = _make_nova(output_queue=q)
+
+    async def fail_connect():
+        raise ConnectionError("down")
+
+    async def scenario():
+        await _drain(t, [_spoken(SAID_ONCE, 65.5, 68.0)])
+        await t._force_finalize_utterance()
+        t.deepgram_connect = fail_connect
+        await t.transcribe()
+        # Audio positions restart at 0 on the new socket.
+        return await _drain(t, [_spoken("hello", 1.0, 1.4, is_final=True, speech_final=True)])
+
+    later = asyncio.run(scenario())
+
+    assert _transcripts(later) == [" hello"]
