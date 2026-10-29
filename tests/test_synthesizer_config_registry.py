@@ -92,6 +92,7 @@ EXPECTED_FIELDS = {
         "audio_quality": False,
         "chunk_length_schedule": False,
     },
+    "navana": {"voice": True, "voice_id": True, "model": True, "language": True},
     "custom": {"voice": True, "model": True, "speed": False},
 }
 
