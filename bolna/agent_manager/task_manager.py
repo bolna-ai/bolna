@@ -2306,7 +2306,6 @@ class TaskManager(BaseManager):
                 self.language,
                 self.language,
             )
-            logger.info(f"###[Enriched prompt]: {enriched_prompt=}")
 
             notes = ""
             if self._is_conversation_task() and self.use_fillers:
@@ -2337,7 +2336,6 @@ class TaskManager(BaseManager):
                     lang_code,
                     self.language,
                 )
-                logger.info(f"###[Enriched multilingual prompt]: {enriched=}, {lang_code=}")
                 notes = ""
                 if self._is_conversation_task() and self.use_fillers:
                     notes = "### Note:\n"
