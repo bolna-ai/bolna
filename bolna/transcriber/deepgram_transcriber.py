@@ -741,10 +741,13 @@ class DeepgramTranscriber(BaseTranscriber):
                                     "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
                                 }
                             )
-                        if self.current_turn_first_word_start is None:
-                            words = msg["channel"]["alternatives"][0].get("words") or []
-                            if words:
-                                self.current_turn_first_word_start = words[0].get("start")
+                        # The earliest start: a final can move the first word earlier than its interim had it.
+                        first_word_start = self.first_word_start(msg)
+                        if first_word_start is not None and (
+                            self.current_turn_first_word_start is None
+                            or first_word_start < self.current_turn_first_word_start
+                        ):
+                            self.current_turn_first_word_start = first_word_start
                         # Calculate latency using end position (start + duration) for cumulative transcripts
                         self.__set_transcription_cursor(msg)
                         audio_position_end = self.transcription_cursor
@@ -787,6 +790,9 @@ class DeepgramTranscriber(BaseTranscriber):
                             len(self.final_transcript.strip()),
                             transcript[:80],
                         )
+                    elif msg["is_final"] and not self.final_transcript.strip():
+                        # The turn's words were finalized to nothing (noise), so a late UtteranceEnd may close it.
+                        self.current_turn_first_word_start = None
 
                     if msg["speech_final"] and self.final_transcript.strip():
                         if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
@@ -1206,13 +1212,20 @@ class DeepgramTranscriber(BaseTranscriber):
             pass
         return None
 
+    def first_word_start(self, data):
+        """Deepgram audio seconds when the first transcribed word began, or None."""
+        for alternative in (data.get("channel") or {}).get("alternatives") or []:
+            words = alternative.get("words") or []
+            if words:
+                return words[0].get("start")
+        return None
+
     def first_word_start_wall(self, data):
         """Wall-clock seconds when the first transcribed word began, or None: the turn's speech onset."""
         try:
-            for alternative in (data.get("channel") or {}).get("alternatives") or []:
-                words = alternative.get("words") or []
-                if words:
-                    return self.audio_position_wall_time(words[0]["start"])
+            start = self.first_word_start(data)
+            if start is not None:
+                return self.audio_position_wall_time(start)
         except Exception:
             pass
         return None

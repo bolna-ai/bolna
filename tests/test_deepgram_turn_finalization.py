@@ -331,3 +331,62 @@ def test_reconnect_forgets_the_old_sockets_word_times():
     )
 
     assert _speech_ended_count(packets) == 1
+
+
+def test_noise_deepgram_withdraws_is_closed_by_the_late_utterance_end():
+    t = _make_nova()
+
+    packets = asyncio.run(
+        _drain(
+            t,
+            [
+                _spoken("ten", 93.9, 94.3, is_final=True, speech_final=True),
+                _spoken("uh", 97.6, 97.8),
+                # The final for that window is empty: the "uh" was noise.
+                _results("", is_final=True, start=97.4, duration=0.6),
+                json.dumps({"type": "UtteranceEnd", "last_word_end": 94.3}),
+            ],
+        )
+    )
+
+    assert _speech_ended_count(packets) == 1
+    assert _transcripts(packets) == [" ten"]
+    assert _force_finalize_guard_passes(t) is False
+
+
+def test_an_utterance_end_already_finalized_by_deepgram_does_not_close_the_turn():
+    t = _make_nova()
+
+    packets = asyncio.run(
+        _drain(
+            t,
+            [
+                _spoken("ten", 93.9, 94.3, is_final=True, speech_final=True),
+                _spoken("on", 97.6, 97.8),
+                # Deepgram marks a stale UtteranceEnd with last_word_end -1.
+                json.dumps({"type": "UtteranceEnd", "last_word_end": -1}),
+                _spoken("on the table", 97.6, 98.9, is_final=True, speech_final=True),
+            ],
+        )
+    )
+
+    assert _speech_ended_count(packets) == 0
+    assert _transcripts(packets) == [" ten", " on the table"]
+
+
+def test_a_final_that_moves_the_first_word_earlier_still_lets_its_utterance_end_close_the_turn():
+    t = _make_nova()
+
+    packets = asyncio.run(
+        _drain(
+            t,
+            [
+                _spoken("ten", 93.9, 94.3, is_final=True, speech_final=True),
+                _spoken("yes", 97.9, 98.1),
+                _spoken("yes", 97.6, 97.8, is_final=True),
+                json.dumps({"type": "UtteranceEnd", "last_word_end": 97.8}),
+            ],
+        )
+    )
+
+    assert _transcripts(packets) == [" ten", " yes"]
