@@ -84,7 +84,7 @@ class ConversationHistory:
                 if msgs[i].get("role") == ChatRole.ASSISTANT and msgs[i].get("turn_id") == turn_id:
                     msgs[i]["content"] = content
                     return
-        msgs.append(self.with_node({"role": ChatRole.ASSISTANT, "content": content, "turn_id": turn_id}))
+        msgs.append({"role": ChatRole.ASSISTANT, "content": content, "turn_id": turn_id})
 
     def upsert_assistant_for_response(
         self,
@@ -92,8 +92,9 @@ class ConversationHistory:
         content: str,
         interim: bool = False,
         turn_id: int | None = None,
-        node: str | None = None,
+        **stamps,
     ):
+        """stamps (node, sequence_id): what a message it adopts or adds is stamped with, as a commit stamps one."""
         msgs = self._interim if interim else self._messages
         if response_uid is not None:
             for i in range(len(msgs) - 1, -1, -1):
@@ -114,11 +115,12 @@ class ConversationHistory:
                 ):
                     msgs[i]["content"] = content
                     msgs[i]["response_uid"] = response_uid
+                    msgs[i].update(stamps)
                     return
         msgs.append(
             self.with_node(
                 {"role": ChatRole.ASSISTANT, "content": content, "turn_id": turn_id, "response_uid": response_uid}
-                | ({"node": node} if node else {})
+                | stamps
             )
         )
 

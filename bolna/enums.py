@@ -274,6 +274,7 @@ class AudioPlaybackReason(str, Enum):
 
     AUDIO_SENT = "audio_sent"
     BARGE_IN = "barge_in"
+    DOWNSTREAM_CLEANUP = "downstream_cleanup"
     FINAL_CHUNK_ACK = "final_chunk_ack"
     FREESWITCH_PLAYOUT_DONE_EVENT = "freeswitch_playout_done_event"
     FREESWITCH_PLAYOUT_TIMER = "freeswitch_playout_timer"

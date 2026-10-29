@@ -2761,24 +2761,29 @@ class TaskManager(BaseManager):
                                 response_heard = ""
                                 logger.info(f"turn_id={t_id}: nothing heard")
 
+            # The duplicate check must compare a regenerated reply with what the caller heard, not what was sent.
+            if self._last_spoken_assistant and self._last_spoken_assistant[0] == target_turn_id:
+                self._last_spoken_assistant = (target_turn_id, response_heard) if response_heard else None
+
             if target_response_uid is not None and response_heard:
                 logger.info(
                     f"sync_history: materializing assistant turn from heard audio | turn_id={target_turn_id} response_uid={target_response_uid} "
                     f"text={response_heard!r}"
                 )
-                staged_node = next(
+                # A reply still staged (its audio blocked before the commit) keeps its sequence_id and node.
+                stamps = next(
                     (
-                        staged.get("node")
-                        for staged in self._pending_assistant_history.values()
+                        {"sequence_id": sequence_id} | ({"node": staged["node"]} if staged.get("node") else {})
+                        for sequence_id, staged in self._pending_assistant_history.items()
                         if staged["response_uid"] == target_response_uid
                     ),
-                    None,
+                    {},
                 )
                 self.conversation_history.upsert_assistant_for_response(
-                    target_response_uid, response_heard, interim=False, turn_id=target_turn_id, node=staged_node
+                    target_response_uid, response_heard, interim=False, turn_id=target_turn_id, **stamps
                 )
                 self.conversation_history.upsert_assistant_for_response(
-                    target_response_uid, response_heard, interim=True, turn_id=target_turn_id
+                    target_response_uid, response_heard, interim=True, turn_id=target_turn_id, **stamps
                 )
                 for i in range(len(self.conversation_history.messages) - 1, -1, -1):
                     msg = self.conversation_history.messages[i]
@@ -2822,6 +2827,9 @@ class TaskManager(BaseManager):
             self.regen_settle_task.cancel()
         self.regen_settle_payload = None
         await self.tools["output"].handle_interruption()
+        # That cleared the pending final-chunk mark, whose echo is the only other thing that turns this flag off.
+        if self.tools["input"].is_audio_being_played_to_user():
+            self.tools["input"].update_is_audio_being_played(False, AudioPlaybackReason.DOWNSTREAM_CLEANUP)
         # Before handle_interruption, which may itself drop the open turn's timer without recording it.
         self.tools["synthesizer"].abandon_open_turn()
         await self.tools["synthesizer"].handle_interruption()
@@ -3244,9 +3252,7 @@ class TaskManager(BaseManager):
             if static_text:
                 if self.context_data:
                     static_text = update_prompt_with_context(static_text, self.context_data)
-                self.conversation_history.append_assistant(
-                    static_text, **({"node": target_node["id"]} if target_node.get("id") else {})
-                )
+                self.conversation_history.append_assistant(static_text, sequence_id=-1)
                 meta_info = {
                     "io": self.tools["output"].get_provider(),
                     "request_id": str(uuid.uuid4()),

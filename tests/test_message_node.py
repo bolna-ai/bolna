@@ -129,11 +129,10 @@ def test_messages_written_outside_a_generation_name_the_node_the_agent_is_on():
     tm = task_manager(graph_agent("opening"))
     history = tm.conversation_history
     history.append_welcome_message("Hi, is this a good time?")
-    history.upsert_assistant_for_turn(1, "One moment.")
     history.upsert_assistant_for_response("r9", "I heard you.", turn_id=2)
     history.upsert_assistant_for_response("r10", "So", turn_id=3, node="fees")
 
-    assert [m["node"] for m in assistants(tm)] == ["opening", "opening", "opening", "fees"]
+    assert [m["node"] for m in assistants(tm)] == ["opening", "opening", "fees"]
 
 
 async def test_an_interrupted_reply_rebuilt_from_its_audio_keeps_the_node_it_was_staged_with():
@@ -157,7 +156,41 @@ async def test_an_interrupted_reply_rebuilt_from_its_audio_keeps_the_node_it_was
     await tm.sync_history(marks.mark_event_meta_data.items(), time.time())
 
     (reply,) = assistants(tm)
-    assert (reply["content"], reply["node"]) == ("It's 2", "fees")
+    assert (reply["content"], reply["node"], reply["sequence_id"]) == ("It's 2", "fees", 3)
+    interim = [m for m in tm.conversation_history.interim if m["role"] == ChatRole.ASSISTANT]
+    assert [(m["node"], m["sequence_id"]) for m in interim] == [("fees", 3)]
+
+
+async def test_a_tool_call_placeholder_rebuilt_from_heard_audio_takes_its_staged_node_and_sequence_id():
+    tm = task_manager(graph_agent("booking"))
+    tm.conversation_history.append_user("Book it")
+    calls = [{"id": "call_1", "type": "function", "function": {"name": "book", "arguments": "{}"}}]
+    tm.conversation_history.attach_tool_calls_to_turn(2, calls)  # stamped with the node the agent was on then
+    tm.tools["llm_agent"].current_node_id = "confirm"
+    tm._stage_assistant_history({"sequence_id": 3, "turn_id": 2, "response_uid": "r2", "node": "fees"}, "Booking now")
+    tm.tools["input"] = SimpleNamespace(
+        last_heard_turn_id=2,
+        last_heard_response_uid="r2",
+        response_heard_by_user="",
+        get_response_heard_for_response=lambda uid: "",
+        get_response_heard_for_turn=lambda turn_id: "",
+        get_current_mark_started_time=lambda: 0.0,
+    )
+    marks = MarkEventMetaData()
+    chunk = {"type": "", "turn_id": 2, "response_uid": "r2", "sequence_id": 3, "duration": 1.0}
+    marks.update_data("m1", {**chunk, "text_synthesized": "Booking", "sent_ts": time.time() - 5})
+    marks.record_heard_text(marks.fetch_data("m1"), "Booking")
+    tm.mark_event_meta_data = marks
+
+    await tm.sync_history(marks.mark_event_meta_data.items(), time.time())
+
+    (message,) = assistants(tm)
+    assert (message["content"], message["tool_calls"], message["node"], message["sequence_id"]) == (
+        "Booking",
+        calls,
+        "fees",
+        3,
+    )
 
 
 async def test_the_hangup_line_names_the_node_the_call_ended_on():
@@ -228,7 +261,7 @@ def test_the_node_never_reaches_a_provider():
 
 
 async def test_an_events_static_line_names_the_node_the_event_moved_to():
-    tm = task_manager(graph_agent("intake"))  # a caller's turn routed on before the clip played
+    tm = task_manager(graph_agent("payment_received"))  # process_event moved the agent there
     tm.language = "en"
     tm.context_data = {}
     tm.repeat_after_silence_seconds = None
@@ -241,4 +274,8 @@ async def test_an_events_static_line_names_the_node_the_event_moved_to():
     await tm._proactive_generate_for_event({}, {"node_type": "static", "target_node": target})
 
     (line,) = assistants(tm)
-    assert (line["content"], line["node"]) == ("We got your payment, thank you.", "payment_received")
+    assert (line["content"], line["node"], line["sequence_id"]) == (
+        "We got your payment, thank you.",
+        "payment_received",
+        -1,
+    )
