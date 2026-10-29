@@ -5546,6 +5546,8 @@ class TaskManager(BaseManager):
             )
             self._speech_started_before_welcome = False
             self._retire_dropped_response(meta_info, "speech_started_before_welcome_finished")
+            if isinstance(self.tools.get("transcriber"), TranscriberPool):
+                self.tools["transcriber"].take_lid_transcript()  # its detector copy too, or idle-flush judges it alone
             return
 
         if self.conversation_history.is_duplicate_user(transcriber_message):
@@ -6439,6 +6441,18 @@ class TaskManager(BaseManager):
             return False, [], 0.0
         return saw_tags, foreign, foreign_max_s
 
+    def __spoken_over_welcome(self, pool) -> bool:
+        """Whether the newest buffered speech began before the welcome ended; never raises, or the watcher exits."""
+        try:
+            input_handler = self.tools["input"]
+            if not input_handler.welcome_message_played():
+                return True
+            newest = pool.lid_buffer_segments()[-1]
+            # By start (arrival minus audio), not arrival: the detector can deliver after the welcome ends.
+            return (newest["ts"] - newest["audio_s"]) * 1000 < input_handler.welcome_message_played_ts
+        except (AttributeError, IndexError, KeyError, TypeError):
+            return False  # no welcome timestamp or segment timing: judge it as before
+
     def __switch_decide_timeout_s(self) -> float:
         """Switch-LLM decide ceiling (the asyncio.wait_for around decide())."""
         return float(os.getenv("LANGUAGE_SWITCH_DECIDE_TIMEOUT_S", str(LANGUAGE_SWITCH_DECIDE_TIMEOUT_S)))
@@ -6676,12 +6690,20 @@ class TaskManager(BaseManager):
                     await asyncio.sleep(0.1)
                     continue
                 if age >= threshold and not nothing_to_decide:
-                    logger.info(
-                        f"LanguageSwitcher: idle-flush — detector speech idle {age:.1f}s with no main turn "
-                        f"(buffered_lang={buffered_lang!r}, active={self.language!r}, threshold={threshold}s, "
-                        f"caller_speaking={caller_speaking}); running switch decision"
-                    )
-                    await self.handle_language_switch(spawn_language=self.language)
+                    if self.__spoken_over_welcome(pool):
+                        # The main pipeline dropped this too; judged alone, a "Hello" could switch the language.
+                        dropped, _ = pool.take_lid_transcript()
+                        logger.info(
+                            "LanguageSwitcher: idle-flush dropped detector speech from over the welcome (%r)",
+                            safe_log_text(dropped, 60),
+                        )
+                    else:
+                        logger.info(
+                            f"LanguageSwitcher: idle-flush — detector speech idle {age:.1f}s with no main turn "
+                            f"(buffered_lang={buffered_lang!r}, active={self.language!r}, threshold={threshold}s, "
+                            f"caller_speaking={caller_speaking}); running switch decision"
+                        )
+                        await self.handle_language_switch(spawn_language=self.language)
                     # Spin-guard: a healthy decision drains the buffer (age → None) and the loop
                     # parks on the buffer event next iteration. If it returned WITHOUT draining
                     # (e.g. an ignore-input flag flipped after the loop-top guard), the buffer stays
