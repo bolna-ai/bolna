@@ -301,10 +301,9 @@ class KalpaConfig(BaseModel):
     voice: str = "Arjun"
     voice_id: Optional[str] = None
     model: str = "kalpa-tts-1"
-    temperature: Optional[float] = None
-    acoustic_temperature: Optional[float] = None
-    max_new_tokens: Optional[int] = None
-    audio_quality: Optional[str] = None
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=1.5)
+    acoustic_temperature: Optional[float] = Field(default=None, ge=0.0, le=1.5)
+    audio_quality: Optional[Literal["low", "medium", "high"]] = None
     chunk_length_schedule: Optional[List[int]] = None
 
 
@@ -326,6 +325,12 @@ class SonioxConfig(StandardVoiceConfig):
     reduce_silence: Optional[bool] = None
 
 
+class NavanaConfig(StandardVoiceConfig):
+    # voice_id is the id Navana addresses ("default_female", or a cloned "cv_..."); every voice speaks
+    # every language. model is "navana-tts", or "navana-tts-fast" for the distilled model.
+    pass
+
+
 # The config class each provider's provider_config is validated against. Adding a provider means
 # one entry here.
 SYNTHESIZER_CONFIG_MODELS = {
@@ -343,6 +348,7 @@ SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.KALPA.value: KalpaConfig,
     SynthesizerProvider.GEMINI.value: GeminiConfig,
     SynthesizerProvider.SONIOX.value: SonioxConfig,
+    SynthesizerProvider.NAVANA.value: NavanaConfig,
     SynthesizerProvider.CUSTOM.value: OpenAIConfig,
 }
 

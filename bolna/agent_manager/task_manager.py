@@ -89,7 +89,7 @@ from bolna.enums import (
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
-from bolna.helpers.language_switcher import LanguageSwitcher
+from bolna.helpers.jev_language_switcher import build_language_switcher
 from bolna.transcriber.transcriber_pool import TranscriberPool
 from bolna.synthesizer.synthesizer_pool import SynthesizerPool
 from bolna.helpers.utils import (
@@ -1889,8 +1889,8 @@ class TaskManager(BaseManager):
                         lid_config["sarvam_model"] = lid_model
                     switch_enabled = self.__language_switch_enabled()
                     if switch_enabled:
-                        # language_switch_llm (from the azure flag) overrides the model; absent → default.
-                        self.language_switcher = LanguageSwitcher(
+                        # language_switch_llm (azure or jev flag) overrides the model; absent → default.
+                        self.language_switcher = build_language_switcher(
                             available_labels=list(transcribers.keys()),
                             run_id=self.run_id,
                             model=self.task_config.get("tools_config", {}).get("language_switch_llm"),
@@ -6774,6 +6774,16 @@ class TaskManager(BaseManager):
             detector_idle_s = pool.lid_buffer_age()
             if detector_idle_s is None or detector_idle_s < settle_ms / 1000:
                 await asyncio.sleep(settle_ms / 1000)
+                # Call cleanup can run during the settle and clear conversation_history, which is read below.
+                if (
+                    self.conversation_ended
+                    or self.conversation_history is None
+                    or self._should_ignore_transcriber_input()
+                ):
+                    logger.info(
+                        "LanguageSwitcher: hangup/transfer/teardown in progress — abandoning switch (post-settle)"
+                    )
+                    return None
 
         buffered_max_segment_s = pool.lid_buffer_max_segment_seconds()
         # Peek confidence + segments before take_lid_transcript() drains the buffer.
@@ -6881,7 +6891,7 @@ class TaskManager(BaseManager):
         decide_started_at = time.time()
         decision = None
 
-        def emit_lid_decision(outcome, switched_to=None, context_note=None, inflight_activity=None):
+        def emit_lid_decision(outcome, switched_to=None, context_note=None, inflight_activity=None, detail=None):
             # pool is a confirmed TranscriberPool here (guarded at function entry).
             # Snapshot the in-flight response now unless the caller passed a pre-truncation
             activity = inflight_activity if inflight_activity is not None else self._inflight_response_activity()
@@ -6905,6 +6915,26 @@ class TaskManager(BaseManager):
                     detector_fallback=detector_fallback,
                 )
             )
+            # Say what the call actually did, so "the judge said switch" isn't read as "switched".
+            target = (decision or {}).get("target_language")
+            line = None
+            if outcome == "switched":
+                voice = getattr(self.tools.get("synthesizer"), "active_label", None)
+                line = (
+                    f"switched {active} → {switched_to} (transcriber {getattr(pool, 'active_label', None)}, "
+                    f"voice {voice}, prompt {self.language})"
+                )
+            elif target and outcome != "stay":
+                line = f"not switched to {target}: {outcome}" + (f" ({detail})" if detail else "")
+            if line:
+                convert_to_request_log(
+                    message=line,
+                    meta_info=meta_info or {},
+                    model=None,
+                    component=LogComponent.LLM_LANGUAGE_SWITCH,
+                    direction=LogDirection.RESPONSE,
+                    run_id=self.run_id,
+                )
 
         # Timeout strictly around the LLM call (NOT the switch itself — cancelling
         # mid-switch could leave the pools half-switched). The litellm default is
@@ -6933,7 +6963,7 @@ class TaskManager(BaseManager):
             emit_lid_decision("no_decision")
             return
         # decide() can take seconds; a hangup/transfer may have started meanwhile — re-check
-        if self.conversation_ended or self._should_ignore_transcriber_input():
+        if self.conversation_ended or self.conversation_history is None or self._should_ignore_transcriber_input():
             logger.info("LanguageSwitcher: hangup/transfer/teardown in progress — abandoning switch (post-decide)")
             emit_lid_decision("gated:hangup")
             return None
@@ -7031,7 +7061,7 @@ class TaskManager(BaseManager):
                     f"(corroborated={corroborated}, detector_prob={detector_lang_confidence}) (or missing) — "
                     f"no switch (reason={reasoning})"
                 )
-                emit_lid_decision("gated:low_confidence")
+                emit_lid_decision("gated:low_confidence", detail=f"confidence {target_conf} < {effective_min_conf}")
                 return
 
             # Substance gate: acknowledgment-length audio mis-tags languages. Short turns need at
@@ -7089,6 +7119,16 @@ class TaskManager(BaseManager):
             if "input" in self.tools:
                 self.tools["input"].update_is_audio_being_played(False, AudioPlaybackReason.LID_SWITCH_TRUNCATE)
             await self.__cleanup_downstream_tasks()
+            # The trace keeps the cut reply's request rows, which read like a reply that was spoken; mark the cut.
+            # Same component as discarded speculation, so it is never billed.
+            convert_to_request_log(
+                message=f"Reply in progress cancelled for the switch to '{target}'",
+                meta_info=meta_info or {},
+                model=None,
+                component=LogComponent.LLM_LANGUAGE_SWITCH,
+                direction=LogDirection.RESPONSE,
+                run_id=self.run_id,
+            )
             # Sequence invalidated — the held audio can no longer ship; safe to open the gate.
             self.lid_playback_gate = None
             if activity.get("audio_playing"):
@@ -7099,7 +7139,11 @@ class TaskManager(BaseManager):
                     await asyncio.sleep(audio_gap_s)
                     # The gap is an await like any other: teardown may have started during it,
                     # and a switch applied now would flip the pools under a goodbye.
-                    if self.conversation_ended or self._should_ignore_transcriber_input():
+                    if (
+                        self.conversation_ended
+                        or self.conversation_history is None
+                        or self._should_ignore_transcriber_input()
+                    ):
                         logger.info("LanguageSwitcher: hangup/transfer during audio gap — abandoning switch")
                         emit_lid_decision("gated:hangup", inflight_activity=activity)
                         return None
@@ -7119,6 +7163,9 @@ class TaskManager(BaseManager):
         )
         await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
         emit_lid_decision("switched", switched_to=target, context_note=context_note, inflight_activity=activity)
+        if self.conversation_history is None:
+            # Call cleanup ran during the switch: no history to correct and no caller left to answer.
+            return None
 
         # Put the caller's actual words into conversation history. Turn-boundary path:
         # the locked-pool ASR garbled this turn, so replace it with the unbiased
@@ -9855,6 +9902,12 @@ class TaskManager(BaseManager):
                             await aux_llm.close()
                         except Exception as e:
                             logger.error(f"Error closing language detector LLM: {e}")
+                close_switcher = getattr(self.language_switcher, "aclose", None)
+                if close_switcher is not None:
+                    try:
+                        await close_switcher()
+                    except Exception as e:
+                        logger.error(f"Error closing language switcher: {e}")
                 for obs in self.observable_variables.values():
                     obs._observers.clear()
                 self.observable_variables.clear()

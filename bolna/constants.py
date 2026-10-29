@@ -463,7 +463,7 @@ TTS_AUDIO_SETTINGS = {
     SynthesizerProvider.DEEPGRAM: frozenset({"speed"}),
     SynthesizerProvider.ELEVENLABS: frozenset({"speed", "similarity_boost", "temperature", "style"}),
     SynthesizerProvider.GEMINI: frozenset({"style"}),
-    SynthesizerProvider.KALPA: frozenset({"temperature", "acoustic_temperature", "audio_quality", "max_new_tokens"}),
+    SynthesizerProvider.KALPA: frozenset({"temperature", "acoustic_temperature", "audio_quality"}),
     SynthesizerProvider.OPENAI: frozenset({"speed"}),
     SynthesizerProvider.PIXA: frozenset({"top_p", "repetition_penalty"}),
     SynthesizerProvider.RIME: frozenset({"time_scale_factor"}),
