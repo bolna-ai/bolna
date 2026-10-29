@@ -182,7 +182,8 @@ async def test_the_hangup_line_names_the_node_the_call_ended_on():
     assert (hangup["content"], hangup["node"], hangup["sequence_id"]) == ("Thank you, goodbye.", "wrap_up", -1)
 
 
-async def test_a_task_manager_stamps_its_graph_agents_node_on_its_history():
+async def test_a_task_manager_stamps_its_graph_agents_node_on_its_history(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "env-key")  # the synthesizer reads it as it's built
     task_config = {
         "task_type": "conversation",
         "toolchain": {"execution": "sequential", "pipelines": [["transcriber", "llm", "synthesizer"]]},
