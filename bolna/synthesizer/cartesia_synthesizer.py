@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 
@@ -17,6 +18,9 @@ from bolna.helpers.utils import cartesia_supports_pronunciation_dict
 
 
 logger = configure_logger(__name__)
+
+# Cartesia spells out all-caps words; 3-letter ones stay as sent since they're usually initialisms.
+CAPS_WORD = re.compile(r"\b[A-Z]{4,}\b")
 
 
 class CartesiaSynthesizer(StreamSynthesizer):
@@ -317,7 +321,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
     async def _generate_http(self, text, output_format=None):
         payload = {
             "model_id": self.model,
-            "transcript": text,
+            "transcript": CAPS_WORD.sub(lambda word: word.group().lower(), text),
             "voice": {"mode": "id", "id": self.voice_id},
             "output_format": output_format or {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
             "language": self.language,

@@ -296,6 +296,25 @@ async def test_cartesia_sends_the_dictionary_on_every_message(posted_bodies, mod
     assert posted_bodies[0]["pronunciation_dict_id"] == "pdict_1"
 
 
+@pytest.mark.parametrize(
+    "text,sent",
+    [
+        ("Hello RAHUL this side", "Hello rahul this side"),
+        ("Hello PRIYA SHARMA", "Hello priya sharma"),
+        ("Your KYC is pending", "Your KYC is pending"),
+        ("Hi RK", "Hi RK"),
+        ("Hello Rahul", "Hello Rahul"),
+    ],
+)
+async def test_cartesia_one_shot_lowercases_all_caps_words(posted_bodies, text, sent):
+    await _cartesia("sonic-3.6").synthesize(text)
+    assert posted_bodies[0]["transcript"] == sent
+
+
+def test_cartesia_live_replies_keep_their_casing():
+    assert _cartesia("sonic-3.6").form_payload("Hello RAHUL")["transcript"] == "Hello RAHUL"
+
+
 @pytest.mark.parametrize("model", ["sonic-english", "sonic-2"])
 async def test_cartesia_older_models_do_not_receive_the_dictionary(posted_bodies, model):
     synth = _cartesia(model, pronunciation_dict_id="pdict_1")
