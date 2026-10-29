@@ -76,6 +76,7 @@ def _make_tm(history, marks=None):
     tm.tools = {"input": _InputStub()}
     tm.mark_event_meta_data = _MarkMetaStub(marks)
     tm._turn_msg_map = {}
+    tm._last_spoken_assistant = None
     tm.hangup_triggered = False
     tm.conversation_ended = False
     tm.hangup_mark_event_timeout = 10

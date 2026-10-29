@@ -209,6 +209,7 @@ def _cleanup_target():
         welcome_message_played=MagicMock(return_value=True),
         reset_response_heard_by_user=MagicMock(),
         is_welcome_message_played=True,
+        is_audio_being_played_to_user=MagicMock(return_value=False),
     )
     tm.tools = {"output": output, "synthesizer": synth, "input": inp}
     tm._TaskManager__process_output_loop = AsyncMock()
