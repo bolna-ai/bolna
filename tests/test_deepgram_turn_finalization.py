@@ -188,3 +188,205 @@ def test_new_speech_after_speech_final_carries_only_the_new_words():
     asyncio.run(scenario())
 
     assert q.get_nowait()["data"]["content"] == "actually never mind"
+
+
+def _spoken(transcript, start, end, is_final=False, speech_final=False):
+    """A Results frame with per-word timings, as Nova sends them."""
+    tokens = transcript.split()
+    step = (end - start) / len(tokens)
+    words = [
+        {"word": w, "start": round(start + i * step, 3), "end": round(start + (i + 1) * step, 3)}
+        for i, w in enumerate(tokens)
+    ]
+    return json.dumps(
+        {
+            "type": "Results",
+            "channel": {"alternatives": [{"transcript": transcript, "words": words}]},
+            "is_final": is_final,
+            "speech_final": speech_final,
+            "start": start,
+            "duration": end - start,
+            "metadata": {"request_id": "test-request"},
+        }
+    )
+
+
+def _speech_ended_count(packets):
+    return sum(1 for p in packets if isinstance(p["data"], dict) and p["data"].get("type") == "speech_ended")
+
+
+def test_previous_utterance_end_does_not_close_the_next_turn():
+    t = _make_nova()
+
+    packets = asyncio.run(
+        _drain(
+            t,
+            [
+                _spoken("ten", 93.9, 94.3, is_final=True, speech_final=True),
+                json.dumps({"type": "SpeechStarted", "timestamp": 97.4}),
+                _spoken("on", 97.6, 97.8),
+                json.dumps({"type": "UtteranceEnd", "last_word_end": 94.3}),
+                _spoken("on the table", 97.6, 98.9, is_final=True, speech_final=True),
+            ],
+        )
+    )
+
+    assert _speech_ended_count(packets) == 0
+    assert _transcripts(packets) == [" ten", " on the table"]
+    assert t.turn_counter == 2
+
+
+def test_previous_utterance_end_does_not_send_half_a_sentence():
+    t = _make_nova()
+
+    packets = asyncio.run(
+        _drain(
+            t,
+            [
+                _spoken("ten", 93.9, 94.3, is_final=True, speech_final=True),
+                _spoken("my expected ctc is", 97.6, 98.8, is_final=True),
+                json.dumps({"type": "UtteranceEnd", "last_word_end": 94.3}),
+                _spoken("twenty nine", 98.9, 99.6, is_final=True, speech_final=True),
+            ],
+        )
+    )
+
+    assert _transcripts(packets) == [" ten", " my expected ctc is twenty nine"]
+
+
+def test_utterance_end_for_the_current_turn_still_finalizes_it():
+    t = _make_nova()
+
+    packets = asyncio.run(
+        _drain(
+            t,
+            [
+                _spoken("ten", 93.9, 94.3, is_final=True, speech_final=True),
+                _spoken("my expected ctc is", 97.6, 98.8, is_final=True),
+                json.dumps({"type": "UtteranceEnd", "last_word_end": 98.8}),
+            ],
+        )
+    )
+
+    assert _transcripts(packets) == [" ten", " my expected ctc is"]
+    assert t.current_turn_first_word_start is None
+
+
+def test_utterance_end_for_an_interim_only_turn_still_ends_speech():
+    t = _make_nova()
+
+    packets = asyncio.run(
+        _drain(
+            t,
+            [
+                _spoken("ten", 93.9, 94.3, is_final=True, speech_final=True),
+                _spoken("on the", 97.6, 98.2),
+                json.dumps({"type": "UtteranceEnd", "last_word_end": 98.2}),
+            ],
+        )
+    )
+
+    assert _speech_ended_count(packets) == 1
+    assert t.current_turn_id is None
+    assert t.current_turn_first_word_start is None
+
+
+def test_utterance_end_before_any_new_words_ends_speech_as_before():
+    t = _make_nova()
+
+    packets = asyncio.run(
+        _drain(
+            t,
+            [
+                _spoken("ten", 93.9, 94.3, is_final=True, speech_final=True),
+                json.dumps({"type": "SpeechStarted", "timestamp": 97.4}),
+                json.dumps({"type": "UtteranceEnd", "last_word_end": 94.3}),
+            ],
+        )
+    )
+
+    assert _speech_ended_count(packets) == 1
+
+
+def test_reconnect_forgets_the_old_sockets_word_times():
+    t = _make_nova(output_queue=asyncio.Queue())
+    asyncio.run(_drain(t, [_spoken("on the", 97.6, 98.2)]))
+    assert t.current_turn_first_word_start == 97.6
+
+    async def fail_connect():
+        raise ConnectionError("down")
+
+    t.deepgram_connect = fail_connect
+    asyncio.run(t.transcribe())
+
+    # Audio positions restart at 0 on the new socket.
+    packets = asyncio.run(
+        _drain(
+            t,
+            [
+                _spoken("hello", 1.0, 1.4),
+                json.dumps({"type": "UtteranceEnd", "last_word_end": 1.4}),
+            ],
+        )
+    )
+
+    assert _speech_ended_count(packets) == 1
+
+
+def test_noise_deepgram_withdraws_is_closed_by_the_late_utterance_end():
+    t = _make_nova()
+
+    packets = asyncio.run(
+        _drain(
+            t,
+            [
+                _spoken("ten", 93.9, 94.3, is_final=True, speech_final=True),
+                _spoken("uh", 97.6, 97.8),
+                # The final for that window is empty: the "uh" was noise.
+                _results("", is_final=True, start=97.4, duration=0.6),
+                json.dumps({"type": "UtteranceEnd", "last_word_end": 94.3}),
+            ],
+        )
+    )
+
+    assert _speech_ended_count(packets) == 1
+    assert _transcripts(packets) == [" ten"]
+    assert _force_finalize_guard_passes(t) is False
+
+
+def test_an_utterance_end_already_finalized_by_deepgram_does_not_close_the_turn():
+    t = _make_nova()
+
+    packets = asyncio.run(
+        _drain(
+            t,
+            [
+                _spoken("ten", 93.9, 94.3, is_final=True, speech_final=True),
+                _spoken("on", 97.6, 97.8),
+                # Deepgram marks a stale UtteranceEnd with last_word_end -1.
+                json.dumps({"type": "UtteranceEnd", "last_word_end": -1}),
+                _spoken("on the table", 97.6, 98.9, is_final=True, speech_final=True),
+            ],
+        )
+    )
+
+    assert _speech_ended_count(packets) == 0
+    assert _transcripts(packets) == [" ten", " on the table"]
+
+
+def test_a_final_that_moves_the_first_word_earlier_still_lets_its_utterance_end_close_the_turn():
+    t = _make_nova()
+
+    packets = asyncio.run(
+        _drain(
+            t,
+            [
+                _spoken("ten", 93.9, 94.3, is_final=True, speech_final=True),
+                _spoken("yes", 97.9, 98.1),
+                _spoken("yes", 97.6, 97.8, is_final=True),
+                json.dumps({"type": "UtteranceEnd", "last_word_end": 97.8}),
+            ],
+        )
+    )
+
+    assert _transcripts(packets) == [" ten", " yes"]
