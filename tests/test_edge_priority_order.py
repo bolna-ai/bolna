@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 from bolna.agent_types.graph_agent import _DETERMINISTIC_REASONING_PREFIX
 from bolna.enums import EdgeOrder
 from bolna.models import GraphNode
-from tests.test_router_nodes import _base_config, _expr, _make_agent
+from tests.test_router_nodes import _base_config, _collect, _expr, _make_agent
 
 _HISTORY = [{"role": "user", "content": "I want to talk to a person"}]
 _NO_DECISION = (None, None, 210.0, [{"role": "system", "content": "routing"}], [{"type": "function"}], None, None, None)
@@ -75,6 +75,66 @@ class TestNodeEdgeOrder:
         llm.assert_not_called()
         assert result[0] == "hindi"
 
+    async def test_intents_are_ranked_against_the_matched_expression_not_the_first_one(self):
+        edges = [
+            {"to_node_id": "never", "condition_type": "expression", "expression": _expr("x", "eq", 1), "priority": 1},
+            {"to_node_id": "human", "condition": "user wants a human", "priority": 2},
+            {
+                "to_node_id": "hindi",
+                "condition_type": "expression",
+                "expression": _expr("detected_language", "eq", "hi"),
+                "priority": 3,
+            },
+            {"to_node_id": "billing", "condition": "user asks about billing", "priority": 4},
+        ]
+        nodes = [{"id": "start", "prompt": "Help.", "edge_order": "priority", "edges": edges}] + [
+            {"id": n, "prompt": n, "edges": []} for n in ("never", "human", "hindi", "billing")
+        ]
+        agent = _make_agent(_base_config(nodes, "start", context_data={"detected_language": "hi"}))
+        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=_NO_DECISION) as llm:
+            result = await agent.decide_next_node_with_functions(_HISTORY)
+
+        assert [e["to_node_id"] for e in llm.call_args.args[1]] == ["human"]
+        assert llm.call_args.kwargs["default_edge"]["to_node_id"] == "hindi"
+        assert result[0] == "hindi"
+
+    async def test_routing_model_picking_the_default_lands_on_the_matched_expression(self):
+        agent = _agent(edge_order="priority", detected_language="hi")
+        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=_picked("hindi")):
+            result = await agent.decide_next_node_with_functions(_HISTORY)
+
+        assert result[0] == "hindi"
+        assert not result[5].startswith(_DETERMINISTIC_REASONING_PREFIX)  # the routing model chose it
+
+    async def test_intent_to_the_matched_expressions_node_is_skipped_unless_it_extracts(self):
+        for parameters, expect_call in ((None, False), ({"reason": "string"}, True)):
+            agent = _agent(edge_order="priority", detected_language="hi")
+            human = agent.config["nodes"][0]["edges"][1]
+            human["to_node_id"] = "hindi"
+            if parameters:
+                human["parameters"] = parameters
+            with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=_NO_DECISION) as llm:
+                result = await agent.decide_next_node_with_functions(_HISTORY)
+
+            assert llm.called is expect_call
+            assert result[0] == "hindi"
+
+    async def test_declined_call_is_reported_on_the_model_it_ran_on(self):
+        agent = _agent(edge_order="priority", detected_language="hi")
+        agent.config["nodes"][0]["routing_model"] = "gpt-4.1"
+
+        async def declined(*args, **kwargs):
+            agent._last_routing_model = "gpt-4.1"
+            return _NO_DECISION
+
+        with patch.object(agent, "_decide_next_node_llm", side_effect=declined):
+            out = await _collect(agent.generate(_HISTORY))
+        routing = next(o["routing_info"] for o in out if isinstance(o, dict) and "routing_info" in o)
+
+        assert routing["current_node"] == "hindi"
+        assert routing["routing_type"] == "deterministic"
+        assert routing["routing_model"] == "gpt-4.1"
+
     async def test_no_matched_expression_routes_over_every_intent_with_the_catch_all(self):
         agent = _agent(edge_order="priority", detected_language="en")
         with patch.object(
@@ -108,8 +168,9 @@ class TestRouterEdgeOrder:
 
 
 class TestEdgeOrderConfig:
-    def test_defaults_to_tiered(self):
-        assert GraphNode(id="n").edge_order == EdgeOrder.TIERED
+    def test_unset_and_null_route_tiered(self):
+        assert GraphNode(id="n").edge_order is None
+        assert GraphNode(id="n", edge_order=None).edge_order is None
 
     def test_accepts_priority(self):
         assert GraphNode(id="n", edge_order="priority").edge_order == EdgeOrder.PRIORITY

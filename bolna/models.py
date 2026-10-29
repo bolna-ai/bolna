@@ -737,7 +737,8 @@ class GraphNode(BaseModel):
     routing_model: Optional[str] = None
     # Per-node routing effort; None inherits the agent's routing_reasoning_effort.
     routing_reasoning_effort: Optional[ReasoningEffort] = None
-    edge_order: EdgeOrder = EdgeOrder.TIERED
+    # None routes tiered.
+    edge_order: Optional[EdgeOrder] = None
     examples: Optional[Dict[str, str]] = None
     edges: List[GraphEdge] = Field(default_factory=list)
     function_call: Optional[str] = None

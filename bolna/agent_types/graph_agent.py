@@ -751,11 +751,17 @@ class GraphAgent(BaseAgent):
 
     def _intents_outranking(self, node: dict, matched_expression: Optional[dict], intent_edges: list) -> list:
         """Intent edges ranked strictly above the matched expression, on a node that orders its
-        edges by priority. A tie goes to the expression."""
+        edges by priority. A tie goes to the expression. An intent to the expression's own target
+        only counts when it extracts parameters, since otherwise it cannot change the outcome."""
         if matched_expression is None or node.get("edge_order") != EdgeOrder.PRIORITY:
             return []
         bar = self._edge_priority(matched_expression)
-        return [edge for edge in intent_edges if self._edge_priority(edge) < bar]
+        return [
+            edge
+            for edge in intent_edges
+            if self._edge_priority(edge) < bar
+            and (edge["to_node_id"] != matched_expression["to_node_id"] or edge.get("parameters"))
+        ]
 
     def _evaluate_deterministic_edges(self, edges: list) -> Tuple[Optional[dict], List[str]]:
         """Return (first matching deterministic edge or None, per-edge evaluation traces)."""
@@ -1799,13 +1805,13 @@ class GraphAgent(BaseAgent):
                         "current_node": self.current_node_id,
                         "transitioned": next_node_id is not None,
                         "routing_type": routing_type,
-                        "routing_model": self._last_routing_model if routing_type == "llm" else self.routing_model,
+                        # Reset to the agent's model each turn, so a deterministic turn that still spent a
+                        # routing call (a declined intent) reports the model that call ran on.
+                        "routing_model": self._last_routing_model,
                         "routing_provider": getattr(self, "routing_provider", None),
                         "routing_latency_ms": round(routing_latency_ms, 1),
                         "routing_started_at": routing_started_at,
-                        "routing_reasoning_effort": self._last_routing_effort
-                        if routing_type == "llm"
-                        else getattr(self, "_routing_reasoning_effort_used", None),
+                        "routing_reasoning_effort": self._last_routing_effort,
                         "extracted_params": extracted_params or {},
                         "node_history": list(self.node_history),
                         "routing_messages": routing_messages,
