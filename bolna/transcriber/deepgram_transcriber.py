@@ -115,6 +115,8 @@ class DeepgramTranscriber(BaseTranscriber):
         self.latest_final_word_end = None
         # Audio already sent as a force-finalized turn; Deepgram's own final for it must not open a second turn.
         self.force_finalized_until = None
+        # Deepgram audio seconds of the open turn's first word; an UtteranceEnd ending before it is the previous one's.
+        self.current_turn_first_word_start = None
         self.current_turn_interim_details = []
         self.audio_frame_timestamps = []  # List of (frame_start, frame_end, send_timestamp)
         # Wall-clock epoch-ms send time of the audio behind the latest transcript content
@@ -360,6 +362,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.last_transcript_audio_sent_at = None
         self.current_turn_start_time = None
         self.current_turn_id = None
+        self.current_turn_first_word_start = None
         self.final_transcript = ""
         self.is_transcript_sent_for_processing = True
         # A later turn with no onset of its own must not inherit this one's.
@@ -764,6 +767,13 @@ class DeepgramTranscriber(BaseTranscriber):
                                     "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
                                 }
                             )
+                        # The earliest start: a final can move the first word earlier than its interim had it.
+                        first_word_start = self.first_word_start(msg)
+                        if first_word_start is not None and (
+                            self.current_turn_first_word_start is None
+                            or first_word_start < self.current_turn_first_word_start
+                        ):
+                            self.current_turn_first_word_start = first_word_start
                         # Calculate latency using end position (start + duration) for cumulative transcripts
                         self.__set_transcription_cursor(msg)
                         audio_position_end = self.transcription_cursor
@@ -806,6 +816,9 @@ class DeepgramTranscriber(BaseTranscriber):
                             len(self.final_transcript.strip()),
                             transcript[:80],
                         )
+                    elif msg["is_final"] and not self.final_transcript.strip():
+                        # The turn's words were finalized to nothing (noise), so a late UtteranceEnd may close it.
+                        self.current_turn_first_word_start = None
 
                     if msg["speech_final"] and self.final_transcript.strip():
                         if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
@@ -848,6 +861,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                 self.current_turn_interim_details = []
                                 self.current_turn_start_time = None
                                 self.current_turn_id = None
+                                self.current_turn_first_word_start = None
                                 self.final_transcript = ""
                                 self.is_transcript_sent_for_processing = True
                                 self.meta_info.pop("user_start_ts_wall", None)
@@ -861,6 +875,15 @@ class DeepgramTranscriber(BaseTranscriber):
                             # None is safe: interruption_manager guards on it before use.
                             self.meta_info["user_stop_ts_wall"] = self._compute_last_word_end_wall(msg)
                             yield create_ws_data_packet(data, self.meta_info)
+
+                elif msg["type"] == "UtteranceEnd" and self.is_previous_utterance_end(msg):
+                    # Arrived after the caller's next turn began: closing it here would mark them silent mid-sentence.
+                    logger.info(
+                        "Ignoring UtteranceEnd for the previous utterance: last_word_end=%s, open turn %s began at %s",
+                        msg.get("last_word_end"),
+                        self.current_turn_id,
+                        self.current_turn_first_word_start,
+                    )
 
                 elif msg["type"] == "UtteranceEnd":
                     logger.info(
@@ -906,6 +929,7 @@ class DeepgramTranscriber(BaseTranscriber):
                             self.current_turn_interim_details = []
                             self.current_turn_start_time = None
                             self.current_turn_id = None
+                            self.current_turn_first_word_start = None
                             self.final_transcript = ""
                             self.is_transcript_sent_for_processing = True
                             self.meta_info.pop("user_start_ts_wall", None)
@@ -934,6 +958,7 @@ class DeepgramTranscriber(BaseTranscriber):
                         self.current_turn_interim_details = []
                         self.current_turn_start_time = None
                         self.current_turn_id = None
+                        self.current_turn_first_word_start = None
                         self.final_transcript = ""
                         yield create_ws_data_packet({"type": "speech_ended"}, self.meta_info)
 
@@ -1194,6 +1219,13 @@ class DeepgramTranscriber(BaseTranscriber):
         except Exception as e:
             logger.error(f"not working {e}")
 
+    def is_previous_utterance_end(self, msg):
+        """True when an UtteranceEnd's last word ends before the open turn's first word."""
+        last_word_end = msg.get("last_word_end")
+        if last_word_end is None or self.current_turn_first_word_start is None:
+            return False
+        return last_word_end <= self.current_turn_first_word_start
+
     def _compute_last_word_end_wall(self, data):
         """Wall-clock seconds when the last transcribed word ended, or None."""
         try:
@@ -1206,13 +1238,20 @@ class DeepgramTranscriber(BaseTranscriber):
             pass
         return None
 
+    def first_word_start(self, data):
+        """Deepgram audio seconds when the first transcribed word began, or None."""
+        for alternative in (data.get("channel") or {}).get("alternatives") or []:
+            words = alternative.get("words") or []
+            if words:
+                return words[0].get("start")
+        return None
+
     def first_word_start_wall(self, data):
         """Wall-clock seconds when the first transcribed word began, or None: the turn's speech onset."""
         try:
-            for alternative in (data.get("channel") or {}).get("alternatives") or []:
-                words = alternative.get("words") or []
-                if words:
-                    return self.audio_position_wall_time(words[0]["start"])
+            start = self.first_word_start(data)
+            if start is not None:
+                return self.audio_position_wall_time(start)
         except Exception:
             pass
         return None
@@ -1286,6 +1325,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.latest_word_end = None
         self.latest_final_word_end = None
         self.force_finalized_until = None
+        self.current_turn_first_word_start = None
         try:
             start_time = timestamp_ms()
             try:
