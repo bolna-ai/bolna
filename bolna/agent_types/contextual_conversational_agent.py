@@ -3,7 +3,7 @@ import os
 import time
 from dotenv import load_dotenv
 from .base_agent import BaseAgent
-from bolna.helpers.utils import format_messages
+from bolna.helpers.utils import format_messages, is_mid_call_update_turn
 from bolna.llms import AzureLLM, OpenAiLLM
 from bolna.prompts import CHECK_FOR_COMPLETION_PROMPT, VOICEMAIL_DETECTION_PROMPT
 from bolna.helpers.logger_config import configure_logger
@@ -74,5 +74,9 @@ class StreamingContextualAgent(BaseAgent):
             return {"is_voicemail": "No"}, {}
 
     async def generate(self, history, synthesize=False, meta_info=None):
-        async for token in self.llm.generate_stream(history, synthesize=synthesize, meta_info=meta_info):
+        # Website text started a mid-call update turn, never the caller: reply, but call no tool.
+        tool_choice = "none" if is_mid_call_update_turn(meta_info) else None
+        async for token in self.llm.generate_stream(
+            history, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
+        ):
             yield token

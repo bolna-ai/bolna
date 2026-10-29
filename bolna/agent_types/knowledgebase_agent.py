@@ -9,7 +9,7 @@ from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
 from bolna.helpers.function_calling_helpers import guard_llm_base_url
-from bolna.helpers.utils import format_messages
+from bolna.helpers.utils import format_messages, is_mid_call_update_row, is_mid_call_update_turn
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.llms import AzureLLM, OpenAiLLM
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
@@ -197,6 +197,9 @@ class KnowledgeBaseAgent(BaseAgent):
         """
         if not self.rag_config.get("collections"):
             return messages, {"status": "error", "message": "No knowledgebases configured"}
+        if messages and is_mid_call_update_row(messages[-1]):
+            # The last message is an external update, not a caller question, so it is no search query.
+            return messages, {"status": "skipped", "message": "Mid-call update, not a caller question"}
 
         try:
             client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
@@ -334,8 +337,10 @@ Use this information naturally when it helps answer the user's questions. Don't 
 
             yield {"messages": messages_with_context}
 
+            # Website text started a mid-call update turn, never the caller: reply, but call no tool.
+            tool_choice = "none" if is_mid_call_update_turn(meta_info) else None
             async for chunk in self.llm.generate_stream(
-                messages_with_context, synthesize=synthesize, meta_info=meta_info
+                messages_with_context, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
             ):
                 yield chunk
 
