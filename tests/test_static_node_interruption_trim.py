@@ -46,6 +46,7 @@ def _make_tm(sent_ts, text_synthesized=FULL_TEXT):
     tm.conversation_history = history
     tm.tools = {"input": _InputStub()}
     tm._turn_msg_map = {}
+    tm._pending_assistant_history = {}
 
     marks = MarkEventMetaData()
     marks.update_data(

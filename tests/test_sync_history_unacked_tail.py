@@ -38,6 +38,7 @@ def _make_tm():
     tm.conversation_history = history
     tm.tools = {"input": _InputStub()}
     tm._turn_msg_map = {}
+    tm._pending_assistant_history = {}
 
     marks = MarkEventMetaData()
     # ACKed prefix chunk: sent, then its mark came back.
