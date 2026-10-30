@@ -1157,9 +1157,9 @@ class GraphAgent(BaseAgent):
             marker = "Default route: choose this only when none of the other transitions apply."
             name = self._edge_function_name(default_edge)
             if default_edge.get("condition_type") == EdgeConditionType.EXPRESSION:
-                rule = describe_edge_expression(default_edge, self.context_data, self.variable_types)
+                # Fixed wording, so the routing prompt prefix stays cacheable across turns.
                 marker = (
-                    f"Default route: this node's rule already matched ({rule}). "
+                    "Default route: a rule on this node already chose this transition. "
                     "Choose another transition only when the caller clearly asks for it."
                 )
                 # An intent to the same node keeps its parameters only if its tool name differs.
@@ -1347,9 +1347,9 @@ class GraphAgent(BaseAgent):
             result = await self._decide_next_node_llm(
                 current_node, outranking, history, start_time, default_edge=matched_edge
             )
-            if result[0] is not None:
+            next_node_id, _, _, r_messages, r_tools, _, _, r_usage = result
+            if next_node_id is not None:
                 return result
-            r_messages, r_tools, r_usage = result[3], result[4], result[7]
             self._last_deterministic_eval = f"{self._last_deterministic_eval}; intent: no match"
 
         if matched_edge:

@@ -180,8 +180,16 @@ class TestDefaultRouteOffer:
 
         default = route.call_args.args[1][-1]["function"]
         assert default["name"] == "transition_to_hindi"
-        assert "rule already matched" in default["description"]
-        assert "detected_language" in default["description"]
+        assert "already chose this transition" in default["description"]
+
+    async def test_matched_expression_wording_stays_the_same_across_turns(self):
+        agent = _agent(edge_order="priority", detected_language="hi")
+        route = self._route(agent, "transition_to_hindi")
+        await agent.decide_next_node_with_functions(_HISTORY)
+        first = route.call_args.args[1][-1]["function"]["description"]
+        await agent.decide_next_node_with_functions(_HISTORY * 3)
+        assert route.call_args.args[1][-1]["function"]["description"] == first
+        assert "actual=" not in first
 
     async def test_catch_all_default_keeps_its_none_apply_wording(self):
         agent = _agent(edge_order="priority", detected_language="en")
