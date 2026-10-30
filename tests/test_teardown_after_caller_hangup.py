@@ -31,6 +31,7 @@ def _task_manager_with_pending_goodbye():
     task_manager.hangup_mark_event_timeout = 10
     task_manager._turn_audio_flushed = asyncio.Event()
     task_manager._turn_audio_flushed.set()
+    task_manager.turn_audio_flush_claims = 0
     task_manager.mark_event_meta_data = marks
     task_manager.tools = {"input": input_handler}
     return task_manager, input_handler

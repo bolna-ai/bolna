@@ -432,3 +432,41 @@ async def test_a_regen_of_a_reply_cut_before_it_was_heard_is_spoken():
 
 async def test_a_regen_of_a_reply_the_caller_heard_is_still_suppressed():
     assert await _reply_cut_then_regenerated(heard=NEXT_QUESTION) is True
+
+
+# The caller went quiet after a reply, and the [silence] re-prompt asked the same question again. A re-prompt answers no
+# caller words, so the gate had nothing to compare and dropped it as a restatement: the caller heard nothing.
+UNCLEAR_ANSWER = "booked a bill"
+REASKED = "I didn't get your response clearly. Could you please share your preferred work location for the role?"
+SILENCE_MARKER = "[silence] User was silent for 7.0 seconds"
+
+
+async def _silence_reprompt(tm, turn):
+    tm.tools["output"] = MagicMock()
+    tm.task_config = {"tools_config": {"output": {"format": "pcm"}}}
+    tm.response_in_pipeline = False
+    meta = {"sequence_id": turn, "turn_id": turn, "response_uid": f"r{turn}"}
+    tm._TaskManager__get_updated_meta_info = MagicMock(return_value=meta)
+    tm._run_llm_task = AsyncMock()
+    await TaskManager._inject_and_run_llm(tm, SILENCE_MARKER)
+    return meta
+
+
+async def _reprompt_after_reply():
+    tm = _live_manager()
+    first = await _caller_says(tm, UNCLEAR_ANSWER, turn=7, reply_in_flight=False)
+    TaskManager._stage_assistant_history(tm, first, REASKED)
+    TaskManager._commit_staged_assistant_history(tm, 7)
+    return tm, await _silence_reprompt(tm, turn=8)
+
+
+async def test_a_silence_reprompt_restating_the_last_question_is_spoken():
+    tm, reprompt = await _reprompt_after_reply()
+    TaskManager._stage_assistant_history(tm, reprompt, REASKED)
+    assert _is_duplicate(tm, 8, reprompt) is False
+
+
+async def test_a_caller_speaking_over_a_silence_reprompt_takes_the_turn_back():
+    tm, _ = await _reprompt_after_reply()
+    await _caller_says(tm, "bangalore", turn=9, reply_in_flight=True)
+    assert tm._pending_user_input == (9, "bangalore", False)

@@ -22,6 +22,8 @@ def _handler(turn_streamed_text):
         stub._turn_audio_flushed.set()
     stub.synthesizer_tasks = []
     stub._turn_eos_forwarded = False
+    stub.turn_audio_flush_claims = 0
+    stub.claim_turn_audio_flush = lambda: TaskManager.claim_turn_audio_flush(stub)
     stub.forwarded = []
 
     async def _synthesize(packet):
