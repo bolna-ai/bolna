@@ -67,6 +67,7 @@ def _task_manager(llm):
     tm._TaskManager__store_into_history = MagicMock()
     tm._turn_audio_flushed = asyncio.Event()
     tm._turn_audio_flushed.set()
+    tm.turn_audio_flush_claims = 0
     tm._turn_eos_forwarded = False
     tm.synthesizer_tasks = []
     tm.forwarded = []

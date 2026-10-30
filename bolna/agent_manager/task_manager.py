@@ -517,6 +517,7 @@ class TaskManager(BaseManager):
         self._trunk_transfer_refused = False
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
+        self.turn_audio_flush_claims = 0
         self._turn_eos_forwarded = False
         self.hangup_mark_event_timeout = 10
 
@@ -3056,6 +3057,12 @@ class TaskManager(BaseManager):
             self.tools["output"].set_hangup_sent()
             await self.__process_end_of_conversation()
 
+    def claim_turn_audio_flush(self):
+        """Clear the playout flag for a new turn; the count tells a superseded turn it no longer owns the flag."""
+        self._turn_audio_flushed.clear()
+        self.turn_audio_flush_claims += 1
+        return self.turn_audio_flush_claims
+
     def _caller_disconnected(self) -> bool:
         """No media stream is left to play to: the caller hung up or run() already released the tools."""
         input_handler = self.tools.get("input")
@@ -3391,7 +3398,7 @@ class TaskManager(BaseManager):
 
         if next_step == "synthesizer" and not should_bypass_synth:
             if text_chunk and text_chunk.strip():
-                self._turn_audio_flushed.clear()
+                self.claim_turn_audio_flush()
             elif (
                 self.stream
                 and meta_info.get("end_of_llm_stream")
@@ -3760,7 +3767,7 @@ class TaskManager(BaseManager):
                         "end_of_llm_stream": True,
                         "text": handoff_text,
                     }
-                    self._turn_audio_flushed.clear()
+                    self.claim_turn_audio_flush()
                     await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
                     await self.wait_for_current_message()
                     if self._caller_disconnected():
@@ -4804,11 +4811,12 @@ class TaskManager(BaseManager):
         holds_flush = ends_call and not self.turn_based_conversation
         if holds_flush:
             # The hangup waits on this, and the clip sets it only once it has been sent.
-            self._turn_audio_flushed.clear()
+            flush_claim = self.claim_turn_audio_flush()
         try:
             await self._synthesize(ws_packet)
         except asyncio.CancelledError:
-            if holds_flush:
+            # A cancel can land after a newer turn claimed the flag; releasing it then hangs up over that turn.
+            if holds_flush and flush_claim == self.turn_audio_flush_claims:
                 self._turn_audio_flushed.set()
             raise
         if ends_call:
@@ -8312,6 +8320,8 @@ class TaskManager(BaseManager):
                 "format": self.task_config["tools_config"]["output"].get("format", "pcm"),
             }
         )
+        # A re-prompt repeats the question on purpose; fresh, so the duplicate gate never silences it.
+        self._pending_user_input = (meta_info.get("turn_id"), injected_message, True)
         self.response_in_pipeline = True
         task = asyncio.create_task(self._run_llm_task(create_ws_data_packet(injected_message, meta_info)))
         self.llm_task = task
