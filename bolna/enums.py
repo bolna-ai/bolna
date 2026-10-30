@@ -342,8 +342,7 @@ class NodeType(str, Enum):
 
 
 class EdgeOrder(str, Enum):
-    """How a node ranks its edges. TIERED: expression, then intent, then unconditional, with
-    priority ordering edges within a tier. PRIORITY: an intent edge can outrank an expression."""
+    """TIERED ranks edges by type, then priority; PRIORITY lets an intent edge outrank an expression."""
 
     TIERED = "tiered"
     PRIORITY = "priority"

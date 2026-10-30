@@ -686,8 +686,7 @@ class GraphEdge(BaseModel):
     # Optional parameters to collect during transition
     # Name -> type, e.g. {"city": "string"}, or name -> GraphEdgeParameter for a per-key definition.
     parameters: Optional[Dict[str, GraphEdgeParameterSpec]] = None
-    # lower = evaluated first within a tier (expression/intent/unconditional); ranks an intent edge
-    # against an expression edge only on a node with edge_order "priority".
+    # lower = evaluated first within a tier; across intent and expression only on an edge_order "priority" node.
     # Defaults: expression/unconditional=0, llm=100
     priority: Optional[int] = None
 
