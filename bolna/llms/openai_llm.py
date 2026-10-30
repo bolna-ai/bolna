@@ -233,7 +233,12 @@ class OpenAiLLM(OpenAICompatibleLLM):
         if self_hosted:
             base_url = kwargs.get("base_url")
             api_key = kwargs.get("llm_key", None)
-            self.async_client = AsyncOpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
+            run_id = kwargs.get("run_id")
+            # Bolna's inference gateway hashes on this to keep a call's turns on the replica holding its cache.
+            call_headers = {"X-Call-Id": run_id} if provider == LLMProvider.BOLNA.value and run_id else None
+            self.async_client = AsyncOpenAI(
+                base_url=base_url, api_key=api_key, http_client=http_client, default_headers=call_headers
+            )
         else:
             llm_key = kwargs.get("llm_key", os.getenv("OPENAI_API_KEY"))
             base_url = kwargs.get("base_url")
