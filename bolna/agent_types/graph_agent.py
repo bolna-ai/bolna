@@ -749,11 +749,18 @@ class GraphAgent(BaseAgent):
             return 0
         return 100
 
-    def _intents_outranking(self, node: dict, matched_expression: Optional[dict], intent_edges: list) -> list:
+    @staticmethod
+    def _is_silence_turn(history: list) -> bool:
+        return bool(history and history[-1].get("content", "").startswith("[silence]"))
+
+    def _intents_outranking(
+        self, node: dict, matched_expression: Optional[dict], intent_edges: list, history: list
+    ) -> list:
         """Intent edges ranked strictly above the matched expression, on a node that orders its
         edges by priority. A tie goes to the expression. An intent to the expression's own target
-        only counts when it extracts parameters, since otherwise it cannot change the outcome."""
-        if matched_expression is None or node.get("edge_order") != EdgeOrder.PRIORITY:
+        only counts when it extracts parameters, since otherwise it cannot change the outcome. A
+        [silence] turn has no new utterance to classify, so its matched expression stands."""
+        if matched_expression is None or node.get("edge_order") != EdgeOrder.PRIORITY or self._is_silence_turn(history):
             return []
         bar = self._edge_priority(matched_expression)
         return [
@@ -937,7 +944,7 @@ class GraphAgent(BaseAgent):
         hops = []
         visited = set()
         self._begin_routing_turn()
-        is_silence_trigger = bool(history and history[-1].get("content", "").startswith("[silence]"))
+        is_silence_trigger = self._is_silence_turn(history)
 
         while self._node_type_of(self.get_node_by_id(self.current_node_id)) == NodeType.ROUTER:
             if self.current_node_id in visited:
@@ -959,7 +966,9 @@ class GraphAgent(BaseAgent):
             catch_all = self._catch_all_edge(router_node)
             edge, eval_trace = self._match_expression_edge(router_node, deterministic_edges)
             # A matched expression is the default unless the node ranks intent edges above it.
-            contenders = intent_edges if edge is None else self._intents_outranking(router_node, edge, intent_edges)
+            contenders = (
+                intent_edges if edge is None else self._intents_outranking(router_node, edge, intent_edges, history)
+            )
             if edge is not None and contenders:
                 eval_trace = f"{eval_trace}; {_OUTRANKING_INTENTS_TRACE}"
 
@@ -1137,15 +1146,31 @@ class GraphAgent(BaseAgent):
         Optional[float],
         Optional[dict],
     ]:
-        """LLM routing over the intent edges. A default_edge (the catch-all) is offered as
-        a described transition instead of stay_on_current_node, so the model commits."""
+        """LLM routing over the intent edges. A default_edge (the catch-all, or on a priority-ordered
+        node the expression that already matched) is offered as a described transition instead of
+        stay_on_current_node, so the model commits."""
         option_edges = list(llm_edges)
         if default_edge is not None:
             # Always mark the default so the model can tell it apart from the intent edges,
             # appending the author's condition/description when there is one.
             hint = default_edge.get("function_description") or default_edge.get("condition")
-            marker = "Default route: choose this only when none of the other transitions apply."
-            default_edge = {**default_edge, "function_description": f"{marker} {hint}" if hint else marker}
+            if default_edge.get("condition_type") == EdgeConditionType.EXPRESSION:
+                rule = describe_edge_expression(default_edge, self.context_data, self.variable_types)
+                marker = (
+                    f"Default route: this node's rule already matched ({rule}). "
+                    "Choose another transition only when the caller clearly asks for it."
+                )
+            else:
+                marker = "Default route: choose this only when none of the other transitions apply."
+            # A default sharing an intent edge's tool name would make the two indistinguishable.
+            name = self._edge_function_name(default_edge)
+            if any(self._edge_function_name(edge) == name for edge in llm_edges):
+                name = f"{name}_default"
+            default_edge = {
+                **default_edge,
+                "function_name": name,
+                "function_description": f"{marker} {hint}" if hint else marker,
+            }
             option_edges.append(default_edge)
         tools = self._build_transition_tools_for_edges(option_edges, allow_stay=default_edge is None)
 
@@ -1317,7 +1342,7 @@ class GraphAgent(BaseAgent):
         # Intent edges ranked above the match get one LLM call with the match as the default;
         # an LLM that returns no decision leaves the match standing.
         r_messages = r_tools = r_usage = None
-        outranking = self._intents_outranking(current_node, matched_edge, intent_edges)
+        outranking = self._intents_outranking(current_node, matched_edge, intent_edges, history)
         if outranking:
             self._last_deterministic_eval = f"{self._last_deterministic_eval}; {_OUTRANKING_INTENTS_TRACE}"
             result = await self._decide_next_node_llm(
@@ -1757,7 +1782,7 @@ class GraphAgent(BaseAgent):
                     yield chunk
                 return
 
-            is_silence_trigger = bool(message and message[-1].get("content", "").startswith("[silence]"))
+            is_silence_trigger = self._is_silence_turn(message)
             if is_silence_trigger:
                 self._silence_repeats += 1
 

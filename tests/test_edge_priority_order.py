@@ -147,6 +147,60 @@ class TestNodeEdgeOrder:
         assert llm.call_args.kwargs["default_edge"]["to_node_id"] == "general"
 
 
+class TestDefaultRouteOffer:
+    def _route(self, agent, function_name, **arguments):
+        agent.routing_llm.route = AsyncMock(
+            return_value={
+                "function_name": function_name,
+                "arguments": {"reasoning": "r", "confidence": 0.9, **arguments},
+            }
+        )
+        return agent.routing_llm.route
+
+    async def test_default_gets_its_own_tool_name_when_it_shares_an_intents_target(self):
+        agent = _agent(edge_order="priority", detected_language="hi")
+        human = agent.config["nodes"][0]["edges"][1]
+        human.update(to_node_id="hindi", parameters={"reason": "string"})
+
+        route = self._route(agent, "transition_to_hindi_default")
+        result = await agent.decide_next_node_with_functions(_HISTORY)
+        tools = [t["function"]["name"] for t in route.call_args.args[1]]
+        assert tools == ["transition_to_hindi", "transition_to_hindi_default"]
+        assert result[0] == "hindi"
+        assert result[1] == {}
+
+        self._route(agent, "transition_to_hindi", reason="wants hindi")
+        result = await agent.decide_next_node_with_functions(_HISTORY)
+        assert result[1] == {"reason": "wants hindi"}
+
+    async def test_matched_expression_is_offered_as_the_rule_that_already_matched(self):
+        agent = _agent(edge_order="priority", detected_language="hi")
+        route = self._route(agent, "transition_to_hindi")
+        await agent.decide_next_node_with_functions(_HISTORY)
+
+        default = route.call_args.args[1][-1]["function"]
+        assert default["name"] == "transition_to_hindi"
+        assert "rule already matched" in default["description"]
+        assert "detected_language" in default["description"]
+
+    async def test_catch_all_default_keeps_its_none_apply_wording(self):
+        agent = _agent(edge_order="priority", detected_language="en")
+        route = self._route(agent, "transition_to_general")
+        await agent.decide_next_node_with_functions(_HISTORY)
+
+        default = route.call_args.args[1][-1]["function"]
+        assert default["name"] == "transition_to_general"
+        assert "none of the other transitions apply" in default["description"]
+
+    async def test_silence_turn_lets_the_matched_expression_stand(self):
+        agent = _agent(edge_order="priority", detected_language="hi")
+        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock) as llm:
+            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "[silence]"}])
+
+        llm.assert_not_called()
+        assert result[0] == "hindi"
+
+
 class TestRouterEdgeOrder:
     async def test_intent_ranked_above_matched_expression_wins(self):
         agent = _agent(node_type="router", edge_order="priority", detected_language="hi")
