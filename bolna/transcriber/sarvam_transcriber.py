@@ -68,6 +68,7 @@ class SarvamTranscriber(BaseTranscriber):
         self.disable_sdk = disable_sdk
         self.context = (context or "").strip()
         self.keyterms = self._resolve_keyterms(keywords)
+        self.hinglish_mode = kwargs.get("hinglish_mode")
 
         self.api_key = kwargs.get("transcriber_key", os.getenv("SARVAM_API_KEY"))
         self.api_host = os.getenv("SARVAM_HOST", "api.sarvam.ai")
@@ -155,7 +156,10 @@ class SarvamTranscriber(BaseTranscriber):
             ws_url = f"wss://{self.api_host}/speech-to-text/ws"
             params["language-code"] = self.language
 
-        if self.model == "saaras:v3":
+        is_hindi = (self.language or "").split("-")[0] == "hi"
+        if self.hinglish_mode and is_hindi and self.model in SAARAS_TRANSCRIBE_MODELS:
+            params["mode"] = "codemix"
+        elif self.model == "saaras:v3":
             params["mode"] = "transcribe"  # saaras:v3 supports direct transcription
 
         if self.high_vad_sensitivity:
