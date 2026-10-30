@@ -177,6 +177,7 @@ class GraphAgent(BaseAgent):
                 "temperature": self.config.get("temperature", 0.7),
                 "max_tokens": self.config.get("max_tokens", 150),
                 "provider": provider,
+                "run_id": self.config.get("execution_id"),
             }
 
             for key in [

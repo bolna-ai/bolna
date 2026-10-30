@@ -14,6 +14,7 @@ MODEL = "google/gemma-4-26B-A4B-it"
 BASE_URL = "https://gemma.inference.example.com/v1"
 HOSTED_KEY = "hosted-key"
 PLATFORM_KEY = "platform-openai-key"
+CALL_ID = "0b6f3c2e-8d1a-4c57-9e2b-5a7d1f4e6c90"
 MESSAGES = [{"role": "user", "content": "hi"}]
 
 
@@ -33,6 +34,13 @@ class TestClient:
 
     def test_is_not_ssrf_guarded(self):
         assert _hosted_llm()._base_url is None
+
+    def test_sends_the_call_id_for_replica_affinity(self):
+        assert _hosted_llm(run_id=CALL_ID).async_client.default_headers["X-Call-Id"] == CALL_ID
+
+    def test_customer_endpoint_never_gets_the_call_id(self):
+        llm = OpenAiLLM(model=MODEL, provider="custom", base_url=BASE_URL, llm_key=HOSTED_KEY, run_id=CALL_ID)
+        assert "X-Call-Id" not in llm.async_client.default_headers
 
     def test_responses_api_stays_off(self):
         assert _hosted_llm(use_responses_api=True).use_responses_api is False
@@ -59,6 +67,7 @@ def test_graph_agent_keeps_routing_and_hops_off_the_hosted_endpoint(monkeypatch)
         "provider": "bolna",
         "base_url": BASE_URL,
         "llm_key": HOSTED_KEY,
+        "execution_id": CALL_ID,
         "current_node_id": "start",
         "nodes": [{"id": "start", "prompt": "hi", "edges": []}],
     }
@@ -70,6 +79,7 @@ def test_graph_agent_keeps_routing_and_hops_off_the_hosted_endpoint(monkeypatch)
 
     assert conversation.call_args.kwargs["base_url"] == BASE_URL
     assert conversation.call_args.kwargs["llm_key"] == HOSTED_KEY
+    assert conversation.call_args.kwargs["run_id"] == CALL_ID
     assert isinstance(agent.voicemail_llm, AzureLLM)
     others = [call.kwargs for call in openai_llm.call_args_list]
     assert len(others) == 2
