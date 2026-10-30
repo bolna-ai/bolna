@@ -24,7 +24,15 @@ from bolna.helpers.utils import (
     static_node_ends_call,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
-from bolna.enums import ChatRole, EdgeConditionType, ExpressionOperator, LLMProvider, NodeType, ToolScope
+from bolna.enums import (
+    ChatRole,
+    EdgeConditionType,
+    EdgeOrder,
+    ExpressionOperator,
+    LLMProvider,
+    NodeType,
+    ToolScope,
+)
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import AzureLLM, OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -56,6 +64,7 @@ logger = configure_logger(__name__)
 
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
+_OUTRANKING_INTENTS_TRACE = "intent edges ranked above it checked first"
 # Root identifier in either syntax, so {{prior.loans}} still validates against recipient_data["prior"].
 _PROMPT_VAR_PATTERN = re.compile(r"\{\{?\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z0-9_]+|\[[^\[\]{}]+\])*\s*\}\}?")
 _ROUTER_REASONING_DESC = "Brief explanation of why this routing decision was made"
@@ -727,9 +736,36 @@ class GraphAgent(BaseAgent):
             else:
                 llm.append(edge)
 
-        deterministic.sort(key=lambda e: e["priority"] if e.get("priority") is not None else 0)
-        llm.sort(key=lambda e: e["priority"] if e.get("priority") is not None else 100)
+        deterministic.sort(key=self._edge_priority)
+        llm.sort(key=self._edge_priority)
         return deterministic, llm
+
+    @staticmethod
+    def _edge_priority(edge: dict) -> int:
+        """The author's priority, else the type default: expression/unconditional 0, intent 100."""
+        if edge.get("priority") is not None:
+            return edge["priority"]
+        if edge.get("condition_type") in (EdgeConditionType.EXPRESSION, EdgeConditionType.UNCONDITIONAL):
+            return 0
+        return 100
+
+    @staticmethod
+    def _is_silence_turn(history: list) -> bool:
+        return bool(history and history[-1].get("content", "").startswith("[silence]"))
+
+    def _intents_outranking(
+        self, node: dict, matched_expression: Optional[dict], intent_edges: list, history: list
+    ) -> list:
+        """Intents outranking the matched expression on a priority node; same-node ones only if they extract."""
+        if matched_expression is None or node.get("edge_order") != EdgeOrder.PRIORITY or self._is_silence_turn(history):
+            return []
+        bar = self._edge_priority(matched_expression)
+        return [
+            edge
+            for edge in intent_edges
+            if self._edge_priority(edge) < bar
+            and (edge["to_node_id"] != matched_expression["to_node_id"] or edge.get("parameters"))
+        ]
 
     def _evaluate_deterministic_edges(self, edges: list) -> Tuple[Optional[dict], List[str]]:
         """Return (first matching deterministic edge or None, per-edge evaluation traces)."""
@@ -838,7 +874,7 @@ class GraphAgent(BaseAgent):
         unconditional = [e for e in node.get("edges", []) if e.get("condition_type") == EdgeConditionType.UNCONDITIONAL]
         if not unconditional:
             return None
-        return min(unconditional, key=lambda e: e["priority"] if e.get("priority") is not None else 0)
+        return min(unconditional, key=GraphAgent._edge_priority)
 
     def _consume_routing_tail(self):
         tail, self._pending_routing_tail = self._pending_routing_tail, None
@@ -897,14 +933,36 @@ class GraphAgent(BaseAgent):
             "is_silence_trigger": is_silence_trigger,
         }
 
+    async def _route_node(
+        self, node: dict, history: list, start_time: float
+    ) -> Tuple[Optional[dict], Optional[dict], str, Optional[tuple], Optional[tuple]]:
+        """One routing pass shared by both paths. Returns (matched, catch_all, eval_trace, decision, declined),
+        where decision/declined is the routing call's result when it chose an edge / chose none."""
+        deterministic_edges, intent_edges = self._classify_edges(node.get("edges", []))
+        catch_all = self._catch_all_edge(node)
+        matched, eval_trace = self._match_expression_edge(node, deterministic_edges)
+        contenders = intent_edges if matched is None else self._intents_outranking(node, matched, intent_edges, history)
+        if not contenders:
+            return matched, catch_all, eval_trace, None, None
+        if matched is not None:
+            eval_trace = f"{eval_trace}; {_OUTRANKING_INTENTS_TRACE}"
+        result = await self._decide_next_node_llm(
+            node, contenders, history, start_time, default_edge=matched or catch_all
+        )
+        next_node_id, *_ = result
+        if next_node_id is not None:
+            return matched, catch_all, eval_trace, result, None
+        return matched, catch_all, eval_trace, None, result
+
     async def _resolve_router_chain(self, history: list) -> List[dict]:
         """Hop silently through routers to a speaking node, one routing_info per hop.
-        Per hop: expression, then one intent-LLM call, then the unconditional catch-all.
+        Per hop: expression, then one intent-LLM call, then the unconditional catch-all. On a
+        router with edge_order "priority", intent edges ranked above the matched expression come first.
         The visited-set bounds the hops so the chain always terminates."""
         hops = []
         visited = set()
         self._begin_routing_turn()
-        is_silence_trigger = bool(history and history[-1].get("content", "").startswith("[silence]"))
+        is_silence_trigger = self._is_silence_turn(history)
 
         while self._node_type_of(self.get_node_by_id(self.current_node_id)) == NodeType.ROUTER:
             if self.current_node_id in visited:
@@ -922,15 +980,9 @@ class GraphAgent(BaseAgent):
             router_node = self.get_node_by_id(self.current_node_id)
             previous_node = self.current_node_id
 
-            deterministic_edges, intent_edges = self._classify_edges(router_node.get("edges", []))
-            catch_all = self._catch_all_edge(router_node)
-            edge, eval_trace = self._match_expression_edge(router_node, deterministic_edges)
+            edge, catch_all, eval_trace, decision, declined = await self._route_node(router_node, history, hop_start)
 
-            # Telemetry from an intent call that returned no match, carried onto the
-            # catch-all hop so its tokens are still counted and the call is still logged.
-            spent_messages = spent_tools = spent_usage = None
-
-            if edge is None and intent_edges:
+            if decision is not None:
                 (
                     next_node_id,
                     extracted_params,
@@ -940,33 +992,35 @@ class GraphAgent(BaseAgent):
                     reasoning,
                     confidence,
                     routing_usage,
-                ) = await self._decide_next_node_llm(
-                    router_node, intent_edges, history, hop_start, default_edge=catch_all
+                ) = decision
+                self._advance_to_node(next_node_id, entry_index=len(history))
+                self._apply_extracted_params(extracted_params)
+                logger.info(
+                    f"Router dispatch (intent) on node '{previous_node}': -> {self.current_node_id} "
+                    f"| {reasoning} (latency: {latency_ms:.1f}ms)"
                 )
-                if next_node_id:
-                    self._advance_to_node(next_node_id, entry_index=len(history))
-                    self._apply_extracted_params(extracted_params)
-                    logger.info(
-                        f"Router dispatch (intent) on node '{previous_node}': -> {self.current_node_id} "
-                        f"| {reasoning} (latency: {latency_ms:.1f}ms)"
+                hops.append(
+                    self._router_hop_info(
+                        previous_node,
+                        routing_type="llm",
+                        latency_ms=latency_ms,
+                        started_at=hop_started_at,
+                        reasoning=reasoning,
+                        confidence=confidence,
+                        is_silence_trigger=is_silence_trigger,
+                        extracted_params=extracted_params,
+                        routing_messages=routing_messages,
+                        routing_tools=routing_tools,
+                        routing_expression=eval_trace,
+                        routing_usage=routing_usage,
                     )
-                    hops.append(
-                        self._router_hop_info(
-                            previous_node,
-                            routing_type="llm",
-                            latency_ms=latency_ms,
-                            started_at=hop_started_at,
-                            reasoning=reasoning,
-                            confidence=confidence,
-                            is_silence_trigger=is_silence_trigger,
-                            extracted_params=extracted_params,
-                            routing_messages=routing_messages,
-                            routing_tools=routing_tools,
-                            routing_usage=routing_usage,
-                        )
-                    )
-                    continue
-                spent_messages, spent_tools, spent_usage = routing_messages, routing_tools, routing_usage
+                )
+                continue
+
+            # Telemetry from an intent call that returned no match, carried onto the
+            # deterministic hop so its tokens are still counted and the call is still logged.
+            _, _, _, spent_messages, spent_tools, _, _, spent_usage = declined or (None,) * 8
+            if declined is not None:
                 eval_trace = f"{eval_trace}; intent: no match"
 
             if edge is None:
@@ -1099,15 +1153,29 @@ class GraphAgent(BaseAgent):
         Optional[float],
         Optional[dict],
     ]:
-        """LLM routing over the intent edges. A default_edge (the catch-all) is offered as
-        a described transition instead of stay_on_current_node, so the model commits."""
+        """LLM routing over the intent edges. A default_edge (the catch-all or a matched expression) is
+        offered as a described transition instead of stay_on_current_node, so the model commits."""
         option_edges = list(llm_edges)
         if default_edge is not None:
             # Always mark the default so the model can tell it apart from the intent edges,
             # appending the author's condition/description when there is one.
             hint = default_edge.get("function_description") or default_edge.get("condition")
             marker = "Default route: choose this only when none of the other transitions apply."
-            default_edge = {**default_edge, "function_description": f"{marker} {hint}" if hint else marker}
+            name = self._edge_function_name(default_edge)
+            if default_edge.get("condition_type") == EdgeConditionType.EXPRESSION:
+                # Fixed text keeps the routing prompt prefix cacheable.
+                marker = (
+                    "Default route: a rule on this node already chose this transition. "
+                    "Choose another transition only when the caller clearly asks for it."
+                )
+                # A same-node intent needs a distinct name to keep its parameters.
+                if any(self._edge_function_name(edge) == name for edge in llm_edges):
+                    name = f"{name}_default"
+            default_edge = {
+                **default_edge,
+                "function_name": name,
+                "function_description": f"{marker} {hint}" if hint else marker,
+            }
             option_edges.append(default_edge)
         tools = self._build_transition_tools_for_edges(option_edges, allow_stay=default_edge is None)
 
@@ -1269,12 +1337,17 @@ class GraphAgent(BaseAgent):
         # Inject time variables and turn counts for expression evaluation
         self._enrich_routing_context(history)
 
-        deterministic_edges, intent_edges = self._classify_edges(edges)
-        catch_all = self._catch_all_edge(current_node)
+        matched_edge, catch_all, self._last_deterministic_eval, decision, declined = await self._route_node(
+            current_node, history, start_time
+        )
+        if decision is not None:
+            return decision
+        # A declined call's telemetry rides on the deterministic result.
+        _, _, declined_latency_ms, r_messages, r_tools, _, _, r_usage = declined or (None,) * 8
 
-        # Tier 1: expression edges
-        matched_edge, self._last_deterministic_eval = self._match_expression_edge(current_node, deterministic_edges)
         if matched_edge:
+            if declined is not None:
+                self._last_deterministic_eval = f"{self._last_deterministic_eval}; intent: no match"
             latency_ms = (time.perf_counter() - start_time) * 1000
             ct = matched_edge.get("condition_type", EdgeConditionType.EXPRESSION)
             reasoning = f"{_DETERMINISTIC_REASONING_PREFIX}{ct}:{matched_edge.get('condition', ct)}"
@@ -1282,47 +1355,28 @@ class GraphAgent(BaseAgent):
                 f"Routing decision (expression) on node '{self.current_node_id}': "
                 f"-> {matched_edge['to_node_id']} | {self._last_deterministic_eval} (latency: {latency_ms:.1f}ms)"
             )
-            return matched_edge["to_node_id"], None, latency_ms, None, None, reasoning, 1.0, None
+            return matched_edge["to_node_id"], None, latency_ms, r_messages, r_tools, reasoning, 1.0, r_usage
 
-        # Tier 2: intent edges via one LLM call; the catch-all is offered as the default (no stay).
-        if intent_edges:
-            result = await self._decide_next_node_llm(
-                current_node, intent_edges, history, start_time, default_edge=catch_all
-            )
-            if result[0] is not None:
-                return result
-            if catch_all is not None:
-                # LLM declined: advance via the default, carrying the spent telemetry.
-                latency_ms, r_messages, r_tools, r_usage = result[2], result[3], result[4], result[7]
-                self._last_deterministic_eval = f"intent: no match; default -> {catch_all['to_node_id']}"
-                return (
-                    catch_all["to_node_id"],
-                    None,
-                    latency_ms,
-                    r_messages,
-                    r_tools,
-                    self._catch_all_reasoning(catch_all),
-                    1.0,
-                    r_usage,
-                )
-            return result  # no default: stay
-
-        # Tier 3: no intent edges, take the default if present, else stay.
         if catch_all is not None:
-            latency_ms = (time.perf_counter() - start_time) * 1000
-            self._last_deterministic_eval = f"default -> {catch_all['to_node_id']}"
+            if declined is not None:
+                latency_ms = declined_latency_ms
+                self._last_deterministic_eval = f"intent: no match; default -> {catch_all['to_node_id']}"
+            else:
+                latency_ms = (time.perf_counter() - start_time) * 1000
+                self._last_deterministic_eval = f"default -> {catch_all['to_node_id']}"
             return (
                 catch_all["to_node_id"],
                 None,
                 latency_ms,
-                None,
-                None,
+                r_messages,
+                r_tools,
                 self._catch_all_reasoning(catch_all),
                 1.0,
-                None,
+                r_usage,
             )
 
-        return None, None, 0, None, None, None, None, None
+        # No default: stay.
+        return declined if declined is not None else (None, None, 0, None, None, None, None, None)
 
     def get_node_by_id(self, node_id: str) -> Optional[dict]:
         return next((node for node in self.config.get("nodes", []) if node["id"] == node_id), None)
@@ -1703,7 +1757,7 @@ class GraphAgent(BaseAgent):
                     yield chunk
                 return
 
-            is_silence_trigger = bool(message and message[-1].get("content", "").startswith("[silence]"))
+            is_silence_trigger = self._is_silence_turn(message)
             if is_silence_trigger:
                 self._silence_repeats += 1
 
@@ -1751,13 +1805,12 @@ class GraphAgent(BaseAgent):
                         "current_node": self.current_node_id,
                         "transitioned": next_node_id is not None,
                         "routing_type": routing_type,
-                        "routing_model": self._last_routing_model if routing_type == "llm" else self.routing_model,
+                        # Reset each turn, so this names the model any routing call this turn ran on.
+                        "routing_model": self._last_routing_model,
                         "routing_provider": getattr(self, "routing_provider", None),
                         "routing_latency_ms": round(routing_latency_ms, 1),
                         "routing_started_at": routing_started_at,
-                        "routing_reasoning_effort": self._last_routing_effort
-                        if routing_type == "llm"
-                        else getattr(self, "_routing_reasoning_effort_used", None),
+                        "routing_reasoning_effort": self._last_routing_effort,
                         "extracted_params": extracted_params or {},
                         "node_history": list(self.node_history),
                         "routing_messages": routing_messages,
