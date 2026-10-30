@@ -285,8 +285,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     return LLMStreamChunk(
                         data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True
                     )
-            for k, v in parsed_args.items():
-                setattr(api_call_payload, k, v)
+            api_call_payload.arguments = parsed_args
             logger.info(f"Text tool call rescue succeeded: {func_name}")
         except Exception as e:
             logger.error(f"Text tool call rescue: failed to apply args for {func_name}: {e}")
@@ -496,8 +495,7 @@ class OpenAICompatibleLLM(BaseLLM):
                         is_cached=False,
                         run_id=self.run_id,
                     )
-                    for k, v in parsed_args.items():
-                        setattr(api_call_payload, k, v)
+                    api_call_payload.arguments = parsed_args
                 else:
                     api_call_payload.resp = None
             except (json.JSONDecodeError, KeyError) as e:

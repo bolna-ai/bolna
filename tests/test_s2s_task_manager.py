@@ -759,7 +759,7 @@ class TestToolDispatch:
 
         _, _, param, resp, _ = tm._execute_transfer_call_webhook.await_args.args
         assert param == {"call_transfer_number": "+15550001"}
-        assert resp == {"reason": "wants a human"}
+        assert resp == {"arguments": {"reason": "wants a human"}, "tool_call_id": "c1"}
 
     async def test_duplicate_transfer_is_ignored(self):
         tm = make_tm(tools_params={"transfer_call": {"url": "https://hook.example/transfer"}})
@@ -785,7 +785,7 @@ class TestToolDispatch:
             await tm._s2s_execute_tool(s2s_events.FunctionCall(name="book", call_id="c1", arguments='{"day":"mon"}'))
 
         assert api.await_args.kwargs["url"] == "https://api.example/book"
-        assert api.await_args.kwargs["day"] == "mon"
+        assert api.await_args.kwargs["arguments"] == {"day": "mon"}
         assert tm.tools["s2s"].send_function_result.await_args.args[2] == '{"ok":1}'
 
     async def test_a_bare_name_runs_the_prefixed_custom_tool(self):
