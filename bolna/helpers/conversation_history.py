@@ -11,6 +11,16 @@ class ConversationHistory:
     def __init__(self, initial_history: list[dict] | None = None):
         self._messages: list[dict] = initial_history or []
         self._interim: list[dict] = copy.deepcopy(self._messages)
+        # A graph agent's: returns the node it's on, stamped on each assistant message (see with_node).
+        self.current_node = None
+
+    def with_node(self, message: dict) -> dict:
+        """The assistant message with the node the agent is on, unless it already names the node that spoke it."""
+        if self.current_node is not None and not message.get("node"):
+            node = self.current_node()
+            if node:
+                message["node"] = node
+        return message
 
     def setup_system_prompt(self, system_prompt: dict):
         if system_prompt.get("content", ""):
@@ -23,7 +33,7 @@ class ConversationHistory:
 
     def append_welcome_message(self, content: str):
         if content:
-            self._messages.append({"role": ChatRole.ASSISTANT, "content": content})
+            self._messages.append(self.with_node({"role": ChatRole.ASSISTANT, "content": content}))
 
         self._interim = copy.deepcopy(self._messages)
 
@@ -62,7 +72,7 @@ class ConversationHistory:
                 if tool_calls is not None:
                     last["tool_calls"] = tool_calls
                 return
-        msg = {"role": ChatRole.ASSISTANT, "content": content, **kwargs}
+        msg = self.with_node({"role": ChatRole.ASSISTANT, "content": content, **kwargs})
         if tool_calls is not None:
             msg["tool_calls"] = tool_calls
         self._messages.append(msg)
@@ -77,8 +87,14 @@ class ConversationHistory:
         msgs.append({"role": ChatRole.ASSISTANT, "content": content, "turn_id": turn_id})
 
     def upsert_assistant_for_response(
-        self, response_uid: str | None, content: str, interim: bool = False, turn_id: int | None = None
+        self,
+        response_uid: str | None,
+        content: str,
+        interim: bool = False,
+        turn_id: int | None = None,
+        **stamps,
     ):
+        """stamps (node, sequence_id): what a message it adopts or adds is stamped with, as a commit stamps one."""
         msgs = self._interim if interim else self._messages
         if response_uid is not None:
             for i in range(len(msgs) - 1, -1, -1):
@@ -99,8 +115,14 @@ class ConversationHistory:
                 ):
                     msgs[i]["content"] = content
                     msgs[i]["response_uid"] = response_uid
+                    msgs[i].update(stamps)
                     return
-        msgs.append({"role": ChatRole.ASSISTANT, "content": content, "turn_id": turn_id, "response_uid": response_uid})
+        msgs.append(
+            self.with_node(
+                {"role": ChatRole.ASSISTANT, "content": content, "turn_id": turn_id, "response_uid": response_uid}
+                | stamps
+            )
+        )
 
     def append_tool_result(self, tool_call_id: str, content: str):
         self._messages.append(

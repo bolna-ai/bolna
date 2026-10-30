@@ -592,6 +592,7 @@ class TaskManager(BaseManager):
         self.first_message_task_new = asyncio.create_task(self.message_task_new())
 
         self.conversation_history = ConversationHistory(conversation_history)
+        self.conversation_history.current_node = self.graph_node
         self.label_flow = []
 
         # Setup IO SERVICE, TRANSCRIBER, LLM, SYNTHESIZER
@@ -807,7 +808,7 @@ class TaskManager(BaseManager):
             if self.check_user_online_message_config and self.context_data:
                 if isinstance(self.check_user_online_message_config, dict):
                     self.check_user_online_message_config = {
-                        lang: update_prompt_with_context(msg, self.context_data)
+                        lang: update_prompt_with_context(msg, self.context_data, lang)
                         for lang, msg in self.check_user_online_message_config.items()
                     }
                 else:
@@ -1306,6 +1307,11 @@ class TaskManager(BaseManager):
     @history.setter
     def history(self, value):
         self.conversation_history._messages = value
+
+    def graph_node(self):
+        """The node a graph agent is on now; None for any other agent."""
+        agent = getattr(self, "tools", {}).get("llm_agent")
+        return agent.current_node_id if isinstance(agent, GraphAgent) else None
 
     @property
     def interim_history(self):
@@ -2205,6 +2211,7 @@ class TaskManager(BaseManager):
                 injected_cfg["compact_threshold"] = self.llm_config["compact_threshold"]
             injected_cfg["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get("buffer_size")
             injected_cfg["language"] = self.language
+            injected_cfg["execution_id"] = self.run_id
 
             llm_agent = KnowledgeBaseAgent(injected_cfg)
             logger.info("Knowledge agent created with rag-proxy-server support")
@@ -2304,6 +2311,8 @@ class TaskManager(BaseManager):
                 self.context_data,
                 self.timezone,
                 self.is_web_based_call,
+                self.language,
+                self.language,
             )
 
             notes = ""
@@ -2332,6 +2341,8 @@ class TaskManager(BaseManager):
                     self.context_data,
                     self.timezone,
                     self.is_web_based_call,
+                    lang_code,
+                    self.language,
                 )
                 notes = ""
                 if self._is_conversation_task() and self.use_fillers:
@@ -2765,11 +2776,20 @@ class TaskManager(BaseManager):
                     f"sync_history: materializing assistant turn from heard audio | turn_id={target_turn_id} response_uid={target_response_uid} "
                     f"text={response_heard!r}"
                 )
-                self.conversation_history.upsert_assistant_for_response(
-                    target_response_uid, response_heard, interim=False, turn_id=target_turn_id
+                # A reply still staged (its audio blocked before the commit) keeps its sequence_id and node.
+                stamps = next(
+                    (
+                        {"sequence_id": sequence_id} | ({"node": staged["node"]} if staged.get("node") else {})
+                        for sequence_id, staged in self._pending_assistant_history.items()
+                        if staged["response_uid"] == target_response_uid
+                    ),
+                    {},
                 )
                 self.conversation_history.upsert_assistant_for_response(
-                    target_response_uid, response_heard, interim=True, turn_id=target_turn_id
+                    target_response_uid, response_heard, interim=False, turn_id=target_turn_id, **stamps
+                )
+                self.conversation_history.upsert_assistant_for_response(
+                    target_response_uid, response_heard, interim=True, turn_id=target_turn_id, **stamps
                 )
                 for i in range(len(self.conversation_history.messages) - 1, -1, -1):
                     msg = self.conversation_history.messages[i]
@@ -3244,7 +3264,7 @@ class TaskManager(BaseManager):
             if static_text:
                 if self.context_data:
                     static_text = update_prompt_with_context(static_text, self.context_data)
-                self.conversation_history.append_assistant(static_text)
+                self.conversation_history.append_assistant(static_text, sequence_id=-1)
                 meta_info = {
                     "io": self.tools["output"].get_provider(),
                     "request_id": str(uuid.uuid4()),
@@ -3308,12 +3328,14 @@ class TaskManager(BaseManager):
 
         if self.hangup_message_queued:
             self.history.append(
-                {
-                    "role": "assistant",
-                    "content": self.call_hangup_message,
-                    "sequence_id": -1,
-                    "message_category": "agent_hangup",
-                }
+                self.conversation_history.with_node(
+                    {
+                        "role": "assistant",
+                        "content": self.call_hangup_message,
+                        "sequence_id": -1,
+                        "message_category": "agent_hangup",
+                    }
+                )
             )
 
         self.conversation_ended = True
@@ -4180,6 +4202,11 @@ class TaskManager(BaseManager):
         # the final chunk of THIS generation carries the flag.
         meta_info.pop("end_of_llm_stream", None)
 
+        # The node this generation speaks from: where the agent stands, then where each routing decision lands.
+        # Its reply is committed only once its audio is sent, by when a newer turn may already have routed.
+        if node := self.graph_node():
+            meta_info["node"] = node
+
         # Reset response tracking for new turn
         self.tools["input"].reset_response_heard_by_user()
 
@@ -4278,6 +4305,8 @@ class TaskManager(BaseManager):
 
                     meta_info["llm_metadata"] = meta_info.get("llm_metadata") or {}
                     meta_info["llm_metadata"]["graph_routing_info"] = routing_info
+                    if routing_info.get("current_node"):
+                        meta_info["node"] = routing_info["current_node"]
 
                     routing_usage = routing_info.get("routing_usage") or {}
                     if routing_info.get("routing_latency_ms") is not None:
@@ -5325,6 +5354,7 @@ class TaskManager(BaseManager):
             "turn_id": turn_id,
             "response_uid": response_uid,
             "message_category": meta_info.get("message_category"),
+            "node": meta_info.get("node"),
             "user_input": answered[1] if answered else None,
             "answers_fresh_turn": answered[2] if answered else False,
         }
@@ -5414,11 +5444,13 @@ class TaskManager(BaseManager):
         self._committed_assistant_sequences.add(sequence_id)
         self._last_spoken_assistant = (staged["turn_id"], staged["content"])
         self._last_spoken_user_input = staged.get("user_input")
+        stamps = {"sequence_id": sequence_id} | ({"node": staged["node"]} if staged.get("node") else {})
         msg = self.conversation_history.fill_tool_call_placeholder(
             staged["turn_id"],
             staged["content"],
             response_uid=staged["response_uid"],
             message_category=staged.get("message_category"),
+            **stamps,
         )
         if msg is None:
             self.conversation_history.append_assistant(
@@ -5426,6 +5458,7 @@ class TaskManager(BaseManager):
                 turn_id=staged["turn_id"],
                 response_uid=staged["response_uid"],
                 message_category=staged.get("message_category"),
+                **stamps,
             )
             msg = self.conversation_history.messages[-1]
         if staged["turn_id"] is not None:
