@@ -27,6 +27,9 @@ class FakeStreamSynth:
         self.meta_info = None
         self.provider_name = "elevenlabs"
         self.first_chunk_generated = False
+        self.settles_lost_turns = False
+        self.current_turn_start_time = None
+        self.current_turn_socket = None
 
     async def receiver(self):
         for item in self.recv_items:
@@ -52,6 +55,10 @@ class FakeStreamSynth:
 
     def _record_turn_latency(self):
         pass
+
+    _receive = StreamSynthesizer._receive
+    _turn_lost_with_socket = StreamSynthesizer._turn_lost_with_socket
+    has_unsettled_turn_on = StreamSynthesizer.has_unsettled_turn_on
 
 
 async def drain(fake):
