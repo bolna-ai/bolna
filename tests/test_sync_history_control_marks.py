@@ -74,6 +74,7 @@ def _make_task_manager(history):
     tm.tools = {"input": _InputStub()}
     tm.mark_event_meta_data = _MarkMetaStub()
     tm._turn_msg_map = {}
+    tm._last_spoken_assistant = None
     return tm
 
 

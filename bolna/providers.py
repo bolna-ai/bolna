@@ -14,6 +14,7 @@ from .synthesizer import (
     KalpaSynthesizer,
     GeminiSynthesizer,
     SonioxSynthesizer,
+    NavanaSynthesizer,
 )
 from .transcriber import (
     DeepgramTranscriber,
@@ -88,6 +89,7 @@ SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.KALPA.value: KalpaSynthesizer,
     SynthesizerProvider.GEMINI.value: GeminiSynthesizer,
     SynthesizerProvider.SONIOX.value: SonioxSynthesizer,
+    SynthesizerProvider.NAVANA.value: NavanaSynthesizer,
     SynthesizerProvider.CUSTOM.value: custom_synthesizer,
 }
 
