@@ -1154,18 +1154,17 @@ class GraphAgent(BaseAgent):
             # Always mark the default so the model can tell it apart from the intent edges,
             # appending the author's condition/description when there is one.
             hint = default_edge.get("function_description") or default_edge.get("condition")
+            marker = "Default route: choose this only when none of the other transitions apply."
+            name = self._edge_function_name(default_edge)
             if default_edge.get("condition_type") == EdgeConditionType.EXPRESSION:
                 rule = describe_edge_expression(default_edge, self.context_data, self.variable_types)
                 marker = (
                     f"Default route: this node's rule already matched ({rule}). "
                     "Choose another transition only when the caller clearly asks for it."
                 )
-            else:
-                marker = "Default route: choose this only when none of the other transitions apply."
-            # A default sharing an intent edge's tool name would make the two indistinguishable.
-            name = self._edge_function_name(default_edge)
-            if any(self._edge_function_name(edge) == name for edge in llm_edges):
-                name = f"{name}_default"
+                # An intent to the same node keeps its parameters only if its tool name differs.
+                if any(self._edge_function_name(edge) == name for edge in llm_edges):
+                    name = f"{name}_default"
             default_edge = {
                 **default_edge,
                 "function_name": name,
