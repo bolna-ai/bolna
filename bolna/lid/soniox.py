@@ -31,6 +31,7 @@ class SonioxLID(LIDBackend):
 
     def __init__(self, on_language, config):
         super().__init__(on_language, config)
+        self._background_tasks = set()
         self._api_key = config.get("soniox_api_key") or os.getenv("SONIOX_API_KEY", "")
         self._host = config.get("soniox_host") or SONIOX_WEBSOCKET_HOST
         self._telephony = config.get("telephony_provider", "")
@@ -92,7 +93,13 @@ class SonioxLID(LIDBackend):
         self.segments_received += 1
         self._accumulate(text, lang, audio_s, prob=prob)
         if self.on_language is not None and lang:
-            asyncio.create_task(self.on_language(lang, None))  # legacy per-segment signal
+            # asyncio.create_task() only holds a weak reference; an unstored task can be
+            # garbage-collected mid-execution (silently dropping this legacy per-segment
+            # signal). Keep a strong reference until it finishes, same as the identical
+            # on_language dispatch already fixed in the sibling SarvamLID backend.
+            task = asyncio.create_task(self.on_language(lang, None))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
     def _handle_message(self, data: dict):
         if data.get("error_code") is not None:
