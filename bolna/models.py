@@ -891,7 +891,13 @@ class LlmAgent(BaseModel):
         expected_type = valid_config_types[agent_type]
 
         if not isinstance(value, dict):
-            raise ValueError(f"llm_config must be a dict, got {type(value)}")
+            # The quickstart examples pass a SimpleLlmAgent instance. Accept that and a raw dict.
+            if hasattr(value, "model_dump"):
+                value = value.model_dump()
+            elif hasattr(value, "dict"):
+                value = value.dict()
+            else:
+                raise ValueError(f"llm_config must be a dict, got {type(value)}")
 
         try:
             return expected_type(**value)

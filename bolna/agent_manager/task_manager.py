@@ -997,7 +997,11 @@ class TaskManager(BaseManager):
             if self.tools.get("transcriber") is not None:
                 self.tools["transcriber"].set_agent_context_source(self.conversation_history.last_assistant_content)
             self.__setup_synthesizer(self.llm_config)
-            if not self.turn_based_conversation and task_id == 0:
+            if (
+                not self.turn_based_conversation
+                and task_id == 0
+                and self.tools.get("synthesizer") is not None
+            ):
                 self.synthesizer_monitor_task = asyncio.create_task(self.tools["synthesizer"].monitor_connection())
 
         # Language switching, gated per call by the LANGUAGE_SWITCH feature flag
@@ -1981,9 +1985,8 @@ class TaskManager(BaseManager):
 
     def __setup_synthesizer(self, llm_config=None):
         if self._is_conversation_task():
-            self.kwargs["use_turbo"] = (
-                self.task_config["tools_config"]["transcriber"]["language"] == DEFAULT_LANGUAGE_CODE
-            )
+            transcriber_cfg = self.task_config["tools_config"].get("transcriber") or {}
+            self.kwargs["use_turbo"] = transcriber_cfg.get("language") == DEFAULT_LANGUAGE_CODE
         if self.task_config["tools_config"]["synthesizer"] is not None:
             synth_config = self.task_config["tools_config"]["synthesizer"]
 
