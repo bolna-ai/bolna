@@ -26,15 +26,18 @@ class Assistant:
         tools_config_args["input"] = {"format": "wav", "provider": "default"}
 
         tools_config_args["output"] = {"format": "wav", "provider": "default"}
+        # Store both legs even when absent. A text-only task has no transcriber, and a
+        # speech-in/text-out task has no synthesizer; omitting the key made TaskManager
+        # fall through to a speech setup and crash.
+        tools_config_args["transcriber"] = transcriber
+        tools_config_args["synthesizer"] = synthesizer
         if transcriber is None:
             pipelines.append(["llm"])
-            tools_config_args["transcriber"] = transcriber
-
-        pipeline = ["transcriber", "llm"]
-        if synthesizer is not None:
-            pipeline.append("synthesizer")
-            tools_config_args["synthesizer"] = synthesizer
-        pipelines.append(pipeline)
+        else:
+            pipeline = ["transcriber", "llm"]
+            if synthesizer is not None:
+                pipeline.append("synthesizer")
+            pipelines.append(pipeline)
 
         if enable_textual_input:
             pipelines.append(["llm"])
