@@ -26,9 +26,9 @@ class Assistant:
         tools_config_args["input"] = {"format": "wav", "provider": "default"}
 
         tools_config_args["output"] = {"format": "wav", "provider": "default"}
+        tools_config_args["transcriber"] = transcriber
         if transcriber is None:
             pipelines.append(["llm"])
-            tools_config_args["transcriber"] = transcriber
 
         pipeline = ["transcriber", "llm"]
         if synthesizer is not None:
