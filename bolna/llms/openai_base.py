@@ -61,6 +61,10 @@ def _new_items_start(messages):
     return 0
 
 
+def _system_prompt(messages):
+    return messages[0].get("content") if messages and messages[0].get("role") == ChatRole.SYSTEM else None
+
+
 def _last_assistant_turn_end(messages):
     """Index past the last assistant message and the tool outputs answering it."""
     i = _new_items_start(messages)
@@ -83,6 +87,9 @@ class OpenAICompatibleLLM(BaseLLM):
 
     # Set by subclasses whose backend cannot force tool_choice (SCHEMA_FORCED_TOOL_PROVIDERS).
     _forces_tools_by_schema = False
+
+    # The system prompt the Responses chain was built on; None until a request records one.
+    _chain_system_prompt = None
 
     # A reasoning summary streams ahead of the answer text, so it is opt-in: requesting one costs
     # time to first spoken token on a live call. Set from config by subclasses; None omits it.
@@ -328,6 +335,14 @@ class OpenAICompatibleLLM(BaseLLM):
                 logger.info("Pending tool call outputs missing, sending full context")
                 self.previous_response_id = None
                 chained = False
+        system_prompt = _system_prompt(messages)
+        if chained and self._chain_system_prompt is not None and system_prompt != self._chain_system_prompt:
+            # A chained request does not resend the system prompt, so a changed one needs the full context.
+            logger.info("System prompt changed since the chain began, sending full context")
+            self.previous_response_id = None
+            self._pending_call_ids = set()
+            chained = False
+        self._chain_system_prompt = system_prompt
         if chained:
             instructions, new_items = self._extract_new_input(messages)
             history_items = []

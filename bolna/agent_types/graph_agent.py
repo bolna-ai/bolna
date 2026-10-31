@@ -249,14 +249,12 @@ class GraphAgent(BaseAgent):
             raw = raw.model_dump()
         override = {k: v for k, v in raw.items() if v is not None}
         if not override:
-            self._active_conversation_llm = self.llm
-            return self.llm
+            return self._activate_conversation_llm(self.llm)
 
         cache_key = self._conversation_cache_key(node, override)
         llm = self._conversation_llm_cache.get(cache_key)
         if llm is not None:
-            self._active_conversation_llm = llm
-            return llm
+            return self._activate_conversation_llm(llm)
 
         node_id = (node or {}).get("id")
         try:
@@ -267,8 +265,7 @@ class GraphAgent(BaseAgent):
             logger.error(f"Conversation LLM override failed for node {node_id!r} ({e}) — using the agent LLM")
             built = None
         if built is None:
-            self._active_conversation_llm = self.llm
-            return self.llm
+            return self._activate_conversation_llm(self.llm)
 
         llm, kwargs = built
         if len(self._conversation_llm_cache) >= self._conversation_llm_cache_max_size:
@@ -280,6 +277,12 @@ class GraphAgent(BaseAgent):
             f"(effort={kwargs.get('reasoning_effort')}, responses_api={kwargs.get('use_responses_api', False)}) "
             f"for node {node_id!r}"
         )
+        return self._activate_conversation_llm(llm)
+
+    def _activate_conversation_llm(self, llm):
+        """Make llm the serving client. One that did not serve the previous turn cannot chain onto it."""
+        if llm is not self._active_conversation_llm:
+            llm.invalidate_response_chain()
         self._active_conversation_llm = llm
         return llm
 

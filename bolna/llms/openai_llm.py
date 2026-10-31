@@ -47,6 +47,10 @@ def responses_ws_url(base_url: Optional[str]) -> Optional[str]:
     return f"wss://{host}/v1/responses" if host in RESPONSES_WS_HOSTS else None
 
 
+class WSConnectError(Exception):
+    """The Responses WebSocket could not be opened."""
+
+
 class OpenAIWSConnection:
     """Persistent WebSocket connection to an OpenAI Responses endpoint.
 
@@ -56,6 +60,7 @@ class OpenAIWSConnection:
     """
 
     RECONNECT_BEFORE_SECS = 55 * 60
+    OPEN_TIMEOUT_SECS = 3
     TERMINAL_EVENTS = ResponseStreamEvent.terminal_events()
     RESPONSE_TERMINAL_EVENTS = ResponseStreamEvent.response_terminal_events()
 
@@ -106,6 +111,7 @@ class OpenAIWSConnection:
             self._url,
             additional_headers={"Authorization": f"Bearer {self._api_key}"},
             max_size=None,
+            open_timeout=self.OPEN_TIMEOUT_SECS,
             close_timeout=5,
             ssl=get_ssl_context(self._url),
         )
@@ -115,7 +121,10 @@ class OpenAIWSConnection:
     async def stream_response(self, create_params: dict):
         """Send response.create and yield raw event dicts until terminal event."""
         async with self._lock:
-            await self.ensure_connected()
+            try:
+                await self.ensure_connected()
+            except Exception as e:
+                raise WSConnectError(str(e)) from e
             # Before the send: a cancelled send may still have put the frame on the wire,
             # and leaves the connection inconsistent either way. The try covers it too.
             self._needs_reset = True
@@ -792,6 +801,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
         except Exception as e:
             logger.error(f"WS streaming error: {e}, falling back to HTTP SSE")
             self.invalidate_response_chain()
+            if isinstance(e, WSConnectError):
+                # A socket that cannot open now is not retried each turn; HTTP serves the rest of the call.
+                transport, self._ws_transport = self._ws_transport, None
+                asyncio.ensure_future(transport.disconnect())
             async for chunk in self._generate_stream_responses(
                 messages, synthesize, request_json, meta_info, tool_choice, tools
             ):

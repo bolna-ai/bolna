@@ -1035,9 +1035,15 @@ class TaskManager(BaseManager):
 
         # setting llm
         if self.llm_config is not None:
-            llm = self.__setup_llm(self.llm_config, task_id)
+            agent_type = self.llm_agent_config.get("agent_type", "simple_llm_agent")
+            # Graph and knowledge-base agents build their own LLM; one built here would never be used or closed.
+            builds_own_llm = self.task_config["task_type"] == "conversation" and agent_type in (
+                "graph_agent",
+                "knowledgebase_agent",
+            )
+            llm = None if builds_own_llm else self.__setup_llm(self.llm_config, task_id)
             # Setup tasks
-            agent_params = {"llm": llm, "agent_type": self.llm_agent_config.get("agent_type", "simple_llm_agent")}
+            agent_params = {"llm": llm, "agent_type": agent_type}
             self.__setup_tasks(**agent_params)
 
         elif self.__is_multiagent():
