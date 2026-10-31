@@ -106,6 +106,28 @@ def test_a_model_override_builds_a_separate_llm_inheriting_agent_credentials():
         assert kwargs["max_tokens"] == 150
 
 
+def test_switching_clients_drops_the_chain_of_the_one_taking_over():
+    with _agent() as agent:
+        override_node = {"id": "n1", "llm_config": {"model": "gpt-5"}}
+        override = agent._conversation_llm_for(override_node)
+        agent._conversation_llm_for(override_node)
+        override.invalidate_response_chain.reset_mock()
+
+        agent._conversation_llm_for({"id": "start"})
+        agent.llm.invalidate_response_chain.assert_called_once()
+
+        agent._conversation_llm_for(override_node)
+        override.invalidate_response_chain.assert_called_once()
+
+
+def test_staying_on_one_client_keeps_its_chain():
+    with _agent() as agent:
+        agent._conversation_llm_for({"id": "start"})
+        agent.llm.invalidate_response_chain.reset_mock()
+        agent._conversation_llm_for({"id": "start"})
+        agent.llm.invalidate_response_chain.assert_not_called()
+
+
 def test_temperature_and_max_tokens_override_independently():
     with _agent() as agent:
         llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"temperature": 0.0, "max_tokens": 900}})

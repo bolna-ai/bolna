@@ -57,7 +57,15 @@ OPENAI_KEYED_PROVIDERS = frozenset(
 )
 
 # Conversation LLM settings that belong to the agent's provider, dropped when a node switches provider.
-AGENT_PROVIDER_BOUND_KWARGS = ("llm_key", "base_url", "api_version", "extra_body", "service_tier", "overflow_llm")
+AGENT_PROVIDER_BOUND_KWARGS = (
+    "llm_key",
+    "base_url",
+    "api_version",
+    "extra_body",
+    "service_tier",
+    "overflow_llm",
+    "openai_model_endpoints",
+)
 
 load_dotenv()
 logger = configure_logger(__name__)
@@ -162,6 +170,8 @@ class GraphAgent(BaseAgent):
                 llm_kwargs["llm_key"] = self.llm_key
             if self.base_url:
                 llm_kwargs["base_url"] = self.base_url
+            if self.config.get("openai_model_endpoints"):
+                llm_kwargs["openai_model_endpoints"] = self.config["openai_model_endpoints"]
             if aux_provider == LLMProvider.CUSTOM.value:
                 llm_kwargs["provider"] = aux_provider
                 llm_kwargs["extra_body"] = self.config.get("extra_body")
@@ -204,6 +214,7 @@ class GraphAgent(BaseAgent):
                 "compact_threshold",
                 "overflow_llm",
                 "extra_body",
+                "openai_model_endpoints",
             ]:
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]
@@ -238,14 +249,12 @@ class GraphAgent(BaseAgent):
             raw = raw.model_dump()
         override = {k: v for k, v in raw.items() if v is not None}
         if not override:
-            self._active_conversation_llm = self.llm
-            return self.llm
+            return self._activate_conversation_llm(self.llm)
 
         cache_key = self._conversation_cache_key(node, override)
         llm = self._conversation_llm_cache.get(cache_key)
         if llm is not None:
-            self._active_conversation_llm = llm
-            return llm
+            return self._activate_conversation_llm(llm)
 
         node_id = (node or {}).get("id")
         try:
@@ -256,8 +265,7 @@ class GraphAgent(BaseAgent):
             logger.error(f"Conversation LLM override failed for node {node_id!r} ({e}) — using the agent LLM")
             built = None
         if built is None:
-            self._active_conversation_llm = self.llm
-            return self.llm
+            return self._activate_conversation_llm(self.llm)
 
         llm, kwargs = built
         if len(self._conversation_llm_cache) >= self._conversation_llm_cache_max_size:
@@ -269,6 +277,12 @@ class GraphAgent(BaseAgent):
             f"(effort={kwargs.get('reasoning_effort')}, responses_api={kwargs.get('use_responses_api', False)}) "
             f"for node {node_id!r}"
         )
+        return self._activate_conversation_llm(llm)
+
+    def _activate_conversation_llm(self, llm):
+        """Make llm the serving client. One that did not serve the previous turn cannot chain onto it."""
+        if llm is not self._active_conversation_llm:
+            llm.invalidate_response_chain()
         self._active_conversation_llm = llm
         return llm
 
@@ -500,7 +514,7 @@ class GraphAgent(BaseAgent):
             # follow_conversation (a PTU swap) overrides these: routing then rides the conversation's own.
             base_kwargs.update({k: v for k, v in explicit_routing_creds.items() if v})
         elif self.routing_provider == conv_provider:
-            for key in ("llm_key", "base_url", "api_version", "extra_body"):
+            for key in ("llm_key", "base_url", "api_version", "extra_body", "openai_model_endpoints"):
                 if self.config.get(key):
                     base_kwargs[key] = self.config[key]
             # Tier and overflow belong to the conversation's backend, so only routing riding it takes them.

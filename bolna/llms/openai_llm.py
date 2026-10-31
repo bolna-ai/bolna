@@ -37,22 +37,36 @@ from bolna.helpers.logger_config import configure_logger
 logger = configure_logger(__name__)
 load_dotenv()
 
+# OpenAI hosts verified to serve Responses over WebSocket; any other endpoint streams over HTTP.
+RESPONSES_WS_HOSTS = frozenset({"api.openai.com", "eu.api.openai.com", "in.api.openai.com"})
+
+
+def responses_ws_url(base_url: Optional[str]) -> Optional[str]:
+    """The Responses WebSocket URL for this endpoint, or None when it only streams over HTTP."""
+    host = urlparse(base_url).hostname if base_url else "api.openai.com"
+    return f"wss://{host}/v1/responses" if host in RESPONSES_WS_HOSTS else None
+
+
+class WSConnectError(Exception):
+    """The Responses WebSocket could not be opened."""
+
 
 class OpenAIWSConnection:
-    """Persistent WebSocket connection to wss://api.openai.com/v1/responses.
+    """Persistent WebSocket connection to an OpenAI Responses endpoint.
 
     - Eager connect at init, ready before first LLM call
     - Auto-reconnect on connection drop or before 60-min server limit
     - Sequential: one in-flight response at a time (API constraint)
     """
 
-    WS_URL = "wss://api.openai.com/v1/responses"
     RECONNECT_BEFORE_SECS = 55 * 60
+    OPEN_TIMEOUT_SECS = 3
     TERMINAL_EVENTS = ResponseStreamEvent.terminal_events()
     RESPONSE_TERMINAL_EVENTS = ResponseStreamEvent.response_terminal_events()
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, url: str):
         self._api_key = api_key
+        self._url = url
         self._ws = None
         self._needs_reset = False
         self._connected_at: float = 0
@@ -94,11 +108,12 @@ class OpenAIWSConnection:
 
     async def _connect(self):
         self._ws = await websockets.connect(
-            self.WS_URL,
+            self._url,
             additional_headers={"Authorization": f"Bearer {self._api_key}"},
             max_size=None,
+            open_timeout=self.OPEN_TIMEOUT_SECS,
             close_timeout=5,
-            ssl=get_ssl_context(self.WS_URL),
+            ssl=get_ssl_context(self._url),
         )
         self._connected_at = time.monotonic()
         logger.info("WebSocket connected to OpenAI Responses API")
@@ -106,7 +121,10 @@ class OpenAIWSConnection:
     async def stream_response(self, create_params: dict):
         """Send response.create and yield raw event dicts until terminal event."""
         async with self._lock:
-            await self.ensure_connected()
+            try:
+                await self.ensure_connected()
+            except Exception as e:
+                raise WSConnectError(str(e)) from e
             # Before the send: a cancelled send may still have put the frame on the wire,
             # and leaves the connection inconsistent either way. The try covers it too.
             self._needs_reset = True
@@ -218,6 +236,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
         provider = kwargs.get("provider")
+        model_endpoint = (kwargs.get("openai_model_endpoints") or {}).get(model)
+        if model_endpoint and provider in (None, LLMProvider.OPENAI.value):
+            # A model with its own OpenAI endpoint runs there; every other model keeps the caller's.
+            kwargs = {**kwargs, **model_endpoint}
         self_hosted = provider in (LLMProvider.CUSTOM.value, LLMProvider.BOLNA.value)
         self._forces_tools_by_schema = provider in SCHEMA_FORCED_TOOL_PROVIDERS
         is_custom = provider == LLMProvider.CUSTOM.value
@@ -268,8 +290,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self._init_responses_api(use_responses_api, compact_threshold=kwargs.get("compact_threshold"))
 
         self._ws_transport = None
-        if self.use_responses_api and not self_hosted and not base_url:
-            self._ws_transport = OpenAIWSConnection(api_key=api_key)
+        ws_url = responses_ws_url(base_url)
+        if self.use_responses_api and not self_hosted and ws_url:
+            self._ws_transport = OpenAIWSConnection(api_key=api_key, url=ws_url)
             self._ws_transport.start_connect()
 
     async def _ensure_base_url_allowed(self):
@@ -604,11 +627,6 @@ class OpenAiLLM(OpenAICompatibleLLM):
             messages, meta_info, request_json, tool_choice, store=True, tools=tools
         )
 
-        # WS endpoint silently closes on float temperature — coerce to int
-        temp = create_params.get("temperature")
-        if temp is not None:
-            create_params["temperature"] = int(round(temp))
-
         answer, buffer = "", ""
         func_call_args = {}
         func_call_names = {}
@@ -783,6 +801,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
         except Exception as e:
             logger.error(f"WS streaming error: {e}, falling back to HTTP SSE")
             self.invalidate_response_chain()
+            if isinstance(e, WSConnectError):
+                # A socket that cannot open now is not retried each turn; HTTP serves the rest of the call.
+                transport, self._ws_transport = self._ws_transport, None
+                asyncio.ensure_future(transport.disconnect())
             async for chunk in self._generate_stream_responses(
                 messages, synthesize, request_json, meta_info, tool_choice, tools
             ):
