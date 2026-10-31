@@ -1421,6 +1421,22 @@ class TestWSTransportRouting:
         # HTTP client should NOT have been called
         llm.async_client.responses.create.assert_not_called()
 
+    async def test_ws_request_keeps_a_float_temperature(self):
+        llm = _make_llm(use_responses_api=True, temperature=0.7)
+        sent = []
+
+        async def fake_stream(params):
+            sent.append(params)
+            yield {"type": "response.completed", "response": {"id": "resp_ws", "usage": None}}
+
+        llm._ws_transport = MagicMock(stream_response=fake_stream)
+        async for _ in llm.generate_stream(
+            [{"role": "user", "content": "Hi"}], synthesize=False, meta_info=_make_meta_info()
+        ):
+            pass
+
+        assert sent[0]["temperature"] == 0.7
+
     async def test_http_sse_used_when_no_ws_transport(self):
         llm = _make_llm(use_responses_api=True)
         assert llm._ws_transport is None

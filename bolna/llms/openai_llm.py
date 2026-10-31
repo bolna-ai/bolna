@@ -43,7 +43,7 @@ RESPONSES_WS_HOSTS = frozenset({"api.openai.com", "eu.api.openai.com", "in.api.o
 
 def responses_ws_url(base_url: Optional[str]) -> Optional[str]:
     """The Responses WebSocket URL for this endpoint, or None when it only streams over HTTP."""
-    host = urlparse(base_url).netloc if base_url else "api.openai.com"
+    host = urlparse(base_url).hostname if base_url else "api.openai.com"
     return f"wss://{host}/v1/responses" if host in RESPONSES_WS_HOSTS else None
 
 
@@ -617,11 +617,6 @@ class OpenAiLLM(OpenAICompatibleLLM):
         create_params, responses_tools = self._build_responses_create_kwargs(
             messages, meta_info, request_json, tool_choice, store=True, tools=tools
         )
-
-        # WS endpoint silently closes on float temperature — coerce to int
-        temp = create_params.get("temperature")
-        if temp is not None:
-            create_params["temperature"] = int(round(temp))
 
         answer, buffer = "", ""
         func_call_args = {}

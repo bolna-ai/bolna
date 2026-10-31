@@ -24,6 +24,7 @@ PLATFORM_ENV = {
         (None, "wss://api.openai.com/v1/responses"),
         ("https://in.api.openai.com/v1", "wss://in.api.openai.com/v1/responses"),
         ("https://eu.api.openai.com/v1", "wss://eu.api.openai.com/v1/responses"),
+        ("https://IN.api.openai.com:443/v1", "wss://in.api.openai.com/v1/responses"),
         ("https://gemma.inference.example.com/v1", None),
     ],
 )
