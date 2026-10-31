@@ -2104,6 +2104,7 @@ class TaskManager(BaseManager):
                 self.kwargs.pop("llm_key", None)
                 self.kwargs.pop("base_url", None)
                 self.kwargs.pop("api_version", None)
+                self.kwargs.pop("openai_model_endpoints", None)
 
                 if self._is_summarization_task() or self._is_extraction_task():
                     llm_config["model"] = LLM_DEFAULT_CONFIGS["summarization"]["model"]
@@ -2158,7 +2159,13 @@ class TaskManager(BaseManager):
                 injected_cfg["routing_reasoning_effort"] = self.kwargs["routing_reasoning_effort"]
             if "routing_max_tokens" in self.kwargs:
                 injected_cfg["routing_max_tokens"] = self.kwargs["routing_max_tokens"]
-            for key in ("routing_llm_key", "routing_base_url", "routing_api_version", "node_llm_credentials"):
+            for key in (
+                "routing_llm_key",
+                "routing_base_url",
+                "routing_api_version",
+                "node_llm_credentials",
+                "openai_model_endpoints",
+            ):
                 if self.kwargs.get(key) is not None:
                     injected_cfg[key] = self.kwargs[key]
             # Set when the caller serves the conversation LLM from a different backend than the agent's own.
@@ -2205,6 +2212,8 @@ class TaskManager(BaseManager):
                 injected_cfg["service_tier"] = self.kwargs["service_tier"]
             if "overflow_llm" in self.kwargs:
                 injected_cfg["overflow_llm"] = self.kwargs["overflow_llm"]
+            if "openai_model_endpoints" in self.kwargs:
+                injected_cfg["openai_model_endpoints"] = self.kwargs["openai_model_endpoints"]
             if self.llm_config.get("use_responses_api"):
                 injected_cfg["use_responses_api"] = True
             if self.llm_config.get("compact_threshold"):

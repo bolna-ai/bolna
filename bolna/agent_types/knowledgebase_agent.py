@@ -82,6 +82,7 @@ class KnowledgeBaseAgent(BaseAgent):
                 "compact_threshold",
                 "overflow_llm",
                 "extra_body",
+                "openai_model_endpoints",
             ]:
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]

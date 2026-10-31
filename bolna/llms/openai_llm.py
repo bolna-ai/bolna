@@ -37,22 +37,31 @@ from bolna.helpers.logger_config import configure_logger
 logger = configure_logger(__name__)
 load_dotenv()
 
+# OpenAI hosts verified to serve Responses over WebSocket; any other endpoint streams over HTTP.
+RESPONSES_WS_HOSTS = frozenset({"api.openai.com", "eu.api.openai.com", "in.api.openai.com"})
+
+
+def responses_ws_url(base_url: Optional[str]) -> Optional[str]:
+    """The Responses WebSocket URL for this endpoint, or None when it only streams over HTTP."""
+    host = urlparse(base_url).netloc if base_url else "api.openai.com"
+    return f"wss://{host}/v1/responses" if host in RESPONSES_WS_HOSTS else None
+
 
 class OpenAIWSConnection:
-    """Persistent WebSocket connection to wss://api.openai.com/v1/responses.
+    """Persistent WebSocket connection to an OpenAI Responses endpoint.
 
     - Eager connect at init, ready before first LLM call
     - Auto-reconnect on connection drop or before 60-min server limit
     - Sequential: one in-flight response at a time (API constraint)
     """
 
-    WS_URL = "wss://api.openai.com/v1/responses"
     RECONNECT_BEFORE_SECS = 55 * 60
     TERMINAL_EVENTS = ResponseStreamEvent.terminal_events()
     RESPONSE_TERMINAL_EVENTS = ResponseStreamEvent.response_terminal_events()
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, url: str):
         self._api_key = api_key
+        self._url = url
         self._ws = None
         self._needs_reset = False
         self._connected_at: float = 0
@@ -94,11 +103,11 @@ class OpenAIWSConnection:
 
     async def _connect(self):
         self._ws = await websockets.connect(
-            self.WS_URL,
+            self._url,
             additional_headers={"Authorization": f"Bearer {self._api_key}"},
             max_size=None,
             close_timeout=5,
-            ssl=get_ssl_context(self.WS_URL),
+            ssl=get_ssl_context(self._url),
         )
         self._connected_at = time.monotonic()
         logger.info("WebSocket connected to OpenAI Responses API")
@@ -218,6 +227,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
         provider = kwargs.get("provider")
+        model_endpoint = (kwargs.get("openai_model_endpoints") or {}).get(model)
+        if model_endpoint and provider in (None, LLMProvider.OPENAI.value):
+            # A model with its own OpenAI endpoint runs there; every other model keeps the caller's.
+            kwargs = {**kwargs, **model_endpoint}
         self_hosted = provider in (LLMProvider.CUSTOM.value, LLMProvider.BOLNA.value)
         self._forces_tools_by_schema = provider in SCHEMA_FORCED_TOOL_PROVIDERS
         is_custom = provider == LLMProvider.CUSTOM.value
@@ -268,8 +281,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self._init_responses_api(use_responses_api, compact_threshold=kwargs.get("compact_threshold"))
 
         self._ws_transport = None
-        if self.use_responses_api and not self_hosted and not base_url:
-            self._ws_transport = OpenAIWSConnection(api_key=api_key)
+        ws_url = responses_ws_url(base_url)
+        if self.use_responses_api and not self_hosted and ws_url:
+            self._ws_transport = OpenAIWSConnection(api_key=api_key, url=ws_url)
             self._ws_transport.start_connect()
 
     async def _ensure_base_url_allowed(self):

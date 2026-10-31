@@ -57,7 +57,15 @@ OPENAI_KEYED_PROVIDERS = frozenset(
 )
 
 # Conversation LLM settings that belong to the agent's provider, dropped when a node switches provider.
-AGENT_PROVIDER_BOUND_KWARGS = ("llm_key", "base_url", "api_version", "extra_body", "service_tier", "overflow_llm")
+AGENT_PROVIDER_BOUND_KWARGS = (
+    "llm_key",
+    "base_url",
+    "api_version",
+    "extra_body",
+    "service_tier",
+    "overflow_llm",
+    "openai_model_endpoints",
+)
 
 load_dotenv()
 logger = configure_logger(__name__)
@@ -162,6 +170,8 @@ class GraphAgent(BaseAgent):
                 llm_kwargs["llm_key"] = self.llm_key
             if self.base_url:
                 llm_kwargs["base_url"] = self.base_url
+            if self.config.get("openai_model_endpoints"):
+                llm_kwargs["openai_model_endpoints"] = self.config["openai_model_endpoints"]
             if aux_provider == LLMProvider.CUSTOM.value:
                 llm_kwargs["provider"] = aux_provider
                 llm_kwargs["extra_body"] = self.config.get("extra_body")
@@ -204,6 +214,7 @@ class GraphAgent(BaseAgent):
                 "compact_threshold",
                 "overflow_llm",
                 "extra_body",
+                "openai_model_endpoints",
             ]:
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]
@@ -500,7 +511,7 @@ class GraphAgent(BaseAgent):
             # follow_conversation (a PTU swap) overrides these: routing then rides the conversation's own.
             base_kwargs.update({k: v for k, v in explicit_routing_creds.items() if v})
         elif self.routing_provider == conv_provider:
-            for key in ("llm_key", "base_url", "api_version", "extra_body"):
+            for key in ("llm_key", "base_url", "api_version", "extra_body", "openai_model_endpoints"):
                 if self.config.get(key):
                     base_kwargs[key] = self.config[key]
             # Tier and overflow belong to the conversation's backend, so only routing riding it takes them.
