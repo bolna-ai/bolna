@@ -102,7 +102,7 @@ class PixaTranscriber(BaseTranscriber):
             self.input_sampling_rate = 8000
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.2
-        elif self.telephony_provider in ("plivo", "exotel"):
+        elif self.telephony_provider in ("plivo", "exotel", "vobiz"):
             self.encoding = "linear16"
             self.input_sampling_rate = 8000
             self.sampling_rate = 8000
