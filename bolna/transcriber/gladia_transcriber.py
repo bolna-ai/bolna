@@ -139,8 +139,8 @@ class GladiaTranscriber(BaseTranscriber):
             self.sample_rate = 8000
             self.bit_depth = 8
             self.audio_frame_duration = 0.2
-        elif self.provider in ("exotel", "plivo"):
-            # Exotel and Plivo send linear16 at 8kHz
+        elif self.provider in ("exotel", "plivo", "vobiz"):
+            # Exotel, Plivo and Vobiz send linear16 at 8kHz
             self.encoding = "wav/pcm"
             self.sample_rate = 8000
             self.bit_depth = 16
