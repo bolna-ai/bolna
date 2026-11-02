@@ -517,6 +517,7 @@ class TaskManager(BaseManager):
         self._trunk_transfer_refused = False
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
+        self.turn_audio_flush_claims = 0
         self._turn_eos_forwarded = False
         self.hangup_mark_event_timeout = 10
 
@@ -1034,9 +1035,15 @@ class TaskManager(BaseManager):
 
         # setting llm
         if self.llm_config is not None:
-            llm = self.__setup_llm(self.llm_config, task_id)
+            agent_type = self.llm_agent_config.get("agent_type", "simple_llm_agent")
+            # Graph and knowledge-base agents build their own LLM; one built here would never be used or closed.
+            builds_own_llm = self.task_config["task_type"] == "conversation" and agent_type in (
+                "graph_agent",
+                "knowledgebase_agent",
+            )
+            llm = None if builds_own_llm else self.__setup_llm(self.llm_config, task_id)
             # Setup tasks
-            agent_params = {"llm": llm, "agent_type": self.llm_agent_config.get("agent_type", "simple_llm_agent")}
+            agent_params = {"llm": llm, "agent_type": agent_type}
             self.__setup_tasks(**agent_params)
 
         elif self.__is_multiagent():
@@ -2103,6 +2110,7 @@ class TaskManager(BaseManager):
                 self.kwargs.pop("llm_key", None)
                 self.kwargs.pop("base_url", None)
                 self.kwargs.pop("api_version", None)
+                self.kwargs.pop("openai_model_endpoints", None)
 
                 if self._is_summarization_task() or self._is_extraction_task():
                     llm_config["model"] = LLM_DEFAULT_CONFIGS["summarization"]["model"]
@@ -2157,7 +2165,13 @@ class TaskManager(BaseManager):
                 injected_cfg["routing_reasoning_effort"] = self.kwargs["routing_reasoning_effort"]
             if "routing_max_tokens" in self.kwargs:
                 injected_cfg["routing_max_tokens"] = self.kwargs["routing_max_tokens"]
-            for key in ("routing_llm_key", "routing_base_url", "routing_api_version", "node_llm_credentials"):
+            for key in (
+                "routing_llm_key",
+                "routing_base_url",
+                "routing_api_version",
+                "node_llm_credentials",
+                "openai_model_endpoints",
+            ):
                 if self.kwargs.get(key) is not None:
                     injected_cfg[key] = self.kwargs[key]
             # Set when the caller serves the conversation LLM from a different backend than the agent's own.
@@ -2204,12 +2218,15 @@ class TaskManager(BaseManager):
                 injected_cfg["service_tier"] = self.kwargs["service_tier"]
             if "overflow_llm" in self.kwargs:
                 injected_cfg["overflow_llm"] = self.kwargs["overflow_llm"]
+            if "openai_model_endpoints" in self.kwargs:
+                injected_cfg["openai_model_endpoints"] = self.kwargs["openai_model_endpoints"]
             if self.llm_config.get("use_responses_api"):
                 injected_cfg["use_responses_api"] = True
             if self.llm_config.get("compact_threshold"):
                 injected_cfg["compact_threshold"] = self.llm_config["compact_threshold"]
             injected_cfg["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get("buffer_size")
             injected_cfg["language"] = self.language
+            injected_cfg["execution_id"] = self.run_id
 
             llm_agent = KnowledgeBaseAgent(injected_cfg)
             logger.info("Knowledge agent created with rag-proxy-server support")
@@ -3075,6 +3092,12 @@ class TaskManager(BaseManager):
             self.tools["output"].set_hangup_sent()
             await self.__process_end_of_conversation()
 
+    def claim_turn_audio_flush(self):
+        """Clear the playout flag for a new turn; the count tells a superseded turn it no longer owns the flag."""
+        self._turn_audio_flushed.clear()
+        self.turn_audio_flush_claims += 1
+        return self.turn_audio_flush_claims
+
     def _caller_disconnected(self) -> bool:
         """No media stream is left to play to: the caller hung up or run() already released the tools."""
         input_handler = self.tools.get("input")
@@ -3412,7 +3435,7 @@ class TaskManager(BaseManager):
 
         if next_step == "synthesizer" and not should_bypass_synth:
             if text_chunk and text_chunk.strip():
-                self._turn_audio_flushed.clear()
+                self.claim_turn_audio_flush()
             elif (
                 self.stream
                 and meta_info.get("end_of_llm_stream")
@@ -3781,7 +3804,7 @@ class TaskManager(BaseManager):
                         "end_of_llm_stream": True,
                         "text": handoff_text,
                     }
-                    self._turn_audio_flushed.clear()
+                    self.claim_turn_audio_flush()
                     await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
                     await self.wait_for_current_message()
                     if self._caller_disconnected():
@@ -4832,11 +4855,12 @@ class TaskManager(BaseManager):
         holds_flush = ends_call and not self.turn_based_conversation
         if holds_flush:
             # The hangup waits on this, and the clip sets it only once it has been sent.
-            self._turn_audio_flushed.clear()
+            flush_claim = self.claim_turn_audio_flush()
         try:
             await self._synthesize(ws_packet)
         except asyncio.CancelledError:
-            if holds_flush:
+            # A cancel can land after a newer turn claimed the flag; releasing it then hangs up over that turn.
+            if holds_flush and flush_claim == self.turn_audio_flush_claims:
                 self._turn_audio_flushed.set()
             raise
         if ends_call:
@@ -8344,6 +8368,8 @@ class TaskManager(BaseManager):
                 "format": self.task_config["tools_config"]["output"].get("format", "pcm"),
             }
         )
+        # A re-prompt repeats the question on purpose; fresh, so the duplicate gate never silences it.
+        self._pending_user_input = (meta_info.get("turn_id"), injected_message, True)
         self.response_in_pipeline = True
         task = asyncio.create_task(self._run_llm_task(create_ws_data_packet(injected_message, meta_info)))
         self.llm_task = task
