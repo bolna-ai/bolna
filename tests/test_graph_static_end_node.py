@@ -70,6 +70,7 @@ def _tm(turn_based=False):
     tm.turn_based_conversation = turn_based
     tm._turn_audio_flushed = asyncio.Event()
     tm._turn_audio_flushed.set()
+    tm.turn_audio_flush_claims = 0
     tm.check_if_user_online = True
     tm.hangup_triggered = False
     tm._end_call_in_progress = False
@@ -186,3 +187,36 @@ async def test_a_clip_cancelled_before_it_was_sent_does_not_stall_later_hangups(
 
     assert tm._turn_audio_flushed.is_set()
     tm.process_call_hangup.assert_not_awaited()
+
+
+async def test_a_clip_replaced_after_a_barge_in_hangs_up_only_once_the_new_clip_is_sent():
+    """A barge-in cancels the closing clip mid-fetch and the node replays it; the old clip's cancel lands late."""
+    tm = _tm()
+    events = []
+
+    async def _send_after_grace_period():
+        await asyncio.sleep(0.2)
+        events.append("clip sent")
+        tm._turn_audio_flushed.set()
+
+    async def _synthesize(packet):
+        if packet["meta_info"]["sequence_id"] == 2:
+            try:
+                await asyncio.sleep(10)  # fetching the clip
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.05)  # the fetch's client closes before the cancel surfaces
+                raise
+        asyncio.create_task(_send_after_grace_period())
+
+    tm._synthesize = AsyncMock(side_effect=_synthesize)
+    tm.process_call_hangup = AsyncMock(side_effect=lambda *args, **kwargs: events.append("hangup"))
+
+    first = asyncio.create_task(tm._TaskManager__play_static_clip({"meta_info": {"sequence_id": 2}}, ends_call=True))
+    await asyncio.sleep(0.01)
+    first.cancel()
+    tm._turn_audio_flushed.set()  # the barge-in cleanup releases the flag
+    await tm._TaskManager__play_static_clip({"meta_info": {"sequence_id": 3}}, ends_call=True)
+    await asyncio.gather(first, return_exceptions=True)
+    await asyncio.sleep(0.4)
+
+    assert events == ["clip sent", "hangup"]

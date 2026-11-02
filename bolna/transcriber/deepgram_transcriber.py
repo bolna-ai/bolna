@@ -8,7 +8,7 @@ from urllib.parse import urlencode, quote
 from dotenv import load_dotenv
 import websockets
 from websockets.asyncio.client import ClientConnection
-from websockets.exceptions import ConnectionClosedError, InvalidHandshake, ConnectionClosed
+from websockets.exceptions import ConnectionClosedError, InvalidHandshake, InvalidStatus, ConnectionClosed
 
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.asr_keywords import keyword_entries
@@ -1203,6 +1203,14 @@ class DeepgramTranscriber(BaseTranscriber):
         except asyncio.TimeoutError:
             logger.error("Timeout while connecting to Deepgram websocket")
             raise ConnectionError("Timeout while connecting to Deepgram websocket")
+        except InvalidStatus as e:
+            # The status line is only "HTTP 400"; Deepgram puts the actual reason in dg-error / the body.
+            reason = e.response.headers.get("dg-error") or e.response.body.decode(errors="replace").strip()
+            message = f"Invalid handshake during Deepgram websocket connection: {e}"
+            if reason:
+                message = f"{message} ({reason})"
+            logger.error(message)
+            raise ConnectionError(message)
         except InvalidHandshake as e:
             logger.error(f"Invalid handshake during Deepgram websocket connection: {e}")
             raise ConnectionError(f"Invalid handshake during Deepgram websocket connection: {e}")
