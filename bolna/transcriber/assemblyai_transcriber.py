@@ -650,6 +650,7 @@ class AssemblyAITranscriber(BaseTranscriber):
                 assemblyai_ws = await self.assemblyai_connect()
             except (ValueError, ConnectionError) as e:
                 logger.error(f"Failed to establish AssemblyAI connection: {e}")
+                self.connection_error = str(e)
                 await self.toggle_connection()
                 return
 

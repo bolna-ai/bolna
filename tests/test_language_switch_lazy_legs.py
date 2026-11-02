@@ -181,6 +181,14 @@ def test_every_multilingual_call_builds_lazy_pools(monkeypatch):
     tm.kwargs = {}
     tm.provider_api_keys = {}
     tm._TaskManager__pool_leg_kwargs = TaskManager._TaskManager__pool_leg_kwargs.__get__(tm, TaskManager)
+    tm._TaskManager__build_transcriber_leg = TaskManager._TaskManager__build_transcriber_leg.__get__(tm, TaskManager)
+    tm._TaskManager__transcriber_fallback_entries = TaskManager._TaskManager__transcriber_fallback_entries.__get__(
+        tm, TaskManager
+    )
+    tm._TaskManager__build_synthesizer_leg = TaskManager._TaskManager__build_synthesizer_leg.__get__(tm, TaskManager)
+    tm._TaskManager__synthesizer_fallback_entries = TaskManager._TaskManager__synthesizer_fallback_entries.__get__(
+        tm, TaskManager
+    )
     tm._TaskManager__language_switch_enabled = MagicMock(return_value=False)
     voice = {"provider": "elevenlabs", "provider_config": {"voice": "George"}}
     tm.task_config = {

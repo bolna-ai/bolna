@@ -3,6 +3,7 @@ import os
 import time
 from typing import Awaitable, Callable, Optional
 
+from bolna.helpers.fallbacks import FallbackEntry
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet, process_task_cancellation
 from bolna.lid import LIDProvider
@@ -71,6 +72,8 @@ class TranscriberPool:
         lid_config: dict = None,
         on_lid_switch: Optional[Callable[..., Awaitable[None]]] = None,
         lazy_legs: bool = False,
+        fallbacks: Optional[dict[str, list[FallbackEntry]]] = None,
+        on_fallback: Optional[Callable[..., None]] = None,
     ):
         """
         Args:
@@ -92,6 +95,8 @@ class TranscriberPool:
                            source: it buffers recognition internally and
                            TaskManager drains it per turn via take_lid_transcript().
             lazy_legs: connect only the active leg; switch() opens the target and closes the leg it leaves.
+            fallbacks: label -> the providers to try, in order, when that label's provider fails.
+            on_fallback: callback(label, failed, replacement, entry, error) run as a label moves to its next provider.
         """
         self.transcribers = transcribers
         self.shared_input_queue = shared_input_queue
@@ -168,6 +173,15 @@ class TranscriberPool:
         self.leg_start_tasks: dict[str, asyncio.Task] = {}
         self.leg_close_tasks: dict[str, asyncio.Task] = {}
 
+        self.fallbacks = {label: list(builders) for label, builders in (fallbacks or {}).items() if builders}
+        self.on_fallback = on_fallback
+        # Providers a label has moved off; they still count toward the call's usage and turn order.
+        self.retired: list = []
+        self.retire_tasks: set[asyncio.Task] = set()
+        # Labels whose current provider has already been reconnected once since it started serving.
+        self.reconnected_labels: set[str] = set()
+        self.agent_context_source = None
+
     # ------------------------------------------------------------------
     # Properties that delegate to the active transcriber
     # ------------------------------------------------------------------
@@ -188,7 +202,7 @@ class TranscriberPool:
         ASR start time so the latency dict always reflects the real conversation order.
         """
         all_latencies = []
-        for t in self.transcribers.values():
+        for t in (*self.retired, *self.transcribers.values()):
             all_latencies.extend(t.turn_latencies)
 
         # Order by ASR start (same-scale ms within a call). Relative keys exist only
@@ -219,15 +233,12 @@ class TranscriberPool:
         return self.transcribers[self.active_label].get_meta_info()
 
     def billed_audio_s(self):
-        return sum(transcriber.billed_audio_s() for transcriber in self.transcribers.values())
+        return sum(transcriber.billed_audio_s() for transcriber in (*self.retired, *self.transcribers.values()))
 
     async def run(self):
         """Start all transcribers, the audio router, standby keepalive, and LID tap."""
         for label, transcriber in self.transcribers.items():
-            leg_queue = getattr(transcriber, "transcriber_output_queue", None)
-            # A leg already writing to the call's queue has nothing to forward (and would loop).
-            if leg_queue is not None and leg_queue is not self.output_queue:
-                self.output_forwarder_tasks.append(asyncio.create_task(self.forward_leg_output(label, leg_queue)))
+            self.start_forwarder(label, transcriber)
 
         for label, transcriber in self.transcribers.items():
             if self.is_lazy(label) and label != self.active_label:
@@ -281,7 +292,15 @@ class TranscriberPool:
         except asyncio.CancelledError:
             logger.info("TranscriberPool: audio router cancelled")
 
-    async def forward_leg_output(self, label, leg_queue):
+    def start_forwarder(self, label, transcriber):
+        leg_queue = getattr(transcriber, "transcriber_output_queue", None)
+        # A leg already writing to the call's queue has nothing to forward (and would loop).
+        if leg_queue is not None and leg_queue is not self.output_queue:
+            self.output_forwarder_tasks.append(
+                asyncio.create_task(self.forward_leg_output(label, leg_queue, transcriber))
+            )
+
+    async def forward_leg_output(self, label, leg_queue, transcriber=None):
         """Pass one transcriber's events to the call only while it is the active one.
 
         A transcriber switched away from mid-sentence still holds that sentence's undecoded audio,
@@ -293,6 +312,9 @@ class TranscriberPool:
         try:
             while True:
                 packet = await leg_queue.get()
+                if transcriber is not None and self.transcribers.get(label) is not transcriber:
+                    # A provider the label moved off: whatever it still says, its close above all, is stale.
+                    return
                 if label == self.active_label:
                     self.output_queue.put_nowait(packet)
                     continue
@@ -582,6 +604,7 @@ class TranscriberPool:
             active = self.transcribers[self.active_label]
             # Stale error would ride the next close and end a recovered call.
             active.connection_error = None
+            active.connection_on = True
             try:
                 await active.run()
             except Exception as e:
@@ -594,6 +617,75 @@ class TranscriberPool:
                 f"(active reconnect {self.active_reconnect_count}/{self._MAX_RECONNECTS_PER_CALL})"
             )
             return True
+
+    async def recover_active(self, error=None) -> bool:
+        """Bring the active language back after its connection died; False when the call should end.
+
+        Without a fallback the provider is reconnected as before. With one, a connection that had been working gets
+        a single reconnect, and a provider that never connected or failed again moves to the next fallback rather
+        than being retried: a capacity rejection would only repeat.
+        """
+        label = self.active_label
+        if not self.fallbacks.get(label):
+            return await self.reconnect_active()
+        active = self.transcribers[label]
+        if getattr(active, "connection_time", None) is not None and label not in self.reconnected_labels:
+            self.reconnected_labels.add(label)
+            if await self.reconnect_active():
+                return True
+        return await self.fail_over_active(error)
+
+    async def fail_over_active(self, error=None) -> bool:
+        """Serve the active language from its next fallback provider; False when none is left or the call ended."""
+        async with self.switch_lock:
+            if self.call_ended:
+                return False
+            label = self.active_label
+            pending = self.fallbacks.get(label) or []
+            while pending:
+                entry = pending.pop(0)
+                try:
+                    replacement = entry.build()
+                except Exception as e:
+                    logger.error(f"TranscriberPool: fallback for '{label}' could not be built: {e}")
+                    continue
+                failed = self.transcribers[label]
+                starting = self.leg_start_tasks.pop(label, None)
+                if starting is not None and not starting.done():
+                    starting.cancel()
+                if hasattr(replacement, "turn_counter"):
+                    replacement.turn_counter = getattr(failed, "turn_counter", 0)
+                if self.agent_context_source is not None:
+                    replacement.set_agent_context_source(self.agent_context_source)
+                self.transcribers[label] = replacement
+                self.reconnected_labels.discard(label)
+                self.retire(failed)
+                self.start_forwarder(label, replacement)
+                await self.open_leg(label, reason="fallback")
+                logger.warning(f"TranscriberPool: '{label}' moved to its next provider after: {error}")
+                if self.on_fallback is not None:
+                    try:
+                        self.on_fallback(label, failed, replacement, entry, error)
+                    except Exception as e:
+                        logger.error(f"TranscriberPool: fallback callback failed: {e}")
+                return True
+            return False
+
+    def retire(self, transcriber):
+        self.retired.append(transcriber)
+        task = asyncio.create_task(self.stop_retired(transcriber))
+        self.retire_tasks.add(task)
+        task.add_done_callback(self.retire_tasks.discard)
+
+    async def stop_retired(self, transcriber):
+        try:
+            await transcriber.toggle_connection()
+            await transcriber.cleanup()
+        except Exception as e:
+            logger.warning(f"TranscriberPool: stopping a failed provider raised: {e}")
+        task = getattr(transcriber, "transcription_task", None)
+        if task is not None and not task.done():
+            await process_task_cancellation(task, "failed provider's transcription task")
 
     async def switch(self, label):
         """Switch which transcriber receives audio.
@@ -673,7 +765,7 @@ class TranscriberPool:
         blocks the event loop (reopens_mid_call False) would stall every call on the pod there, so it stays connected."""
         return self.lazy_legs and getattr(self.transcribers[label], "reopens_mid_call", True)
 
-    async def open_leg(self, label):
+    async def open_leg(self, label, reason="switch"):
         """Start a lazy leg's connection and return at once; the router queues its audio until it is up."""
         closing = self.leg_close_tasks.pop(label, None)
         if closing is not None:
@@ -695,7 +787,7 @@ class TranscriberPool:
         self.open_labels.add(label)
         self.leg_opened_at[label] = time.monotonic()
         self.leg_start_tasks[label] = asyncio.create_task(self.run_leg(label))
-        self.record_leg_event({"type": "leg_open", "component": "asr", "language": label, "reason": "switch"})
+        self.record_leg_event({"type": "leg_open", "component": "asr", "language": label, "reason": reason})
 
     async def run_leg(self, label):
         """run() in the background: Azure and Google connect inside it, which would hold up the switch."""
@@ -750,6 +842,7 @@ class TranscriberPool:
         self.lid_detection_events.append(event)
 
     def set_agent_context_source(self, source):
+        self.agent_context_source = source
         # Standbys too, so a language switch keeps the conversation context.
         for transcriber in self.transcribers.values():
             transcriber.set_agent_context_source(source)
@@ -825,7 +918,7 @@ class TranscriberPool:
         # The listener has exited by now, so nothing reads what a forwarder would still pass on.
         for task in self.output_forwarder_tasks:
             await process_task_cancellation(task, "transcriber output forwarder")
-        for task in [*self.leg_start_tasks.values(), *self.leg_close_tasks.values()]:
+        for task in [*self.leg_start_tasks.values(), *self.leg_close_tasks.values(), *self.retire_tasks]:
             await process_task_cancellation(task, "transcriber leg start/close")
 
         # Stop LID tap

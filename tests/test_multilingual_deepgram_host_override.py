@@ -11,8 +11,10 @@ from bolna.agent_manager.task_manager import TaskManager
 
 
 def _run_setup(monkeypatch, transcriber_config):
-    """Drive the real __setup_transcriber multilingual branch against a mock TaskManager."""
-    monkeypatch.setattr(tmmod, "SUPPORTED_TRANSCRIBER_PROVIDERS", {"deepgram": MagicMock()})
+    """Drive the real __setup_transcriber multilingual branch against a mock TaskManager; the config each leg
+    is built with, by model."""
+    factory = MagicMock()
+    monkeypatch.setattr(tmmod, "SUPPORTED_TRANSCRIBER_PROVIDERS", {"deepgram": factory})
     monkeypatch.setattr(tmmod, "TranscriberPool", MagicMock())
 
     tm = MagicMock()
@@ -23,8 +25,13 @@ def _run_setup(monkeypatch, transcriber_config):
     tm.kwargs = {}
     tm._TaskManager__language_switch_enabled = MagicMock(return_value=False)
     tm._TaskManager__setup_transcriber = TaskManager._TaskManager__setup_transcriber.__get__(tm, TaskManager)
+    tm._TaskManager__build_transcriber_leg = TaskManager._TaskManager__build_transcriber_leg.__get__(tm, TaskManager)
+    tm._TaskManager__transcriber_fallback_entries = TaskManager._TaskManager__transcriber_fallback_entries.__get__(
+        tm, TaskManager
+    )
 
     tm._TaskManager__setup_transcriber()
+    return {call.kwargs["model"]: call.kwargs for call in factory.call_args_list}
 
 
 def test_per_label_hosts_are_preserved(monkeypatch):
@@ -45,12 +52,12 @@ def test_per_label_hosts_are_preserved(monkeypatch):
             },
         },
     }
-    _run_setup(monkeypatch, cfg)
+    legs = _run_setup(monkeypatch, cfg)
 
-    assert cfg["multilingual"]["en"]["deepgram_host"] == "gcp:8080"
-    assert cfg["multilingual"]["en"]["deepgram_host_protocol"] == "ws"
-    assert cfg["multilingual"]["hi"]["deepgram_host"] == "modal:443"
-    assert cfg["multilingual"]["hi"]["deepgram_host_protocol"] == "wss"
+    assert legs["nova-3"]["deepgram_host"] == "gcp:8080"
+    assert legs["nova-3"]["deepgram_host_protocol"] == "ws"
+    assert legs["nova-2"]["deepgram_host"] == "modal:443"
+    assert legs["nova-2"]["deepgram_host_protocol"] == "wss"
 
 
 def test_top_level_host_not_inherited_into_legs(monkeypatch):
@@ -65,11 +72,11 @@ def test_top_level_host_not_inherited_into_legs(monkeypatch):
             "hi": {"provider": "deepgram", "model": "flux-general-hi"},  # deliberately left on default
         },
     }
-    _run_setup(monkeypatch, cfg)
+    legs = _run_setup(monkeypatch, cfg)
 
-    assert cfg["multilingual"]["en"]["deepgram_host"] == "gcp:8080"
-    assert "deepgram_host" not in cfg["multilingual"]["hi"]
-    assert "deepgram_host_protocol" not in cfg["multilingual"]["hi"]
+    assert legs["nova-3"]["deepgram_host"] == "gcp:8080"
+    assert "deepgram_host" not in legs["flux-general-hi"]
+    assert "deepgram_host_protocol" not in legs["flux-general-hi"]
 
 
 def test_no_override_leaves_labels_untouched(monkeypatch):
@@ -77,10 +84,10 @@ def test_no_override_leaves_labels_untouched(monkeypatch):
         "provider": "deepgram",
         "multilingual": {"en": {"provider": "deepgram", "model": "nova-2"}},
     }
-    _run_setup(monkeypatch, cfg)
+    legs = _run_setup(monkeypatch, cfg)
 
-    assert "deepgram_host" not in cfg["multilingual"]["en"]
-    assert "deepgram_host_protocol" not in cfg["multilingual"]["en"]
+    assert "deepgram_host" not in legs["nova-2"]
+    assert "deepgram_host_protocol" not in legs["nova-2"]
 
 
 def test_top_level_mip_opt_out_inherited_into_legs(monkeypatch):
@@ -92,7 +99,7 @@ def test_top_level_mip_opt_out_inherited_into_legs(monkeypatch):
             "hi": {"provider": "deepgram", "model": "nova-2", "mip_opt_out": False},
         },
     }
-    _run_setup(monkeypatch, cfg)
+    legs = _run_setup(monkeypatch, cfg)
 
-    assert cfg["multilingual"]["en"]["mip_opt_out"] is True
-    assert cfg["multilingual"]["hi"]["mip_opt_out"] is False
+    assert legs["nova-3"]["mip_opt_out"] is True
+    assert legs["nova-2"]["mip_opt_out"] is False
