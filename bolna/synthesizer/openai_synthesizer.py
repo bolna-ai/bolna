@@ -28,6 +28,7 @@ class OPENAISynthesizer(BaseSynthesizer):
         buffer_size=400,
         speed=1.0,
         endpoint=None,
+        extra_body=None,
         **kwargs,
     ):
         super().__init__(kwargs.get("task_manager_instance"), stream, buffer_size)
@@ -40,6 +41,8 @@ class OPENAISynthesizer(BaseSynthesizer):
         self.stream = False
         api_key = kwargs.get("synthesizer_key", os.getenv("OPENAI_API_KEY"))
         self.endpoint = endpoint
+        # Only a customer's endpoint takes extra params; OpenAI's own API never gets them.
+        self.extra_body = extra_body if endpoint else None
         self._endpoint_checked = endpoint is None
         http_client = DefaultAsyncHttpxClient(follow_redirects=False) if endpoint else None
         limits = {"timeout": _CUSTOM_ENDPOINT_TIMEOUT_SECONDS, "max_retries": 1} if endpoint else {}
@@ -112,6 +115,7 @@ class OPENAISynthesizer(BaseSynthesizer):
             response_format="mp3",
             input=text,
             speed=self.speed,
+            extra_body=self.extra_body,
         )
         buffer = io.BytesIO()
         for chunk in spoken_response.iter_bytes(chunk_size=4096):

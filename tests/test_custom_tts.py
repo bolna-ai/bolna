@@ -1,13 +1,17 @@
 """A customer's own TTS runs on OPENAISynthesizer against the endpoint and key the platform injects,
 never against OpenAI's, and never against a non-public address."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
-from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT
+from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, DefaultAsyncHttpxClient
+from pydantic import TypeAdapter, ValidationError
 
+from bolna.constants import RESERVED_TTS_REQUEST_KEYS
 from bolna.helpers.function_calling_helpers import SSRFError
-from bolna.models import OpenAIConfig, Synthesizer
+from bolna.models import CustomTTSConfig, OpenAIConfig, Synthesizer
 from bolna.providers import SUPPORTED_SYNTHESIZER_MODELS
 from bolna.synthesizer.openai_synthesizer import OPENAISynthesizer
 
@@ -41,7 +45,7 @@ def test_runs_on_the_openai_synthesizer():
 
 def test_config_has_the_openai_shape():
     synth = Synthesizer(provider="custom", provider_config={"voice": "voice-1", "model": "tts-model"})
-    assert type(synth.provider_config) is OpenAIConfig
+    assert isinstance(synth.provider_config, OpenAIConfig)
 
 
 class TestClient:
@@ -99,6 +103,49 @@ class TestEndpointCheck:
         _answer(synth)
         await synth.synthesize("hello")
         check.assert_not_awaited()
+
+
+class TestExtraBody:
+    """The agent's extra request params reach the customer's server on every request, as for a custom LLM."""
+
+    async def test_they_are_sent_and_win_over_the_configured_speed(self, monkeypatch):
+        # The configured speed is always sent, and servers differ in the range they accept.
+        sent = {}
+
+        def server(request):
+            sent.update(json.loads(request.content))
+            return httpx.Response(200, content=b"mp3")
+
+        monkeypatch.setattr("bolna.synthesizer.openai_synthesizer.validate_outbound_url", AsyncMock())
+        monkeypatch.setattr(
+            "bolna.synthesizer.openai_synthesizer.DefaultAsyncHttpxClient",
+            lambda **kwargs: DefaultAsyncHttpxClient(transport=httpx.MockTransport(server), **kwargs),
+        )
+        synth = _custom_tts(speed=1.0, extra_body={"speed": 1.3, "instructions": "calm"})
+        assert await synth.synthesize("hello") == b"mp3"
+        assert sent == {
+            "model": "tts-model",
+            "voice": "voice-1",
+            "input": "hello",
+            "response_format": "mp3",
+            "speed": 1.3,
+            "instructions": "calm",
+        }
+
+    def test_the_openai_provider_never_sends_them(self):
+        assert SUPPORTED_SYNTHESIZER_MODELS["openai"](voice="alloy", extra_body={"speed": 1.3}).extra_body is None
+
+    @pytest.mark.parametrize("key", sorted(RESERVED_TTS_REQUEST_KEYS))
+    def test_a_field_the_pipeline_owns_is_rejected(self, key):
+        with pytest.raises(ValueError, match=key):
+            CustomTTSConfig(voice="voice-1", model="tts-model", extra_body={key: "x"})
+
+    def test_the_field_alone_rejects_them_too(self):
+        # The agent PATCH checks each provider_config field against its own type, without building the config.
+        extra_body = TypeAdapter(CustomTTSConfig.model_fields["extra_body"].annotation)
+        with pytest.raises(ValidationError):
+            extra_body.validate_python({"response_format": "wav"})
+        assert extra_body.validate_python({"speed": 1.3}) == {"speed": 1.3}
 
 
 class TestErrors:

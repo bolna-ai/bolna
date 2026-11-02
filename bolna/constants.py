@@ -316,6 +316,8 @@ LANGUAGE_NAMES = {
 RESERVED_LLM_REQUEST_KEYS = frozenset(
     {"model", "messages", "stream", "stream_options", "tools", "tool_choice", "parallel_tool_calls", "response_format"}
 )
+# Speech request fields bolna fills and relies on; a custom TTS's extra_body may not override them.
+RESERVED_TTS_REQUEST_KEYS = frozenset({"model", "voice", "input", "response_format"})
 
 LLM_DEFAULT_CONFIGS = {
     "summarization": {"model": "gpt-4.1-mini", "provider": "openai"},
@@ -470,7 +472,7 @@ TTS_AUDIO_SETTINGS = {
     SynthesizerProvider.SARVAM: frozenset({"speed", "loudness"}),
     SynthesizerProvider.SMALLEST: frozenset({"speed"}),
     SynthesizerProvider.SONIOX: frozenset({"speed", "reduce_silence"}),
-    SynthesizerProvider.CUSTOM: frozenset({"speed"}),
+    SynthesizerProvider.CUSTOM: frozenset({"speed", "extra_body"}),
 }
 
 # Provider pronunciation dictionaries, referenced by ID and applied by the provider. A dictionary
