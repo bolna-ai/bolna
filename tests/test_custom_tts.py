@@ -9,7 +9,6 @@ import pytest
 from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, DefaultAsyncHttpxClient
 from pydantic import TypeAdapter, ValidationError
 
-from bolna.constants import RESERVED_TTS_REQUEST_KEYS
 from bolna.helpers.function_calling_helpers import SSRFError
 from bolna.models import CustomTTSConfig, OpenAIConfig, Synthesizer
 from bolna.providers import SUPPORTED_SYNTHESIZER_MODELS
@@ -135,7 +134,7 @@ class TestExtraBody:
     def test_the_openai_provider_never_sends_them(self):
         assert SUPPORTED_SYNTHESIZER_MODELS["openai"](voice="alloy", extra_body={"speed": 1.3}).extra_body is None
 
-    @pytest.mark.parametrize("key", sorted(RESERVED_TTS_REQUEST_KEYS))
+    @pytest.mark.parametrize("key", ["input", "model", "response_format", "stream_format", "voice"])
     def test_a_field_the_pipeline_owns_is_rejected(self, key):
         with pytest.raises(ValueError, match=key):
             CustomTTSConfig(voice="voice-1", model="tts-model", extra_body={key: "x"})
