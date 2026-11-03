@@ -6756,7 +6756,7 @@ class TaskManager(BaseManager):
                     continue
                 if age >= threshold and not nothing_to_decide:
                     if self.__spoken_over_welcome(pool):
-                        # The main pipeline dropped this too; judged alone, a "Hello" could switch the language.
+                        # Judged alone, a "Hello" could switch; a kept turn landing after this decides without it.
                         dropped, _ = pool.take_lid_transcript()
                         logger.info(
                             "LanguageSwitcher: idle-flush dropped detector speech from over the welcome (%r)",
