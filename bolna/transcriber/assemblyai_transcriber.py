@@ -187,7 +187,7 @@ class AssemblyAITranscriber(BaseTranscriber):
             if self.speech_model == "universal-streaming-english" and base_language != "en":
                 logger.warning(f"AssemblyAI {self.speech_model} only supports English, got {self.language}")
         elif base_language in ASSEMBLYAI_SUPPORTED_LANGUAGES:
-            hinglish =self.hinglish_mode and base_language == "hi" and self.speech_model == "universal-3-6-pro"
+            hinglish = self.hinglish_mode and base_language == "hi" and self.speech_model == "universal-3-6-pro"
             connection_params["language_codes"] = json.dumps(["hi", "en"] if hinglish else [base_language])
         else:
             logger.warning(f"AssemblyAI {self.speech_model} has no language code for {self.language}, auto-detecting")
