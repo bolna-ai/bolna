@@ -60,7 +60,7 @@ class SonioxTranscriber(BaseTranscriber):
         self.keywords = keywords
         self.context = (context or "").strip()
         self.language_hints = language_hints
-        self.hinglish =bool(hinglish_mode) and not language_hints and (language or "").lower() == "hi"
+        self.hinglish = bool(hinglish_mode) and not language_hints and (language or "").lower() == "hi"
         self.transcriber_output_queue = output_queue
         self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
 
