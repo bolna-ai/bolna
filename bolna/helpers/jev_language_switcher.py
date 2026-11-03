@@ -35,6 +35,8 @@ REQUEST_MIN = 0.5
 # bolna's default LANGUAGE_SWITCH_MIN_CONFIDENCE: an auto-mode request below it would only be gated there.
 SWITCH_MIN = 0.7
 UNNAMED_REQUEST_MIN = 0.85
+# Explicit mode switches on a direct request alone, so a garbled or half-heard one must not count.
+DIRECT_REQUEST_MIN = 0.85
 REFUSAL_MIN = 0.5
 SUBSTANTIVE_MIN = 0.5
 DATA_STRONG = 0.75
@@ -514,7 +516,7 @@ def _spoken_language(a: dict, transcript: str) -> tuple:
 def decide_from_answers(
     a: dict, transcript: str, live_transcript: str, active_label: str, labels: list, recent_turns=None
 ) -> dict:
-    """Apply the switch rules in order: 3a, 1, 7, 4a, 8, 6. `a` is the output of flatten_answers."""
+    """Apply the switch rules in order: 3a, 1, 7, 4a, 6, 8. `a` is the output of flatten_answers."""
     label_of = {jev_code(label): label for label in labels}
     active = jev_code(active_label)
     supported = list(label_of)
@@ -537,7 +539,9 @@ def decide_from_answers(
         }
 
     hits, total = data_tokens(transcript)
-    if (total and hits / total >= 0.5) or a["data_readout"] >= DATA_STRONG:
+    # Jev scores a sentence wrapped around spoken numbers as a readout too; its clause still shows the language.
+    jev_readout = a["data_readout"] >= DATA_STRONG and a["has_clause"] < SUBSTANTIVE_MIN
+    if (total and hits / total >= 0.5) or jev_readout:
         return out(None, 0, False, "number or code readout, stay")
 
     def counts(code):
@@ -580,15 +584,15 @@ def decide_from_answers(
     ):
         return out(None, 0, False, "tags unstable, live transcript stable, stay")
 
+    substantive = (a["has_clause"] + (1 - a["filler_only"])) / 2
+    # Drift needs this turn to say something too: a bare "Yes." or "Okay." is no evidence of a new language.
+    if substantive < SUBSTANTIVE_MIN:
+        return out(None, 0, False, "filler or borrowed word, stay")
     if sum(1 for code, seconds in recent if code == lang and seconds >= DRIFT_MIN_SECONDS) >= DRIFT_MIN_TURNS:
         return out(lang, lang_p, False, f"sustained {LANGS[lang]['name']} across turns")
 
-    # Discounted by substance so acknowledgements stay: a certain language still needs substantive >= 0.7 to clear
-    # bolna's 0.7 bar.
-    substantive = (a["has_clause"] + (1 - a["filler_only"])) / 2
-    if substantive >= SUBSTANTIVE_MIN:
-        return out(lang, lang_p * substantive, False, f"caller speaking {LANGS[lang]['name']}")
-    return out(None, 0, False, "filler or borrowed word, stay")
+    # Discounted by substance: a certain language still needs substantive >= 0.7 to clear bolna's 0.7 bar.
+    return out(lang, lang_p * substantive, False, f"caller speaking {LANGS[lang]['name']}")
 
 
 def decide_explicit_from_answers(
@@ -614,7 +618,7 @@ def decide_explicit_from_answers(
             picked = {offer: a["says_yes"]}
         source = "agent_prompted_selection" if picked else "none"
     if not picked:
-        picked = scored("wants", REQUEST_MIN)
+        picked = scored("wants", DIRECT_REQUEST_MIN)
         source = "direct_request" if picked else "none"
 
     def out(status, code=None, confidence=0.0, why=""):
