@@ -40,6 +40,7 @@ from .constants import (
     ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES,
     MODEL_REASONING_EFFORT_MAP,
     RESERVED_LLM_REQUEST_KEYS,
+    RESERVED_TTS_REQUEST_KEYS,
     OPENAI_TTS_SPEED_MAX,
     OPENAI_TTS_SPEED_MIN,
     PRONUNCIATION_RULE_SAY_AS_MAX_LENGTH,
@@ -229,6 +230,19 @@ class OpenAIConfig(BaseModel):
     speed: Optional[float] = Field(default=1.0, ge=OPENAI_TTS_SPEED_MIN, le=OPENAI_TTS_SPEED_MAX)
 
 
+def _no_reserved_tts_keys(extra_body):
+    reserved = sorted(RESERVED_TTS_REQUEST_KEYS.intersection(extra_body))
+    if reserved:
+        raise ValueError(f"extra_body cannot override request fields: {', '.join(reserved)}")
+    return extra_body
+
+
+class CustomTTSConfig(OpenAIConfig):
+    # Merged into every speech request to the customer's server. Checked on the field's own type, so the
+    # agent PATCH, which validates field by field, enforces it too.
+    extra_body: Optional[Annotated[Dict[str, Any], AfterValidator(_no_reserved_tts_keys)]] = None
+
+
 class DeepgramConfig(BaseModel):
     voice_id: str
     voice: str
@@ -350,7 +364,7 @@ SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.GEMINI.value: GeminiConfig,
     SynthesizerProvider.SONIOX.value: SonioxConfig,
     SynthesizerProvider.NAVANA.value: NavanaConfig,
-    SynthesizerProvider.CUSTOM.value: OpenAIConfig,
+    SynthesizerProvider.CUSTOM.value: CustomTTSConfig,
 }
 
 
@@ -397,6 +411,7 @@ class Transcriber(BaseModel):
     eager_eot_threshold: Optional[float] = None
     eot_timeout_ms: Optional[int] = None
     language_hints: Optional[List[str]] = None
+    hinglish_mode: Optional[bool] = False
     delay: Optional[str] = "medium"
     noise_reduction: Optional[bool] = False
     vad_threshold: Optional[float] = 0.5

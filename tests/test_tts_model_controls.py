@@ -163,6 +163,7 @@ def test_config_error_rejects_exactly_what_the_config_model_rejects(provider, ke
         ("pixa", {"top_p": 0.8, "repetition_penalty": 1.3}, (), "top_p=0.8"),
         ("gemini", {"style": "cheerful"}, (), "style=cheerful"),
         ("gemini", {"style": ""}, (), ""),
+        ("custom", {"speed": 1.0, "extra_body": {"speed": 1.3}}, (), "extra_body={'speed': 1.3}"),
         ("deepgram", {"model": "aura-2", "mip_opt_out": True}, (), ""),
         ("cartesia", {"voice": "Sonic", "sampling_rate": 8000, "speed": None}, (), ""),
         ("polly", {"engine": "neural"}, (), ""),
