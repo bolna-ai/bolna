@@ -132,6 +132,7 @@ SUPPORTED_LLM_PROVIDERS = {
     LLMProvider.AZURE.value: AzureLLM,
     LLMProvider.GOOGLE.value: GeminiLLM,
     LLMProvider.BOLNA.value: OpenAiLLM,
+    LLMProvider.SARVAM.value: OpenAiLLM,
 }
 SUPPORTED_INPUT_HANDLERS = {
     TelephonyProvider.DEFAULT.value: DefaultInputHandler,

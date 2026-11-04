@@ -22,7 +22,12 @@ from openai import (
 import websockets
 from websockets.protocol import State as WSState
 
-from bolna.constants import DEFAULT_LANGUAGE_CODE, default_reasoning_effort, is_reasoning_model
+from bolna.constants import (
+    DEFAULT_LANGUAGE_CODE,
+    LLM_VENDOR_ENDPOINTS,
+    default_reasoning_effort,
+    is_reasoning_model,
+)
 from bolna.enums import LLMProvider, ResponseStreamEvent, ResponseItemType, Verbosity
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
@@ -240,10 +245,22 @@ class OpenAiLLM(OpenAICompatibleLLM):
         if model_endpoint and provider in (None, LLMProvider.OPENAI.value):
             # A model with its own OpenAI endpoint runs there; every other model keeps the caller's.
             kwargs = {**kwargs, **model_endpoint}
-        self_hosted = provider in (LLMProvider.CUSTOM.value, LLMProvider.BOLNA.value)
+        vendor_endpoint = LLM_VENDOR_ENDPOINTS.get(provider)
+        if vendor_endpoint:
+            vendor_url, key_env = vendor_endpoint
+            kwargs = {
+                **kwargs,
+                "base_url": kwargs.get("base_url") or vendor_url,
+                "llm_key": kwargs.get("llm_key") or os.getenv(key_env),
+            }
+        # Not OpenAI's own endpoint: chat completions only, without OpenAI-only request fields.
+        compatible_endpoint = vendor_endpoint is not None or provider in (
+            LLMProvider.CUSTOM.value,
+            LLMProvider.BOLNA.value,
+        )
         self._forces_tools_by_schema = provider in SCHEMA_FORCED_TOOL_PROVIDERS
         is_custom = provider == LLMProvider.CUSTOM.value
-        if self_hosted:
+        if compatible_endpoint:
             if kwargs.get("extra_body"):
                 self.model_args["extra_body"] = kwargs["extra_body"]
         else:
@@ -252,7 +269,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         # http2=False: cancelled h2 requests leak streams until the connection pins at 100 (barge-in)
         http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False)
 
-        if self_hosted:
+        if compatible_endpoint:
             base_url = kwargs.get("base_url")
             api_key = kwargs.get("llm_key", None)
             run_id = kwargs.get("run_id")
@@ -285,13 +302,13 @@ class OpenAiLLM(OpenAICompatibleLLM):
             # logger.info(f'thread id : {self.thread_id}')
         self.run_id = kwargs.get("run_id", None)
 
-        # Self-hosted endpoints speak chat completions only; Responses-API chaining is OpenAI-specific.
-        use_responses_api = kwargs.get("use_responses_api", False) and not self_hosted
+        # Responses-API chaining is OpenAI-specific.
+        use_responses_api = kwargs.get("use_responses_api", False) and not compatible_endpoint
         self._init_responses_api(use_responses_api, compact_threshold=kwargs.get("compact_threshold"))
 
         self._ws_transport = None
         ws_url = responses_ws_url(base_url)
-        if self.use_responses_api and not self_hosted and ws_url:
+        if self.use_responses_api and not compatible_endpoint and ws_url:
             self._ws_transport = OpenAIWSConnection(api_key=api_key, url=ws_url)
             self._ws_transport.start_connect()
 
