@@ -270,9 +270,8 @@ def build_get_url(url, api_params):
     final_url = url
     if api_params:
         sep = "&" if "?" in url else "?"
-        final_url = (
-            url + sep + "&".join(f"{quote(str(k), safe='')}={quote(str(v), safe='')}" for k, v in api_params.items())
-        )
+        params = normalize_for_form(api_params)
+        final_url = url + sep + "&".join(f"{quote(str(k), safe='')}={quote(v, safe='')}" for k, v in params.items())
     return URL(final_url, encoded=True)
 
 
@@ -433,4 +432,5 @@ async def computed_api_response(response):
 
 
 def normalize_for_form(data: dict) -> dict:
-    return {k: json.dumps(v) if isinstance(v, (dict, list)) else str(v) for k, v in data.items()}
+    # Non-strings go out as JSON (true, null, [..]), never as Python's True, None, ['..']
+    return {k: v if isinstance(v, str) else json.dumps(v) for k, v in data.items()}
