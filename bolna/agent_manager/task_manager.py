@@ -1663,6 +1663,14 @@ class TaskManager(BaseManager):
             if meta_info["text"] == "":
                 audio_chunk = None
 
+            if audio_chunk is None and text and text.strip():
+                # Pre-generation failed upstream; synthesize live so the call doesn't start silent.
+                logger.info("No preloaded welcome audio; synthesizing welcome message live")
+                meta_info["cached"] = False
+                self.conversation_history.append_welcome_message(text)
+                await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
+                return
+
             # Convert to ulaw for Asterisk/sip-trunk provider (cached welcome is PCM)
             if self.tools["output"].get_provider() == TelephonyProvider.SIP_TRUNK.value and audio_chunk:
                 original_size = len(audio_chunk)
