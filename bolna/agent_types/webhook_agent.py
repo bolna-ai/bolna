@@ -1,8 +1,11 @@
 import aiohttp
 from .base_agent import BaseAgent
+from bolna.helpers.function_calling_helpers import SSRFError, validate_outbound_url
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
+
+WEBHOOK_TIMEOUT_SECONDS = 10
 
 
 class WebhookAgent(BaseAgent):
@@ -14,21 +17,26 @@ class WebhookAgent(BaseAgent):
     async def __send_payload(self, payload):
         try:
             logger.info(f"Sending a webhook post request {payload}")
-            async with aiohttp.ClientSession() as session:
-                if payload is not None:
-                    async with session.post(self.webhook_url, json=payload) as response:
-                        if response.status == 200:
-                            # need to check if the returned response is json or not
-                            # data = await response.json()
-                            return True
-                        else:
-                            logger.error(f"Error: {response.status} - {await response.text()}")
-                            return None
-                else:
-                    logger.info("Payload was null")
+            if payload is None:
+                logger.info("Payload was null")
+                return None
+
+            await validate_outbound_url(self.webhook_url)
+            timeout = aiohttp.ClientTimeout(total=WEBHOOK_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(self.webhook_url, json=payload, allow_redirects=False) as response:
+                    if response.status == 200:
+                        # need to check if the returned response is json or not
+                        # data = await response.json()
+                        return True
+                    logger.error(f"Error: {response.status} - {await response.text()}")
+            return None
+        except SSRFError as e:
+            logger.warning(f"Blocked outbound webhook URL: {e}")
             return None
         except Exception as e:
             logger.error(f"Something went wrong with webhook {self.webhook_url}, {payload}, {str(e)}")
+            return None
 
     async def execute(self, payload):
         if not self.webhook_url:
