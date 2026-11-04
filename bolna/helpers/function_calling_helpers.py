@@ -233,7 +233,15 @@ def prepare_api_request(param, api_token, headers_data, **kwargs):
             # JSON-serialize complex values (lists, dicts) for proper string substitution
             # Python's % formatting uses repr() which produces single quotes,
             # but JSON requires double quotes for valid JSON output
-            json_kwargs = {k: json.dumps(v) if isinstance(v, (list, dict)) else v for k, v in kwargs.items()}
+            json_kwargs = {}
+            for k, v in kwargs.items():
+                if isinstance(v, (list, dict)):
+                    json_kwargs[k] = json.dumps(v)
+                elif isinstance(v, str):
+                    # A string lands inside a quoted "%(field)s": escape its quotes, backslashes and newlines
+                    json_kwargs[k] = json.dumps(v, ensure_ascii=False)[1:-1]
+                else:
+                    json_kwargs[k] = v
 
             request_body = param % json_kwargs
             api_params = json.loads(request_body)
