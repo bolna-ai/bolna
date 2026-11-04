@@ -29,8 +29,9 @@ from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 load_dotenv()
 logger = configure_logger(__name__)
 
-# saaras models that transcribe directly on /speech-to-text; older ones need the translate endpoint.
+# saaras models that transcribe directly; older ones translate via saaras:v4.
 SAARAS_TRANSCRIBE_MODELS = {"saaras:v3", "saaras:v4"}
+SAARAS_TRANSLATE_MODEL = "saaras:v4"
 # Sarvam accepts `keyterms` only on these models.
 SARVAM_KEYTERM_MODELS = {"saaras:v4"}
 
@@ -69,6 +70,7 @@ class SarvamTranscriber(BaseTranscriber):
         self.context = (context or "").strip()
         self.keyterms = self._resolve_keyterms(keywords)
         self.hinglish_mode = kwargs.get("hinglish_mode")
+        self.translate = self.model.startswith("saaras") and self.model not in SAARAS_TRANSCRIBE_MODELS
 
         self.api_key = kwargs.get("transcriber_key", os.getenv("SARVAM_API_KEY"))
         self.api_host = os.getenv("SARVAM_HOST", "api.sarvam.ai")
@@ -142,19 +144,12 @@ class SarvamTranscriber(BaseTranscriber):
         return keyterms
 
     def _set_endpoints(self):
-        params = {"model": self.model}
-        ws_url = ""
-
-        # old saaras models use translate endpoint, saarika models use transcription endpoint
-        # saaras:v3 supports direct transcription
-        if self.model.startswith("saaras") and self.model not in SAARAS_TRANSCRIBE_MODELS:
-            self.api_url = f"https://{self.api_host}/speech-to-text-translate"
-            ws_url = f"wss://{self.api_host}/speech-to-text-translate/ws"
-
+        if self.translate:
+            params = {"model": SAARAS_TRANSLATE_MODEL, "mode": "translate"}
         else:
-            self.api_url = f"https://{self.api_host}/speech-to-text"
-            ws_url = f"wss://{self.api_host}/speech-to-text/ws"
-            params["language-code"] = self.language
+            params = {"model": self.model, "language-code": self.language}
+        self.api_url = f"https://{self.api_host}/speech-to-text"
+        ws_url = f"wss://{self.api_host}/speech-to-text/ws"
 
         is_hindi = (self.language or "").split("-")[0] == "hi"
         if self.hinglish_mode and is_hindi and self.model in SAARAS_TRANSCRIBE_MODELS:
@@ -186,7 +181,9 @@ class SarvamTranscriber(BaseTranscriber):
         try:
             data = aiohttp.FormData()
             data.add_field("file", io.BytesIO(wav_data), filename="audio.wav", content_type="audio/wav")
-            data.add_field("model", self.model)
+            data.add_field("model", SAARAS_TRANSLATE_MODEL if self.translate else self.model)
+            if self.translate:
+                data.add_field("mode", "translate")
             data.add_field("language_code", self.language)
             if self.keyterms:
                 data.add_field("keyterms", json.dumps(self.keyterms))
