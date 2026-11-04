@@ -378,7 +378,7 @@ async def _drive_transfer(me):
             "transfer_call",  # called_fun
             model_response=[{"x": 1}],
             tool_call_id="tc-1",
-            reason="billing question",
+            arguments={"reason": "billing question"},
             textual_response=None,
         )
 
@@ -398,6 +398,7 @@ async def test_transfer_call_fires_pre_call_webhook_when_configured():
     assert args[4] == {"note": "%(reason)s"}  # webhook_param
     # call_transfer_number (a static config value, not an LLM arg) is injected into the args
     # so %(call_transfer_number)s can resolve in the webhook template.
+    assert args[2]["reason"] == "billing question"
     assert args[2].get("call_transfer_number") == "+15559998888"
 
 
@@ -418,3 +419,47 @@ def test_transfer_branch_fires_before_transfer_post():
     assert transfer_idx < fire_idx < handoff_idx, "pre-call webhook must fire before the transfer POST"
     # The POST now lives in the extracted helper.
     assert "session.post" in inspect.getsource(TaskManager._execute_transfer_call_webhook)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "url",
+        "param",
+        "api_token",
+        "headers_data",
+        "arguments",
+        "model_response",
+        "tool_call_id",
+        "resp",
+        "textual_response",
+    ],
+)
+async def test_pre_call_webhook_preserves_arguments_named_like_execution_fields(field):
+    me = _make_self()
+    with (
+        patch("bolna.agent_manager.task_manager.aiohttp.ClientSession", _FakeSession),
+        patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+    ):
+        TaskManager.fire_pre_call_webhook(
+            me,
+            "https://hook.example/notify",
+            "custom_task_x",
+            {field: "caller-data"},
+            {},
+            {"submitted": {"$var": field}},
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    assert _FakeSession.last_post["url"] == "https://hook.example/notify"
+    assert _FakeSession.last_post["json"]["submitted"] == "caller-data"
+
+
+async def test_transfer_body_uses_arguments_without_internal_call_metadata():
+    me = _make_transfer_self({})
+    me._extract_api_call_runtime_args = TaskManager._extract_api_call_runtime_args
+    await _drive_transfer(me)
+    body = me._start_api_call_detail.call_args.kwargs["request_body"]
+    assert body["reason"] == "billing question"
+    assert body["execution_id"] == "exec-123"
+    assert not {"arguments", "model_response", "tool_call_id", "textual_response"}.intersection(body)

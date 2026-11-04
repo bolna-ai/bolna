@@ -498,8 +498,7 @@ class GeminiLLM(BaseLLM):
                 tool_call_id=call_id,
                 textual_response=answer.strip() if answer else None,
             )
-            for k, v in fn_args.items():
-                setattr(payload, k, v)
+            payload.arguments = fn_args
 
             convert_to_request_log(
                 json.dumps(fn_args),
