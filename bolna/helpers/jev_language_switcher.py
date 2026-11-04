@@ -35,8 +35,6 @@ REQUEST_MIN = 0.5
 # bolna's default LANGUAGE_SWITCH_MIN_CONFIDENCE: an auto-mode request below it would only be gated there.
 SWITCH_MIN = 0.7
 UNNAMED_REQUEST_MIN = 0.85
-# Explicit mode switches on a direct request alone, so a garbled or half-heard one must not count.
-DIRECT_REQUEST_MIN = 0.85
 REFUSAL_MIN = 0.5
 SUBSTANTIVE_MIN = 0.5
 DATA_STRONG = 0.75
@@ -618,7 +616,12 @@ def decide_explicit_from_answers(
             picked = {offer: a["says_yes"]}
         source = "agent_prompted_selection" if picked else "none"
     if not picked:
-        picked = scored("wants", DIRECT_REQUEST_MIN)
+        # Explicit mode switches on a request alone, so one that names no language must be strong.
+        picked = {
+            c: s
+            for c, s in scored("wants", REQUEST_MIN).items()
+            if names_language(heard, c) or s >= UNNAMED_REQUEST_MIN
+        }
         source = "direct_request" if picked else "none"
 
     def out(status, code=None, confidence=0.0, why=""):

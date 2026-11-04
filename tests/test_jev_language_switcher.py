@@ -566,6 +566,24 @@ EXPLICIT_CASES = [
         _explicit(lang="hi", wants=("hi", "en")),
         ("ambiguous", None, "none"),
     ),
+    (
+        "named-weak-request-switches",
+        "Okay, English.",
+        "",
+        "hi",
+        ["en", "hi"],
+        {**_explicit(), "wants_en": 0.8},
+        ("switch", "en", "direct_request"),
+    ),
+    (
+        "two-named-languages-stay-ambiguous",
+        "Hindi ya Tamil, koi bhi chalega",
+        "",
+        "en",
+        ["en", "hi", "ta"],
+        {**_explicit(lang="hi"), "wants_hi": 0.9, "wants_ta": 0.7},
+        ("ambiguous", None, "none"),
+    ),
 ]
 
 
