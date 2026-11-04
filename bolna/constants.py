@@ -363,6 +363,8 @@ END_CALL_FUNCTION_PREFIX = "end_call"
 # meta_info flag a graph end node sets so the task manager hangs up once its reply has played.
 HANGUP_AFTER_REPLY = "hangup_after_reply"
 WEB_SEARCH_FUNCTION_NAME = "web_search"
+UPDATE_MEMORY_FUNCTION_NAME = "update_memory"
+MEMORY_VARIABLES_MAX = 20
 
 END_CALL_TOOL_DEFINITION = {
     "type": "function",

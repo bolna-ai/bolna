@@ -21,6 +21,7 @@ def _msg(data="", end=False, fc=False, **extra):
 def _make_tm(history, generate):
     tm = MagicMock()
     tm.conversation_history = history
+    tm.call_memory = None
     tm.multilingual_prompts = {"en": "You are a helpful agent.", "te": "Telugu prompt"}
     tm._TaskManager__language_directive = TaskManager._TaskManager__language_directive.__get__(tm, TaskManager)
     tm.tools = {"llm_agent": MagicMock()}

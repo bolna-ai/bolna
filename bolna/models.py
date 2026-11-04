@@ -38,6 +38,7 @@ from .constants import (
     DEEPGRAM_AURA_2_SPEED_MAX,
     DEEPGRAM_AURA_2_SPEED_MIN,
     ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES,
+    MEMORY_VARIABLES_MAX,
     MODEL_REASONING_EFFORT_MAP,
     RESERVED_LLM_REQUEST_KEYS,
     RESERVED_TTS_REQUEST_KEYS,
@@ -607,10 +608,40 @@ class Llm(BaseModel):
         return self
 
 
+class MemoryVariable(BaseModel):
+    """A detail a simple or knowledge-base agent saves during the call with the update_memory tool."""
+
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,39}$")
+    type: Literal["string", "number", "boolean", "enum"]
+    description: str = Field(min_length=1)
+    values: Optional[List[str]] = None
+
+    @model_validator(mode="after")
+    def validate_enum_values(self):
+        if self.type == "enum" and not self.values:
+            raise ValueError(f"Memory variable '{self.key}' is an enum, so it needs values.")
+        return self
+
+
+def unique_memory_keys(variables):
+    seen = set()
+    for variable in variables or []:
+        if variable.key in seen:
+            raise ValueError(f"Memory variable '{variable.key}' is listed more than once.")
+        seen.add(variable.key)
+    return variables
+
+
+MemoryVariables = Annotated[
+    List[MemoryVariable], Field(max_length=MEMORY_VARIABLES_MAX), AfterValidator(unique_memory_keys)
+]
+
+
 class SimpleLlmAgent(Llm):
     agent_flow_type: Optional[str] = "streaming"  # It is used for backwards compatibility
     extraction_details: Optional[str] = None
     summarization_details: Optional[str] = None
+    memory_variables: Optional[MemoryVariables] = None
 
 
 class Node(BaseModel):
@@ -861,6 +892,7 @@ class KnowledgeAgentConfig(Llm):
     rag_config: Optional[Dict] = None
     llm_provider: Optional[str] = "openai"
     context_data: Optional[dict] = None
+    memory_variables: Optional[MemoryVariables] = None
 
 
 class AgentRouteConfig(BaseModel):

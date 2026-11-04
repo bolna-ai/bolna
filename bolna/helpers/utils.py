@@ -31,6 +31,7 @@ from bolna.constants import (
     PRE_FUNCTION_CALL_MESSAGE,
     TRANSFERING_CALL_FILLER,
     END_CALL_FUNCTION_PREFIX,
+    UPDATE_MEMORY_FUNCTION_NAME,
 )
 from bolna.enums import LogComponent, LogDirection, SynthesizerProvider, UsageSource
 from bolna.prompts import DATE_PROMPT
@@ -1319,8 +1320,10 @@ def build_soniox_config(model, audio_format, sample_rate, **extras):
 
 def compute_function_pre_call_message(language, function_name, api_tool_pre_call_message):
     """Select pre-function call message with language support."""
-    # Built-in tools that should switch silently — no audible filler.
-    if function_name and function_name == "switch_language":
+    # Built-in tools that run silently — no audible filler. An agent's own update_memory tool keeps its message.
+    if function_name == "switch_language" or (
+        function_name == UPDATE_MEMORY_FUNCTION_NAME and not api_tool_pre_call_message
+    ):
         return ""
 
     # No filler for end_call — LLM's textual response is the goodbye

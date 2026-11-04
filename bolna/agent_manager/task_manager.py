@@ -51,6 +51,7 @@ from bolna.constants import (
     HANGUP_AFTER_REPLY,
     WEB_SEARCH_FUNCTION_NAME,
     WEB_SEARCH_TOOL_DEFINITION,
+    UPDATE_MEMORY_FUNCTION_NAME,
     RESPONSES_API_MODEL_PREFIXES,
     LLM_GENERATION_TIMEOUT_S,
     S2S_GOODBYE_TIMEOUT_S,
@@ -133,8 +134,9 @@ from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.tts_audio_monitor import TtsAudioMonitor
 from ..helpers.observable_variable import ObservableVariable
-from bolna.models import S2SConfig, WebSearchConfig, tts_render_settings
+from bolna.models import MemoryVariable, S2SConfig, WebSearchConfig, tts_render_settings
 from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
+from bolna.helpers.call_memory import CallMemory
 from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
 
@@ -223,6 +225,20 @@ def _inject_web_search_tool(api_tools, cfg: WebSearchConfig):
         "scope": cfg.scope,
         "nodes": list(cfg.nodes or []),
     }
+    return api_tools
+
+
+def _inject_update_memory_tool(api_tools, tool_def):
+    """Add the update_memory tool built from the agent's memory variables to api_tools."""
+    if api_tools is None:
+        api_tools = {"tools": [], "tools_params": {}}
+    tools_list = api_tools.get("tools") or []
+    if isinstance(tools_list, str):
+        tools_list = json.loads(tools_list)
+    tools_list.append(tool_def)
+    api_tools["tools"] = tools_list
+    # The entry must exist or ToolCallAccumulator drops the call; it saves in-process, so no url.
+    api_tools.setdefault("tools_params", {})[UPDATE_MEMORY_FUNCTION_NAME] = {}
     return api_tools
 
 
@@ -1027,6 +1043,30 @@ class TaskManager(BaseManager):
                     "tool as the fallback switch path for this call"
                 )
             self.__inject_switch_language_tool()
+
+        # In-call memory is for simple and knowledge-base agents; graph agents carry values node to node.
+        self.call_memory = None
+        llm_agent = self.task_config["tools_config"].get("llm_agent") or {}
+        memory_variables = (llm_agent.get("llm_config") or {}).get("memory_variables")
+        if (
+            memory_variables
+            and self._is_conversation_task()
+            and llm_agent.get("agent_type", "simple_llm_agent") in ("simple_llm_agent", "knowledgebase_agent")
+        ):
+            if UPDATE_MEMORY_FUNCTION_NAME in ((self.kwargs.get("api_tools") or {}).get("tools_params") or {}):
+                logger.warning("memory_variables ignored: the agent already has its own update_memory tool")
+            else:
+                try:
+                    variables = [MemoryVariable.model_validate(variable).model_dump() for variable in memory_variables]
+                except Exception as e:
+                    logger.error(f"Ignoring invalid memory_variables: {e}")
+                    variables = None
+                if variables:
+                    self.call_memory = CallMemory(variables)
+                    self.kwargs["api_tools"] = _inject_update_memory_tool(
+                        self.kwargs.get("api_tools"), self.call_memory.tool_definition()
+                    )
+                    logger.info(f"update_memory tool active keys={list(self.call_memory.variables)}")
 
         # # setting llm
         # llm = self.__setup_llm(self.llm_config)
@@ -3863,6 +3903,47 @@ class TaskManager(BaseManager):
                 logger.info("web_search: call ended while searching, dropping the result")
                 return
 
+            self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
+            self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
+            self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
+            convert_to_request_log(
+                function_response,
+                meta_info,
+                None,
+                LogComponent.FUNCTION_CALL,
+                direction=LogDirection.RESPONSE,
+                run_id=self.run_id,
+                tool_name=called_fun,
+            )
+            messages = self.conversation_history.get_copy()
+            followup_meta_info = self._spawn_followup_meta_info(meta_info)
+            await self.__do_llm_generation(
+                messages,
+                followup_meta_info,
+                next_step,
+                should_bypass_synth=meta_info.get("bypass_synth", False),
+                should_trigger_function_call=True,
+            )
+            self.execute_function_call_task = None
+            return
+
+        if called_fun == UPDATE_MEMORY_FUNCTION_NAME and self.call_memory is not None:
+            updates = resp.get("updates")
+            convert_to_request_log(
+                json.dumps({"updates": updates}, ensure_ascii=False),
+                meta_info,
+                None,
+                LogComponent.FUNCTION_CALL,
+                direction=LogDirection.REQUEST,
+                run_id=self.run_id,
+                tool_name=called_fun,
+            )
+            result = self.call_memory.apply(updates, turn_id=turn_id)
+            logger.info(f"call_memory turn={turn_id} saved={list(result['saved'])} rejected={result['rejected']}")
+            if result["saved"]:
+                self.__refresh_memory_block()
+
+            function_response = json.dumps(result, ensure_ascii=False)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
             self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
             self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
@@ -7559,6 +7640,20 @@ class TaskManager(BaseManager):
             marker_idx = current.find("\n\n## Language note:")
             base = current[:marker_idx] if marker_idx != -1 else current
         new_prompt = f"{base}\n\n{context_note or self.__language_directive(label)}"
+        # Both bases drop the call memory block: a language variant never had it, and the cut at the note removes it.
+        if self.call_memory is not None:
+            new_prompt = self.call_memory.with_block(new_prompt)
+        self.conversation_history.update_system_prompt(new_prompt)
+        self.system_prompt["content"] = new_prompt
+        # Responses API keeps the system prompt server-side, so a rewrite only ships once the chain drops.
+        self._invalidate_response_chain()
+
+    def __refresh_memory_block(self) -> None:
+        """Rewrite the call memory block at the end of the system prompt from the current values."""
+        current = self.system_prompt.get("content") or ""
+        new_prompt = self.call_memory.with_block(current)
+        if new_prompt == current:
+            return
         self.conversation_history.update_system_prompt(new_prompt)
         self.system_prompt["content"] = new_prompt
         # Responses API keeps the system prompt server-side, so a rewrite only ships once the chain drops.
@@ -7671,6 +7766,8 @@ class TaskManager(BaseManager):
         target_prompt = self.multilingual_prompts.get(target_label)
         note = self.__language_directive(target_label)
         target_prompt = f"{target_prompt}\n\n{note}" if target_prompt else note
+        if self.call_memory is not None:
+            target_prompt = self.call_memory.with_block(target_prompt)
         if messages and messages[0].get("role") == "system":
             messages[0]["content"] = target_prompt
         else:
@@ -9739,6 +9836,7 @@ class TaskManager(BaseManager):
                     "node_extracted_data": (
                         dict(self.tools["llm_agent"].node_extracted_data) if self.__is_graph_agent() else None
                     ),
+                    "call_memory": self.call_memory.output() if self.call_memory is not None else None,
                     "latency_dict": {
                         "llm_latencies": self.llm_latencies.model_dump(),
                         "transcriber_latencies": self.transcriber_latencies.model_dump(),

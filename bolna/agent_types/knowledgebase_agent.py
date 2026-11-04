@@ -203,7 +203,8 @@ class KnowledgeBaseAgent(BaseAgent):
         try:
             client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
 
-            latest_message = messages[-1]["content"] if messages else ""
+            # After a tool call the last message is its result, so search with the caller's own words.
+            latest_message = next((m.get("content") or "" for m in reversed(messages) if m.get("role") == "user"), "")
 
             rag_response = await client.query_for_conversation(
                 query=latest_message,
