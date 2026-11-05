@@ -248,12 +248,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
         vendor_endpoint = LLM_VENDOR_ENDPOINTS.get(provider)
         if vendor_endpoint:
             vendor_url, key_env = vendor_endpoint
-            kwargs = {
-                **kwargs,
-                "base_url": kwargs.get("base_url") or vendor_url,
-                "llm_key": kwargs.get("llm_key") or os.getenv(key_env),
-            }
-        # Not OpenAI's own endpoint: chat completions only, without OpenAI-only request fields.
+            vendor_key = kwargs.get("llm_key") or os.getenv(key_env)
+            if not vendor_key:
+                raise ValueError(f"No API key for LLM provider {provider}: pass llm_key or set {key_env}")
+            kwargs = {**kwargs, "base_url": vendor_url, "llm_key": vendor_key}
         compatible_endpoint = vendor_endpoint is not None or provider in (
             LLMProvider.CUSTOM.value,
             LLMProvider.BOLNA.value,

@@ -316,8 +316,7 @@ LANGUAGE_NAMES = {
 RESERVED_LLM_REQUEST_KEYS = frozenset(
     {"model", "messages", "stream", "stream_options", "tools", "tool_choice", "parallel_tool_calls", "response_format"}
 )
-# OpenAI-compatible LLM vendors on their own endpoint: (base URL, env var holding the platform key).
-# A call carrying its own key or base_url uses those instead.
+# OpenAI-compatible LLM vendors: (base URL, env var holding the platform key).
 LLM_VENDOR_ENDPOINTS = {
     LLMProvider.SARVAM.value: ("https://api.sarvam.ai/v1", "SARVAM_API_KEY"),
 }

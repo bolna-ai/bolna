@@ -1,5 +1,4 @@
-"""Sarvam's LLM runs on OpenAiLLM against Sarvam's endpoint, on the platform key unless the call carries the
-customer's, and only the conversation goes there: the hangup and voicemail hops stay on OpenAI."""
+"""Sarvam LLM: Sarvam's endpoint only, its own key, and graph hops kept off it."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -51,8 +50,15 @@ class TestClient:
     def test_customer_key_wins_over_platform_key(self):
         assert _sarvam_llm(llm_key=CUSTOMER_SARVAM_KEY).async_client.api_key == CUSTOMER_SARVAM_KEY
 
-    def test_is_not_ssrf_guarded(self):
-        assert _sarvam_llm()._base_url is None
+    def test_agent_base_url_never_receives_the_key(self):
+        llm = _sarvam_llm(base_url="https://elsewhere.example.com/v1")
+        assert str(llm.async_client.base_url).rstrip("/") == SARVAM_URL
+        assert llm.async_client.api_key == PLATFORM_SARVAM_KEY
+
+    def test_no_key_fails_instead_of_sending_the_openai_key(self, monkeypatch):
+        monkeypatch.delenv("SARVAM_API_KEY")
+        with pytest.raises(ValueError, match="SARVAM_API_KEY"):
+            _sarvam_llm()
 
     def test_responses_api_stays_off(self):
         assert _sarvam_llm(use_responses_api=True).use_responses_api is False
@@ -91,3 +97,27 @@ def test_graph_agent_keeps_hops_off_sarvam(monkeypatch):
         assert "base_url" not in kwargs
         assert kwargs.get("llm_key") != CUSTOMER_SARVAM_KEY
         assert kwargs.get("provider") != "sarvam"
+
+
+def _graph_with_sarvam_node():
+    node = {"id": "pitch", "prompt": "hi", "edges": [], "llm_config": {"provider": "sarvam", "model": MODEL}}
+    config = {
+        "agent_information": "Test agent",
+        "model": "gpt-4.1-mini",
+        "provider": "openai",
+        "current_node_id": "pitch",
+        "nodes": [node],
+        "node_llm_credentials": {"pitch": {}},
+    }
+    return GraphAgent(config), node
+
+
+def test_node_switched_to_sarvam_runs_on_sarvam():
+    agent, node = _graph_with_sarvam_node()
+    assert agent._conversation_llm_for(node).llm_host == "api.sarvam.ai"
+
+
+def test_node_switched_to_sarvam_without_a_key_stays_on_the_agent_llm(monkeypatch):
+    monkeypatch.delenv("SARVAM_API_KEY")
+    agent, node = _graph_with_sarvam_node()
+    assert agent._conversation_llm_for(node) is agent.llm
