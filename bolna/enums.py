@@ -124,6 +124,7 @@ class LLMProvider(str, Enum):
     AZURE = "azure"
     GOOGLE = "google"
     BOLNA = "bolna"
+    SARVAM = "sarvam"
 
     @classmethod
     def all_values(cls):

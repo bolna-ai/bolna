@@ -41,6 +41,7 @@ from bolna.constants import (
     END_CALL_FUNCTION_PREFIX,
     HANGUP_AFTER_REPLY,
     LANGUAGE_NAMES,
+    LLM_VENDOR_ENDPOINTS,
     RESPONSES_API_MODEL_PREFIXES,
     canonical_model,
     default_reasoning_effort,
@@ -51,9 +52,12 @@ from typing import List, Tuple, AsyncGenerator, Optional, Dict, Any
 
 # Conversation providers whose own key authenticates the hangup/voicemail OpenAiLLM hops; any
 # other provider (Gemini, Azure, the LiteLLM backends) needs the platform OpenAI key instead. A
-# Bolna-hosted endpoint serves only its own model, so its hops use the platform key too.
+# Bolna-hosted endpoint or a vendor's own endpoint serves only its own models, so its hops use the
+# platform key too.
 OPENAI_KEYED_PROVIDERS = frozenset(
-    p for p, cls in SUPPORTED_LLM_PROVIDERS.items() if cls is OpenAiLLM and p != LLMProvider.BOLNA.value
+    p
+    for p, cls in SUPPORTED_LLM_PROVIDERS.items()
+    if cls is OpenAiLLM and p != LLMProvider.BOLNA.value and p not in LLM_VENDOR_ENDPOINTS
 )
 
 # Conversation LLM settings that belong to the agent's provider, dropped when a node switches provider.
