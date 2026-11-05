@@ -1,5 +1,6 @@
 """In-call memory: typed values the agent saves with the update_memory tool and reads back from its prompt."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -238,6 +239,8 @@ def _tm_with_memory(*variables):
     tm._spawn_followup_meta_info = lambda meta_info: dict(meta_info)
     tm._TaskManager__do_llm_generation = AsyncMock()
     tm.execute_function_call_task = None
+    tm.on_memory_update = None
+    tm._memory_write_tasks = set()
     return tm
 
 
@@ -308,6 +311,40 @@ async def test_a_call_that_saves_nothing_leaves_the_prompt_and_its_cache_alone()
     assert tm.system_prompt["content"] == "PROMPT"
     tm.conversation_history.update_system_prompt.assert_not_called()
     tm._invalidate_response_chain.assert_not_called()
+    tm._TaskManager__do_llm_generation.assert_awaited_once()
+
+
+async def test_each_change_hands_the_host_the_full_memory_at_that_moment():
+    tm = _tm_with_memory(NAME, AMOUNT)
+    tm.on_memory_update = AsyncMock()
+    await _call_update_memory(tm, {"customer_name": "XYZ"})
+    await _call_update_memory(tm, {"promised_amount": 3000})
+    await asyncio.sleep(0)
+
+    first, second = [call.args[0] for call in tm.on_memory_update.await_args_list]
+    assert first["values"] == {"customer_name": "XYZ"}
+    assert second["values"] == {"customer_name": "XYZ", "promised_amount": 3000}
+    assert [update["to"] for update in second["updates"]] == ["XYZ", 3000]
+
+
+async def test_confirmations_and_rejected_values_hand_the_host_nothing():
+    tm = _tm_with_memory(NAME, AMOUNT)
+    tm.on_memory_update = AsyncMock()
+    await _call_update_memory(tm, {"customer_name": "XYZ"})
+    tm.on_memory_update.reset_mock()
+
+    await _call_update_memory(tm, {"customer_name": "XYZ", "promised_amount": "lots"})
+    await asyncio.sleep(0)
+
+    tm.on_memory_update.assert_not_called()
+
+
+async def test_a_failing_host_write_never_holds_up_the_reply():
+    tm = _tm_with_memory(NAME)
+    tm.on_memory_update = MagicMock(side_effect=RuntimeError("db down"))
+    await _call_update_memory(tm, {"customer_name": "XYZ"})
+
+    assert tm.call_memory.values == {"customer_name": "XYZ"}
     tm._TaskManager__do_llm_generation.assert_awaited_once()
 
 

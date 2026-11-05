@@ -1046,6 +1046,9 @@ class TaskManager(BaseManager):
 
         # In-call memory is for simple and knowledge-base agents; graph agents carry values node to node.
         self.call_memory = None
+        # Called with the whole memory after each change, so the host can store it during the call.
+        self.on_memory_update = self.kwargs.get("on_memory_update")
+        self._memory_write_tasks = set()
         llm_agent = self.task_config["tools_config"].get("llm_agent") or {}
         memory_variables = (llm_agent.get("llm_config") or {}).get("memory_variables")
         if (
@@ -3938,10 +3941,13 @@ class TaskManager(BaseManager):
                 run_id=self.run_id,
                 tool_name=called_fun,
             )
+            changes_before = len(self.call_memory.updates)
             result = self.call_memory.apply(updates, turn_id=turn_id)
             logger.info(f"call_memory turn={turn_id} saved={list(result['saved'])} rejected={result['rejected']}")
             if result["saved"]:
                 self.__refresh_memory_block()
+            if len(self.call_memory.updates) > changes_before:
+                self.__report_memory_update()
 
             function_response = json.dumps(result, ensure_ascii=False)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
@@ -7647,6 +7653,18 @@ class TaskManager(BaseManager):
         self.system_prompt["content"] = new_prompt
         # Responses API keeps the system prompt server-side, so a rewrite only ships once the chain drops.
         self._invalidate_response_chain()
+
+    def __report_memory_update(self) -> None:
+        """Hand the host a snapshot of the memory without holding up the reply."""
+        if not self.on_memory_update:
+            return
+        try:
+            task = asyncio.create_task(self.on_memory_update(self.call_memory.output()))
+        except Exception as e:
+            logger.warning(f"on_memory_update failed run_id={self.run_id} {e=}")
+            return
+        self._memory_write_tasks.add(task)
+        task.add_done_callback(self._memory_write_tasks.discard)
 
     def __refresh_memory_block(self) -> None:
         """Rewrite the call memory block at the end of the system prompt from the current values."""
