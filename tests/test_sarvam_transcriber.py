@@ -1,9 +1,8 @@
 """Unit tests for SarvamTranscriber endpoint routing.
 
-saaras models split across two Sarvam endpoints: v3+ transcribe directly on
-/speech-to-text (and need language-code), older saaras goes to the legacy
-/speech-to-text-translate. Getting this wrong is silent — the connection
-succeeds against the wrong endpoint — so the URLs are pinned here.
+v3+ saaras transcribe (and need language-code); older saaras translate as
+saaras:v4. Getting this wrong is silent — the connection succeeds with the
+wrong model or mode — so the URLs are pinned here.
 """
 
 import json
@@ -49,11 +48,14 @@ def test_transcribe_models_send_language_code(model):
     assert "language-code=hi-IN" in _transcriber(model).ws_url
 
 
-def test_legacy_saaras_still_uses_translate_endpoint():
+def test_legacy_saaras_translates_as_v4_on_speech_to_text():
     t = _transcriber("saaras:v2.5")
-    assert t.api_url == "https://api.sarvam.ai/speech-to-text-translate"
-    assert t.ws_url.startswith("wss://api.sarvam.ai/speech-to-text-translate/ws?")
-    assert "language-code" not in t.ws_url
+    params = parse_qs(urlparse(t.ws_url).query)
+    assert t.api_url == "https://api.sarvam.ai/speech-to-text"
+    assert t.ws_url.startswith("wss://api.sarvam.ai/speech-to-text/ws?")
+    assert params["model"] == ["saaras:v4"]
+    assert params["mode"] == ["translate"]
+    assert "language-code" not in params
 
 
 def test_mode_is_sent_for_v3_only():
@@ -140,3 +142,15 @@ async def test_rest_sends_keyterms_as_one_json_form_field(monkeypatch):
     await t._get_http_transcription(b"\xff" * 320)
 
     assert json.loads(form.fields["keyterms"]) == ["Bolna", "New Delhi"]
+
+
+async def test_rest_legacy_saaras_translates_as_v4(monkeypatch):
+    form = _RecordingForm()
+    monkeypatch.setattr(aiohttp, "FormData", lambda: form)
+    t = _transcriber("saaras:v2.5")
+    t.session = _FakeSession()
+
+    await t._get_http_transcription(b"\xff" * 320)
+
+    assert form.fields["model"] == "saaras:v4"
+    assert form.fields["mode"] == "translate"
