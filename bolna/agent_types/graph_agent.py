@@ -1679,9 +1679,10 @@ class GraphAgent(BaseAgent):
     def _static_message_chunk(self, current_node: Optional[dict]) -> Optional[dict]:
         """Resolve a static node's message for the active language and build its
         playback chunk: context-substituted text plus the audio-cache hash. None if empty."""
+        # Until the caller's language is detected, a call opened by its static start node keeps the opening's language.
         text = select_message_by_language(
             current_node.get("static_message") if current_node else None,
-            self.context_data.get("detected_language"),
+            self.context_data.get("detected_language") or self.config.get("opening_language"),
         )
         if not text:
             return None

@@ -49,7 +49,9 @@ def _telephony_task_manager(last_transmitted_timestamp, *, hang_conversation_aft
     tm.repeat_after_silence_seconds = 0
     tm.trigger_user_online_message_after = 6
     tm.asked_if_user_is_still_there = False
-    tm.tools = {"input": SimpleNamespace(is_audio_being_played_to_user=lambda: False)}
+    tm.tools = {
+        "input": SimpleNamespace(is_audio_being_played_to_user=lambda: False, welcome_message_played=lambda: True)
+    }
     tm.hangup_detail = None
     tm.hangups = []
     tm.ended = []
@@ -217,7 +219,14 @@ GOODBYE = _node("goodbye", repeat_after_silence_seconds=None)
 
 
 async def _run_silent_call(
-    monkeypatch, nodes, *, hang_conversation_after=20, max_silence_repeats=2, user_speaks_at=None, horizon_s=300
+    monkeypatch,
+    nodes,
+    *,
+    hang_conversation_after=20,
+    max_silence_repeats=2,
+    user_speaks_at=None,
+    horizon_s=300,
+    welcome_played=True,
 ):
     """Run the real completion loop on a fake clock for a caller who stays silent (optionally speaking
     once at user_speaks_at seconds). Returns the events: ("reprompt"|"user"|"hangup", node)."""
@@ -231,6 +240,7 @@ async def _run_silent_call(
     tm._silence_repeats_sent = 0
     tm._silence_period = None
     tm.check_if_user_online = False
+    tm.tools["input"].welcome_message_played = lambda: welcome_played
     tm.tools["llm_agent"] = graph
     tm.tools["output"] = SimpleNamespace(handle_interruption=AsyncMock())
     events = []
@@ -291,6 +301,11 @@ async def test_a_node_reached_through_a_silence_edge_gets_its_own_reprompts(monk
 async def test_the_user_speaking_starts_a_new_silence_period(monkeypatch):
     events = await _run_silent_call(monkeypatch, [_node("faq")], user_speaks_at=30)
     assert [kind for kind, _ in events] == ["reprompt", "reprompt", "user", "reprompt", "reprompt", "hangup"]
+
+
+async def test_an_opening_node_does_not_reprompt_before_its_message_has_played(monkeypatch):
+    events = await _run_silent_call(monkeypatch, [_node("greeting")], welcome_played=False)
+    assert events == [("hangup", "greeting")]
 
 
 async def test_no_cap_when_the_silence_hangup_is_off(monkeypatch):
