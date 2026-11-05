@@ -132,6 +132,7 @@ SUPPORTED_LLM_PROVIDERS = {
     LLMProvider.AZURE.value: AzureLLM,
     LLMProvider.GOOGLE.value: GeminiLLM,
     LLMProvider.BOLNA.value: OpenAiLLM,
+    LLMProvider.SARVAM.value: OpenAiLLM,
     LLMProvider.BEDROCK.value: BedrockLLM,
 }
 SUPPORTED_INPUT_HANDLERS = {

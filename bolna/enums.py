@@ -124,6 +124,7 @@ class LLMProvider(str, Enum):
     AZURE = "azure"
     GOOGLE = "google"
     BOLNA = "bolna"
+    SARVAM = "sarvam"
     BEDROCK = "bedrock"
 
     @classmethod
