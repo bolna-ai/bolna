@@ -1,7 +1,7 @@
 """A model listed in openai_model_endpoints runs on its own OpenAI endpoint; every other model keeps the caller's."""
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -101,3 +101,34 @@ def test_graph_agent_hops_riding_the_conversation_carry_the_map():
     for hop in (routing, conversation, hangup):
         assert hop["openai_model_endpoints"] == ENDPOINTS
         assert hop["base_url"] == EU["base_url"]
+
+
+BEDROCK_INDIA = {
+    "llm_key": "bedrock-key",
+    "base_url": "https://bedrock-runtime.ap-south-1.amazonaws.com/openai/v1",
+    "model": "in.openai.gpt-5.6-luna",
+}
+
+
+def test_endpoint_model_goes_on_the_wire_and_the_family_stays():
+    llm = OpenAiLLM(
+        model="gpt-5.6-luna", provider="openai", openai_model_endpoints={"gpt-5.6-luna": BEDROCK_INDIA}, **EU
+    )
+    assert _client(llm) == (BEDROCK_INDIA["base_url"], BEDROCK_INDIA["llm_key"])
+    assert llm.model == llm.model_args["model"] == "in.openai.gpt-5.6-luna"
+    assert llm.model_family == llm.request_log_model == "gpt-5.6-luna"
+    assert "max_completion_tokens" in llm.model_args and "reasoning_effort" in llm.model_args
+
+
+@pytest.mark.asyncio
+async def test_endpoint_model_streams_without_stop():
+    llm = OpenAiLLM(
+        model="gpt-5.6-luna", provider="openai", openai_model_endpoints={"gpt-5.6-luna": BEDROCK_INDIA}, **EU
+    )
+    llm.async_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("stop here"))
+    with pytest.raises(RuntimeError):
+        async for _ in llm.generate_stream([{"role": "user", "content": "hi"}], meta_info={}):
+            pass
+    sent = llm.async_client.chat.completions.create.call_args.kwargs
+    assert sent["model"] == "in.openai.gpt-5.6-luna"
+    assert "stop" not in sent

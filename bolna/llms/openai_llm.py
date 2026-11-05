@@ -240,6 +240,11 @@ class OpenAiLLM(OpenAICompatibleLLM):
         if model_endpoint and provider in (None, LLMProvider.OPENAI.value):
             # A model with its own OpenAI endpoint runs there; every other model keeps the caller's.
             kwargs = {**kwargs, **model_endpoint}
+            if model_endpoint.get("model"):
+                # The endpoint names the model its own way (e.g. a Bedrock inference profile); family checks
+                # and request logs keep the configured name.
+                self.model = self.model_args["model"] = model_endpoint["model"]
+                self._model_family = self._request_log_model = model
         self_hosted = provider in (LLMProvider.CUSTOM.value, LLMProvider.BOLNA.value)
         self._forces_tools_by_schema = provider in SCHEMA_FORCED_TOOL_PROVIDERS
         is_custom = provider == LLMProvider.CUSTOM.value
@@ -338,7 +343,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             "stream_options": {"include_usage": True},
         }
 
-        if not is_reasoning_model(self.model):
+        if not is_reasoning_model(self.model_family):
             model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
