@@ -353,7 +353,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             "stream_options": {"include_usage": True},
         }
 
-        if not is_reasoning_model(self.model):
+        if not is_reasoning_model(self.model_family):
             model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:

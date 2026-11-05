@@ -166,6 +166,11 @@ CONTENT_POLICY_ERROR_MARKERS = ("content policy", "content_policy", "content_fil
 # sequence_id -1 the handlers blank text_synthesized, so its mark never carries text.
 CACHED_SINGLE_MARK_CATEGORIES = ("static_node",)
 
+# OpenAI models on AWS Bedrock's OpenAI-compatible API, by the inference profile Bedrock serves each as.
+# The in. profiles keep requests in India (ap-south-1 / ap-south-2).
+BEDROCK_DEFAULT_BASE_URL = "https://bedrock-runtime.ap-south-1.amazonaws.com/openai/v1"
+BEDROCK_MODEL_IDS = {"gpt-5.6-luna": "in.openai.gpt-5.6-luna"}
+
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 GPT5_4_MODEL_PREFIX = "gpt-5.4"
