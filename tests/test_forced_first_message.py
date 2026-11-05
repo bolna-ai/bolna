@@ -13,6 +13,8 @@ def task_manager(welcome_text, preloaded_audio):
     tm.task_config = {"tools_config": {"output": {"format": "wav"}}}
     tm.tools = {"input": MagicMock(), "output": MagicMock(), "synthesizer": MagicMock()}
     tm.tools["input"].is_welcome_message_played = False
+    tm.tools["input"].welcome_message_played = lambda: tm.tools["input"].is_welcome_message_played
+    tm.tools["output"].get_welcome_message_sent_ts = MagicMock(return_value=None)
     tm.tools["output"].get_provider = MagicMock(return_value="plivo")
     tm.tools["output"].handle = AsyncMock()
     tm.conversation_history = MagicMock()
@@ -27,12 +29,16 @@ def task_manager(welcome_text, preloaded_audio):
 
 
 async def run_forced_first_message(tm):
-    with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+    with (
+        patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+        patch("bolna.agent_manager.task_manager.LIVE_WELCOME_AUDIO_TIMEOUT", 0),
+    ):
         await tm._TaskManager__forced_first_message()
 
 
 async def test_missing_welcome_audio_is_synthesized_live():
     tm = task_manager("Hi Asha, this is Sonia.", None)
+    tm.tools["output"].get_welcome_message_sent_ts = MagicMock(return_value=1700000000000)
 
     await run_forced_first_message(tm)
 
@@ -46,6 +52,15 @@ async def test_missing_welcome_audio_is_synthesized_live():
     tm.tools["output"].handle.assert_not_awaited()
     # Played is flipped by the synthesized audio's final mark, not up front.
     assert tm.tools["input"].is_welcome_message_played is False
+
+
+async def test_live_welcome_that_sends_no_audio_is_marked_played_after_the_timeout():
+    tm = task_manager("Hi Asha, this is Sonia.", None)
+
+    await run_forced_first_message(tm)
+
+    tm._synthesize.assert_awaited_once()
+    assert tm.tools["input"].is_welcome_message_played is True
 
 
 async def test_empty_welcome_is_marked_played_without_synthesis():

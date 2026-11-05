@@ -254,3 +254,16 @@ def test_duration_timer_completes_playback_when_no_echo_arrives():
 
     assert inp.acked == ["m1", "m2"]
     assert inp.audio_playing is False
+
+
+async def test_live_welcome_counts_as_played_only_on_its_end_of_stream_chunk():
+    # The streaming synthesizer reuses the welcome's meta, end_of_llm_stream included, for every chunk.
+    ws = _FakeWebSocket()
+    out = _make_output_handler(ws, _FakeInputHandler(MarkEventMetaData()))
+    meta = {"format": "ulaw", "sequence_id": -1, "message_category": "agent_welcome_message", "end_of_llm_stream": True}
+
+    await out.handle({"data": b"\xff" * 800, "meta_info": dict(meta)})
+    await out.handle({"data": b"\xff" * 800, "meta_info": {**meta, "end_of_synthesizer_stream": True}})
+
+    marks = list(out.mark_event_meta_data.mark_event_meta_data.values())
+    assert [mark["is_final_chunk"] for mark in marks] == [False, True]
