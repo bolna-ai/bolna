@@ -320,6 +320,8 @@ HANDOFF_CLIP_CACHE_MAX = 256
 # A routing rationale trails its decision by ~200ms. Teardown waits at most this long for one,
 # so a stalled routing stream delays the latency snapshot by this much and no more.
 ROUTING_TAIL_SETTLE_TIMEOUT = 1.0
+# A live welcome that sends no audio by then never sends its final mark either, so the call stops waiting on it.
+LIVE_WELCOME_AUDIO_TIMEOUT = 5.0
 
 _NON_NODE_RESPONSE_CATEGORIES = frozenset(
     {"is_user_online_message", "filler", "backchanneling", "agent_welcome_message", "handoff"}
@@ -1705,6 +1707,22 @@ class TaskManager(BaseManager):
             audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
             if meta_info["text"] == "":
                 audio_chunk = None
+
+            if audio_chunk is None and text and text.strip():
+                # Pre-generation failed upstream; synthesize live so the call doesn't start silent.
+                logger.info("No preloaded welcome audio; synthesizing welcome message live")
+                meta_info["cached"] = False
+                self.conversation_history.append_welcome_message(text)
+                await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
+                await asyncio.sleep(LIVE_WELCOME_AUDIO_TIMEOUT)
+                if (
+                    not self.tools["output"].get_welcome_message_sent_ts()
+                    and not self.tools["input"].welcome_message_played()
+                ):
+                    # Transcripts are held until the welcome plays; release them rather than wait for the stall hangup.
+                    logger.warning(f"Live welcome sent no audio in {LIVE_WELCOME_AUDIO_TIMEOUT}s; marking it played")
+                    self.tools["input"].is_welcome_message_played = True
+                return
 
             # Convert to ulaw for Asterisk/sip-trunk provider (cached welcome is PCM)
             if self.tools["output"].get_provider() == TelephonyProvider.SIP_TRUNK.value and audio_chunk:

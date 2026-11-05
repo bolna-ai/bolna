@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timezone
-from bolna.enums import ReasoningEffort as RE, SynthesizerProvider, TelephonyProvider
+from bolna.enums import LLMProvider, ReasoningEffort as RE, SynthesizerProvider, TelephonyProvider
 
 PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
@@ -316,6 +316,10 @@ LANGUAGE_NAMES = {
 RESERVED_LLM_REQUEST_KEYS = frozenset(
     {"model", "messages", "stream", "stream_options", "tools", "tool_choice", "parallel_tool_calls", "response_format"}
 )
+# OpenAI-compatible LLM vendors: (base URL, env var holding the platform key).
+LLM_VENDOR_ENDPOINTS = {
+    LLMProvider.SARVAM.value: ("https://api.sarvam.ai/v1", "SARVAM_API_KEY"),
+}
 # Speech request fields that shape what bolna sends and gets back; a custom TTS's extra_body may not set them.
 RESERVED_TTS_REQUEST_KEYS = frozenset({"model", "voice", "input", "response_format", "stream_format"})
 

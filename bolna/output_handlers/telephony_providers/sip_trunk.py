@@ -442,7 +442,6 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             is_final = bool(
                 (meta_info.get("end_of_llm_stream") and meta_info.get("end_of_synthesizer_stream"))
                 or meta_info.get("is_final_chunk_of_entire_response")
-                or (meta_info.get("sequence_id") == -1 and meta_info.get("end_of_llm_stream"))
             )
             has_audio = audio_chunk and len(audio_chunk) > 1 and audio_chunk != b"\x00\x00"
 
