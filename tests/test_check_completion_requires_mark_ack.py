@@ -49,9 +49,8 @@ def _telephony_task_manager(last_transmitted_timestamp, *, hang_conversation_aft
     tm.repeat_after_silence_seconds = 0
     tm.trigger_user_online_message_after = 6
     tm.asked_if_user_is_still_there = False
-    tm.tools = {
-        "input": SimpleNamespace(is_audio_being_played_to_user=lambda: False, welcome_message_played=lambda: True)
-    }
+    tm.tools = {"input": SimpleNamespace(is_audio_being_played_to_user=lambda: False)}
+    tm.opening_node = None
     tm.hangup_detail = None
     tm.hangups = []
     tm.ended = []
@@ -240,7 +239,9 @@ async def _run_silent_call(
     tm._silence_repeats_sent = 0
     tm._silence_period = None
     tm.check_if_user_online = False
-    tm.tools["input"].welcome_message_played = lambda: welcome_played
+    if not welcome_played:
+        tm.opening_node = nodes[0]
+        tm.tools["input"].welcome_message_played = lambda: False
     tm.tools["llm_agent"] = graph
     tm.tools["output"] = SimpleNamespace(handle_interruption=AsyncMock())
     events = []

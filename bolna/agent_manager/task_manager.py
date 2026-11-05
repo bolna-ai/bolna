@@ -8607,7 +8607,7 @@ class TaskManager(BaseManager):
             if (
                 self.repeat_after_silence_seconds
                 # An opening node arms its re-prompt before its message has played.
-                and self.tools["input"].welcome_message_played()
+                and (self.opening_node is None or self.tools["input"].welcome_message_played())
                 and self._silence_repeats_sent < silence_repeat_cap
                 and time_since_last_spoken_ai_word > self.repeat_after_silence_seconds
                 and time_since_user_last_spoke > self.repeat_after_silence_seconds
