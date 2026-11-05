@@ -1,7 +1,7 @@
-"""Per-label Deepgram host overrides reach the pool; the top-level host is NOT inherited into legs.
+"""Per-label Deepgram endpoints reach the pool; the top-level endpoint is NOT inherited into legs.
 
 The router (dashboard-backend) stamps only the legs a chosen endpoint can actually serve, so an
-unstamped leg must keep its default host rather than inherit a base host it may not support.
+unstamped leg must keep its default host rather than inherit an endpoint it may not support.
 """
 
 from unittest.mock import MagicMock
@@ -27,49 +27,43 @@ def _run_setup(monkeypatch, transcriber_config):
     tm._TaskManager__setup_transcriber()
 
 
-def test_per_label_hosts_are_preserved(monkeypatch):
+def test_per_label_endpoints_are_preserved(monkeypatch):
     cfg = {
         "provider": "deepgram",
         "multilingual": {
             "en": {
                 "provider": "deepgram",
                 "model": "nova-3",
-                "deepgram_host": "gcp:8080",
-                "deepgram_host_protocol": "ws",
+                "deepgram_endpoint": "gcp",
             },
             "hi": {
                 "provider": "deepgram",
                 "model": "nova-2",
-                "deepgram_host": "modal:443",
-                "deepgram_host_protocol": "wss",
+                "deepgram_endpoint": "modal",
             },
         },
     }
     _run_setup(monkeypatch, cfg)
 
-    assert cfg["multilingual"]["en"]["deepgram_host"] == "gcp:8080"
-    assert cfg["multilingual"]["en"]["deepgram_host_protocol"] == "ws"
-    assert cfg["multilingual"]["hi"]["deepgram_host"] == "modal:443"
-    assert cfg["multilingual"]["hi"]["deepgram_host_protocol"] == "wss"
+    assert cfg["multilingual"]["en"]["deepgram_endpoint"] == "gcp"
+    assert cfg["multilingual"]["hi"]["deepgram_endpoint"] == "modal"
 
 
-def test_top_level_host_not_inherited_into_legs(monkeypatch):
-    # An unstamped leg (no per-label host) must NOT pick up the top-level host — that inheritance is
-    # exactly what would force an unsupported model onto the wrong endpoint.
+def test_top_level_endpoint_not_inherited_into_legs(monkeypatch):
+    # An unstamped leg must NOT pick up the top-level endpoint: that inheritance would force an
+    # unsupported model onto the wrong endpoint.
     cfg = {
         "provider": "deepgram",
-        "deepgram_host": "gcp:8080",
-        "deepgram_host_protocol": "ws",
+        "deepgram_endpoint": "gcp",
         "multilingual": {
-            "en": {"provider": "deepgram", "model": "nova-3", "deepgram_host": "gcp:8080"},
+            "en": {"provider": "deepgram", "model": "nova-3", "deepgram_endpoint": "gcp"},
             "hi": {"provider": "deepgram", "model": "flux-general-hi"},  # deliberately left on default
         },
     }
     _run_setup(monkeypatch, cfg)
 
-    assert cfg["multilingual"]["en"]["deepgram_host"] == "gcp:8080"
-    assert "deepgram_host" not in cfg["multilingual"]["hi"]
-    assert "deepgram_host_protocol" not in cfg["multilingual"]["hi"]
+    assert cfg["multilingual"]["en"]["deepgram_endpoint"] == "gcp"
+    assert "deepgram_endpoint" not in cfg["multilingual"]["hi"]
 
 
 def test_no_override_leaves_labels_untouched(monkeypatch):
@@ -79,8 +73,7 @@ def test_no_override_leaves_labels_untouched(monkeypatch):
     }
     _run_setup(monkeypatch, cfg)
 
-    assert "deepgram_host" not in cfg["multilingual"]["en"]
-    assert "deepgram_host_protocol" not in cfg["multilingual"]["en"]
+    assert "deepgram_endpoint" not in cfg["multilingual"]["en"]
 
 
 def test_top_level_mip_opt_out_inherited_into_legs(monkeypatch):

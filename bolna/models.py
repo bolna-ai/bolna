@@ -400,10 +400,6 @@ class Transcriber(BaseModel):
     provider: Optional[str] = "deepgram"
     multilingual: Optional[Dict[str, Any]] = None
     active: Optional[str] = None
-    # Per-call self-hosted Deepgram endpoint override; unset falls back to DEEPGRAM_HOST* env.
-    deepgram_host: Optional[str] = None
-    deepgram_flux_host: Optional[str] = None
-    deepgram_host_protocol: Optional[str] = None
     # Opt out of Deepgram's Model Improvement Program (zero retention after processing).
     mip_opt_out: Optional[bool] = None
     # Flux model parameters
