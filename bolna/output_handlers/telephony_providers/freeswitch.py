@@ -164,7 +164,6 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
             is_final = bool(
                 (meta_info.get("end_of_llm_stream") and meta_info.get("end_of_synthesizer_stream"))
                 or meta_info.get("is_final_chunk_of_entire_response")
-                or (meta_info.get("sequence_id") == -1 and meta_info.get("end_of_llm_stream"))
             )
             has_audio = audio and len(audio) > 1 and audio != b"\x00\x00"
             if not has_audio and not is_final:
