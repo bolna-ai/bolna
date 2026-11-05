@@ -61,3 +61,10 @@ async def test_streaming_chat_sends_the_profile_id_without_stop():
     sent = llm.async_client.chat.completions.create.call_args.kwargs
     assert sent["model"] == "in.openai.gpt-5.6-luna"
     assert "stop" not in sent
+
+
+def test_missing_bedrock_key_raises_instead_of_sending_the_openai_key(monkeypatch):
+    monkeypatch.delenv("BEDROCK_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "platform-openai-key")
+    with pytest.raises(ValueError, match="BEDROCK_API_KEY"):
+        BedrockLLM(model="bedrock/gpt-5.6-luna", provider="bedrock")

@@ -18,6 +18,9 @@ class BedrockLLM(OpenAiLLM):
     ):
         family = model.split("/", 1)[-1]
         kwargs["llm_key"] = kwargs.get("llm_key") or os.getenv("BEDROCK_API_KEY")
+        if not kwargs["llm_key"]:
+            # Otherwise the OpenAI SDK falls back to OPENAI_API_KEY and sends our OpenAI key to Bedrock.
+            raise ValueError("No API key for LLM provider bedrock: pass llm_key or set BEDROCK_API_KEY")
         kwargs["base_url"] = kwargs.get("base_url") or os.getenv("BEDROCK_BASE_URL") or BEDROCK_DEFAULT_BASE_URL
         # Built on the bare family so reasoning params and transport follow it; only the wire id is Bedrock's.
         super().__init__(max_tokens, buffer_size, family, temperature, language, **kwargs)
