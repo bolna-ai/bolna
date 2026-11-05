@@ -12,15 +12,28 @@ load_dotenv()
 logger = configure_logger(__name__)
 
 
+def completion_llm_for(main_llm, fallback_model="gpt-4o-mini"):
+    """Hangup detection stays on OpenAI when that key exists. Otherwise the call's own LLM does it."""
+    model = os.getenv("CHECK_FOR_COMPLETION_LLM") or getattr(main_llm, "model", None) or fallback_model
+    if os.getenv("OPENAI_API_KEY"):
+        return OpenAiLLM(model=model)
+    return main_llm
+
+
+def voicemail_llm_or_none():
+    """Voicemail detection stays on Azure OpenAI. Skip it when that deployment is not configured."""
+    endpoint = os.getenv("AZURE_OPENAI_BASE_URL") or os.getenv("AZURE_OPENAI_ENDPOINT")
+    if not endpoint or not os.getenv("AZURE_OPENAI_API_KEY"):
+        return None
+    return AzureLLM(model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"), base_url=endpoint)
+
+
 class StreamingContextualAgent(BaseAgent):
     def __init__(self, llm):
         super().__init__()
         self.llm = llm
-        self.conversation_completion_llm = OpenAiLLM(model=os.getenv("CHECK_FOR_COMPLETION_LLM", llm.model))
-        self.voicemail_llm = AzureLLM(
-            model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"),
-            base_url=os.getenv("AZURE_OPENAI_BASE_URL") or os.getenv("AZURE_OPENAI_ENDPOINT"),
-        )
+        self.conversation_completion_llm = completion_llm_for(llm)
+        self.voicemail_llm = voicemail_llm_or_none()
         self.history = [{"content": ""}]
 
     async def check_for_completion(self, messages, check_for_completion_prompt, meta_info=None):
@@ -55,6 +68,8 @@ class StreamingContextualAgent(BaseAgent):
         Returns:
             dict with 'is_voicemail': 'Yes' or 'No', 'latency_ms': float
         """
+        if self.voicemail_llm is None:
+            return {"is_voicemail": "No"}, {}
         try:
             detection_prompt = voicemail_detection_prompt or VOICEMAIL_DETECTION_PROMPT
             prompt = [
