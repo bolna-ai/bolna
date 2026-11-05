@@ -32,7 +32,7 @@ from bolna.constants import (
     TRANSFERING_CALL_FILLER,
     END_CALL_FUNCTION_PREFIX,
 )
-from bolna.enums import LogComponent, LogDirection, SynthesizerProvider, UsageSource
+from bolna.enums import LogComponent, LogDirection, NodeType, SynthesizerProvider, UsageSource
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
 import audioop
@@ -1230,6 +1230,60 @@ def select_message_by_language(message_config: Union[str, dict], detected_langua
 
         return next((v for v in message_config.values() if v and v.strip()), "")
     return ""
+
+
+def static_start_node(task: dict) -> Optional[dict]:
+    """A graph agent task's start node, when that node is static."""
+    llm_agent = (task.get("tools_config") or {}).get("llm_agent") or {}
+    if llm_agent.get("agent_type") != "graph_agent":
+        return None
+    llm_config = llm_agent.get("llm_config") or {}
+    start_node_id = llm_config.get("current_node_id")
+    start_node = next((n for n in llm_config.get("nodes") or [] if n.get("id") == start_node_id), None)
+    return start_node if start_node and start_node.get("node_type") == NodeType.STATIC else None
+
+
+def message_language_key(language: Optional[str]) -> Optional[str]:
+    """The key a language-keyed message is stored under: "hi-IN" and "multi-hi" both read "hi"."""
+    parts = (language or "").split("-")
+    return (parts[1] if parts[0] == "multi" and len(parts) > 1 else parts[0]) or None
+
+
+def static_node_message(node: dict, language: Optional[str] = None) -> str:
+    """A static node's message in a transcriber language, keyed as message_language_key reads it."""
+    return select_message_by_language(node.get("static_message"), message_language_key(language))
+
+
+def graph_opening_language(task: dict) -> Optional[str]:
+    """The language a graph call opens in: the one call setup pinned when it rendered the opening audio,
+    otherwise the transcriber's starting language."""
+    tools_config = task.get("tools_config") or {}
+    llm_config = (tools_config.get("llm_agent") or {}).get("llm_config") or {}
+    transcriber = tools_config.get("transcriber") or {}
+    return llm_config.get("opening_language") or message_language_key(
+        transcriber.get("active") or transcriber.get("language")
+    )
+
+
+def graph_opening_node(task: dict) -> Optional[dict]:
+    """The static start node that opens the call in place of the welcome message: only on a call whose
+    graph config sets static_start_opening, and only when the node has a message to say."""
+    llm_config = ((task.get("tools_config") or {}).get("llm_agent") or {}).get("llm_config") or {}
+    if not llm_config.get("static_start_opening"):
+        return None
+    node = static_start_node(task)
+    return node if node and static_node_message(node, graph_opening_language(task)).strip() else None
+
+
+def graph_opening_message(agent_config: dict) -> str:
+    """The line an agent opens the call with: its graph opening node's message when it has one, otherwise
+    its welcome message. The runtime and the call-setup pre-render both resolve it here so the audio and
+    the transcript carry one text."""
+    tasks = agent_config.get("tasks") or []
+    node = graph_opening_node(tasks[0]) if tasks else None
+    if node:
+        return static_node_message(node, graph_opening_language(tasks[0]))
+    return agent_config.get("agent_welcome_message") or ""
 
 
 def has_non_english_variants(message_config: Union[str, dict]) -> bool:

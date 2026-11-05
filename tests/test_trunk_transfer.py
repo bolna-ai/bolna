@@ -68,6 +68,7 @@ def _make_tm(mode, *, has_transfer, provider="trunk"):
     tm.response_in_pipeline = False
     tm._synthesis_awaiting_first_audio = False
     tm.repeat_after_silence_seconds = cfg["repeat"]
+    tm.opening_node = None
     tm.max_silence_repeats = DEFAULT_MAX_SILENCE_REPEATS
     tm._silence_repeats_sent = 0
     tm._silence_period = None

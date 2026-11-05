@@ -116,6 +116,8 @@ from bolna.helpers.utils import (
     scalar_fields,
     static_node_audio_key,
     static_node_ends_call,
+    graph_opening_language,
+    graph_opening_node,
     clean_json_string,
     wav_bytes_to_pcm,
     mp3_bytes_to_pcm,
@@ -1036,6 +1038,7 @@ class TaskManager(BaseManager):
         # self.__setup_tasks(llm)
 
         # setting llm
+        self.opening_node = None
         if self.llm_config is not None:
             agent_type = self.llm_agent_config.get("agent_type", "simple_llm_agent")
             # Graph and knowledge-base agents build their own LLM; one built here would never be used or closed.
@@ -1047,6 +1050,7 @@ class TaskManager(BaseManager):
             # Setup tasks
             agent_params = {"llm": llm, "agent_type": agent_type}
             self.__setup_tasks(**agent_params)
+            self._arm_opening_node()
 
         elif self.__is_multiagent():
             # Setup task for multiagent conversation
@@ -1411,6 +1415,24 @@ class TaskManager(BaseManager):
                 llm.cancel_in_flight_response()
         except Exception as e:
             logger.debug(f"cancel_in_flight_response failed: {e}")
+
+    def _arm_opening_node(self):
+        """The static start node that opened the call keeps its own silence repeat and barge-in threshold
+        from the opening, not only once routing first lands on it."""
+        self.opening_node = graph_opening_node(self.task_config)
+        if self.opening_node:
+            self.repeat_after_silence_seconds = self.opening_node.get("repeat_after_silence_seconds")
+            self._apply_node_interruption_threshold(self.opening_node)
+
+    def __opening_node_ends_call(self) -> bool:
+        """An end_call opening node hangs up once its message has played. A hangup already under way keeps
+        its own reason, and an opening that sent no audio leaves the node to speak on the caller's turn."""
+        return (
+            self.opening_node is not None
+            and static_node_ends_call(self.opening_node)
+            and not (self.hangup_triggered or self._end_call_in_progress or self.conversation_ended)
+            and bool(self.tools["output"].get_welcome_message_sent_ts())
+        )
 
     def _apply_node_interruption_threshold(self, node):
         """A node may override the call-level word threshold; None inherits it. Written to both
@@ -2203,6 +2225,8 @@ class TaskManager(BaseManager):
             injected_cfg["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get("buffer_size")
             injected_cfg["language"] = self.language
             injected_cfg["turn_based_conversation"] = self.turn_based_conversation
+            if llm_config.get("static_start_opening"):
+                injected_cfg["opening_language"] = graph_opening_language(self.task_config)
             injected_cfg["execution_id"] = self.run_id
 
             llm_agent = GraphAgent(injected_cfg)
@@ -8186,7 +8210,10 @@ class TaskManager(BaseManager):
             if self.tools["input"].welcome_message_played():
                 logger.info(f"Welcome message has been played")
                 self.first_message_passing_time = time.time()
-                if len(self.transcriber_message):
+                if self.__opening_node_ends_call():
+                    logger.info(f"Opening node {self.opening_node.get('id')!r} ends the call after its message")
+                    await self.__hang_up_after_reply()
+                elif len(self.transcriber_message):
                     logger.info(f"Sending the accumulated transcribed message - {self.transcriber_message}")
                     await self.__send_first_message(self.transcriber_message)
                     self.transcriber_message = ""
@@ -8579,6 +8606,8 @@ class TaskManager(BaseManager):
             silence_repeat_cap = self._silence_repeat_cap() if self.repeat_after_silence_seconds else 0
             if (
                 self.repeat_after_silence_seconds
+                # An opening node arms its re-prompt before its message has played.
+                and (self.opening_node is None or self.tools["input"].welcome_message_played())
                 and self._silence_repeats_sent < silence_repeat_cap
                 and time_since_last_spoken_ai_word > self.repeat_after_silence_seconds
                 and time_since_user_last_spoke > self.repeat_after_silence_seconds
