@@ -12,6 +12,7 @@ from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
+from bolna.helpers.prompt_transcript import with_prompt_transcript
 from bolna.helpers.function_calling_helpers import guard_llm_base_url
 from bolna.helpers.utils import (
     now_ms,
@@ -1627,9 +1628,13 @@ class GraphAgent(BaseAgent):
         else:
             prompt = node_prompt
 
-        # Labels the turns that follow as messages, so they read as the call so far and not
-        # as more instructions.
-        prompt = f"{prompt}\n\n## Conversation History"
+        # Right after a language switch the earlier turns go into the prompt as a transcript instead
+        # (set by TaskManager, which keeps routing on the full history).
+        prompt_transcript = bool(meta_info and meta_info.get("prompt_transcript"))
+        if not prompt_transcript:
+            # Labels the turns that follow as messages, so they read as the call so far and not
+            # as more instructions.
+            prompt = f"{prompt}\n\n## Conversation History"
 
         # RAG depends on the latest message, so it goes in a trailing message rather
         # than the system prompt, keeping [system + history] a cacheable prefix.
@@ -1674,7 +1679,7 @@ class GraphAgent(BaseAgent):
         messages = [{"role": "system", "content": prompt}] + conversation
         if rag_message:
             messages.append(rag_message)
-        return messages
+        return with_prompt_transcript(messages) if prompt_transcript else messages
 
     def _static_message_chunk(self, current_node: Optional[dict]) -> Optional[dict]:
         """Resolve a static node's message for the active language and build its

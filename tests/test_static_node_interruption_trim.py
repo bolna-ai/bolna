@@ -154,6 +154,7 @@ async def _static_turn(is_silence_trigger=False, stage_history=None):
     tm.conversation_history = ConversationHistory()
     tm._stage_assistant_history = stage_history or MagicMock()
     tm._inject_language_instruction = lambda messages: messages
+    tm.prompt_transcript_due = lambda speculative=False: False
     tm._apply_node_interruption_threshold = lambda node: None
     tm._synthesize = AsyncMock()
 
