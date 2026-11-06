@@ -29,6 +29,19 @@ logger = configure_logger(__name__)
 load_dotenv()
 
 
+def deepgram_endpoint_hosts(name):
+    """(host, flux host, protocol) of a named endpoint from DEEPGRAM_ENDPOINT_<NAME>_*, else the DEEPGRAM_HOST* default."""
+    prefix = f"DEEPGRAM_ENDPOINT_{name.upper()}_" if isinstance(name, str) and name else None
+    host = os.getenv(f"{prefix}HOST") if prefix else None
+    if not host:
+        return (
+            os.getenv("DEEPGRAM_HOST", "api.deepgram.com"),
+            os.getenv("DEEPGRAM_FLUX_HOST", "api.deepgram.com"),
+            os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"),
+        )
+    return host, os.getenv(f"{prefix}FLUX_HOST") or host, os.getenv(f"{prefix}PROTOCOL") or "wss"
+
+
 class DeepgramTranscriber(BaseTranscriber):
     @property
     def is_english(self):
@@ -62,12 +75,9 @@ class DeepgramTranscriber(BaseTranscriber):
         self.sampling_rate = int(sampling_rate) if isinstance(sampling_rate, (str, int)) else 16000
         self.encoding = encoding
         self.api_key = kwargs.get("transcriber_key", os.getenv("DEEPGRAM_AUTH_TOKEN"))
-        # Per-call host override (multi-cloud router) takes precedence over the fleet-wide env default.
-        self.deepgram_host = kwargs.get("deepgram_host") or os.getenv("DEEPGRAM_HOST", "api.deepgram.com")
-        self.deepgram_flux_host = kwargs.get("deepgram_flux_host") or os.getenv(
-            "DEEPGRAM_FLUX_HOST", "api.deepgram.com"
-        )
-        self.deepgram_host_protocol = kwargs.get("deepgram_host_protocol") or os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss")
+        # A customer key goes to the default host; only a call on the deployment's key uses a named endpoint.
+        endpoint = None if kwargs.get("transcriber_key") else kwargs.get("deepgram_endpoint")
+        self.deepgram_host, self.deepgram_flux_host, self.deepgram_host_protocol = deepgram_endpoint_hosts(endpoint)
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.keywords = keywords
