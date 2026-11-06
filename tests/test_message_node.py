@@ -57,6 +57,7 @@ async def generation(tm, chunks, meta_info):
     tm._usage_tasks = set()
     tm.repeat_after_silence_seconds = None
     tm._inject_language_instruction = lambda messages: messages
+    tm._TaskManager__with_switch_transcript = lambda messages, **kwargs: messages
     tm._apply_node_interruption_threshold = lambda node: None
     tm._synthesize = AsyncMock()
 

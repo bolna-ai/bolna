@@ -170,6 +170,7 @@ async def test_an_empty_turn_names_the_finish_reason():
     tm.tools = {"input": MagicMock(reset_response_heard_by_user=MagicMock())}
     tm._stamp_llm_latency_dict = MagicMock()
     tm._inject_language_instruction = lambda messages: messages
+    tm._TaskManager__with_switch_transcript = lambda messages, **kwargs: messages
     tm._handle_llm_output = AsyncMock()
     tm._TaskManager__process_stop_words = lambda data, meta_info: data
     tm._TaskManager__store_into_history = MagicMock()

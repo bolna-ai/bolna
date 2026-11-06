@@ -36,6 +36,7 @@ from bolna.constants import (
     LANGUAGE_NAMES,
     LANGUAGE_SWITCH_AUDIO_GAP_S,
     LANGUAGE_SWITCH_DECIDE_TIMEOUT_S,
+    LANGUAGE_SWITCH_TRANSCRIPT_REPLIES,
     LANGUAGE_SWITCH_MAX_HOLD_S,
     LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S,
     LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S,
@@ -751,6 +752,8 @@ class TaskManager(BaseManager):
         # Dedicated LLM that decides language switches from the unbiased detector
         # transcript. Set up in __setup_transcriber only for gated multilingual agents.
         self.language_switcher = None
+        # Main-path replies generated since the last switch; None until the first switch.
+        self.replies_since_language_switch = None
         # Serializes switch decisions so overlapping turns can't interleave two
         # switch+follow-up sequences. Background-only: the caller-facing pipeline
         # (ASR -> main LLM -> TTS) never waits on this lock.
@@ -4294,8 +4297,9 @@ class TaskManager(BaseManager):
         meta_info["detected_language"] = self.language
 
         try:
+            # The note goes to the LLM only: `messages` is written back into history below.
             async for llm_message in self.tools["llm_agent"].generate(
-                messages, synthesize=synthesize, meta_info=meta_info
+                self.__with_switch_transcript(messages), synthesize=synthesize, meta_info=meta_info
             ):
                 if (
                     isinstance(llm_message, dict) and "messages" in llm_message
@@ -7585,6 +7589,52 @@ class TaskManager(BaseManager):
             f"verbatim/legal — read those exactly as written; they are language-neutral."
         )
 
+    def __with_switch_transcript(self, messages: list, speculative: bool = False) -> list:
+        """For the first replies after a switch, send the history as prompt text (language_switch_turn_note flag).
+
+        Some models keep the language of the chat history over every language instruction, so after a
+        switch they reply in the old language. Moving the earlier turns into the system prompt's
+        `## Transcript:` section, with only the caller's latest turn as a message, makes them follow
+        the switch. The speculative post-switch reply always gets it; main-path replies only for the
+        first LANGUAGE_SWITCH_TRANSCRIPT_REPLIES after a switch. Returns a new list; the caller's
+        messages are left untouched.
+        """
+        if not self.task_config.get("tools_config", {}).get("language_switch_turn_note") or not self.language_switcher:
+            return messages
+        if not speculative:
+            if (
+                self.replies_since_language_switch is None
+                or self.replies_since_language_switch >= LANGUAGE_SWITCH_TRANSCRIPT_REPLIES
+            ):
+                return messages
+            self.replies_since_language_switch += 1
+        if not messages or messages[0].get("role") != "system":
+            return messages
+        last_user = next((i for i in range(len(messages) - 1, 0, -1) if messages[i].get("role") == "user"), None)
+        if last_user is None or not isinstance(messages[last_user].get("content"), str):
+            return messages
+        lines = []
+        for message in messages[1:last_user]:
+            content = message.get("content")
+            if message.get("role") == "tool":
+                lines.append(f"Tool result: {content}")
+            elif message.get("tool_calls"):
+                names = ", ".join(call.get("function", {}).get("name", "") for call in message["tool_calls"])
+                lines.append(f"Agent called: {names}")
+            elif isinstance(content, str) and content.strip():
+                speaker = "Agent" if message.get("role") == "assistant" else "Caller"
+                lines.append(f"{speaker}: {content.strip()}")
+        transcript = (
+            "\n".join(lines) + "\nThe conversation so far is in the Transcript above. Continue it from exactly "
+            "where it left off: do not greet again, re-introduce yourself or repeat a step already done.\n"
+        )
+        prompt = messages[0].get("content") or ""
+        if "## Transcript:\n" in prompt:
+            prompt = prompt.replace("## Transcript:\n", f"## Transcript:\n{transcript}", 1)
+        else:
+            prompt = f"{prompt}\n\n## Transcript:\n{transcript}"
+        return [{**messages[0], "content": prompt}, *messages[last_user:]]
+
     def __apply_language_directive(self, label: str, context_note: str = None) -> None:
         """Install or refresh the language directive at the end of the system prompt.
 
@@ -7727,6 +7777,7 @@ class TaskManager(BaseManager):
         else:
             # Idle-flush: the locked ASR produced no turn — append the SAME trailing-utterance
             messages.append({"role": "user", "content": idle_user_text or detector_transcript})
+        messages = self.__with_switch_transcript(messages, speculative=True)
         spec_meta = {
             "request_id": str(uuid.uuid4()),
             "sequence_id": -1,
@@ -7833,6 +7884,7 @@ class TaskManager(BaseManager):
         # Update TaskManager state so silence detection, fillers, and LLM
         # language stay in sync with the active pools.
         self.language = label
+        self.replies_since_language_switch = 0
         # Reset silence timers to prevent __check_for_completion from
         # interpreting the switch gap as inactivity and hanging up.
         self.last_transmitted_timestamp = time.time()

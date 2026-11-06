@@ -121,6 +121,9 @@ LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S = 0.7
 # flush (the coming turn will drain the buffer). Past this buffer age the speaking flag is
 # treated as stale — the detector hears the same audio and has produced nothing that long.
 LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S = 2.5
+# Replies after a switch that get the history as prompt text (language_switch_turn_note flag): some
+# models keep the language of the chat history over every instruction, until their own replies flip it.
+LANGUAGE_SWITCH_TRANSCRIPT_REPLIES = 2
 
 # Debounce for overlapped finals: one regenerate after this quiet window instead of per fragment.
 LLM_REGEN_SETTLE_S = 0.7
