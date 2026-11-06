@@ -355,7 +355,7 @@ async def _generation_with_tool_call(textual_response, turn_based):
     tm._stamp_llm_latency_dict = MagicMock()
     tm.tools["input"] = MagicMock(reset_response_heard_by_user=MagicMock())
     tm._inject_language_instruction = lambda messages: messages
-    tm._TaskManager__with_switch_transcript = lambda messages, **kwargs: messages
+    tm.prompt_transcript_due = lambda speculative=False: False
     tm._TaskManager__store_into_history = MagicMock()
     tm._commit_staged_assistant_history = MagicMock()
     tm._TaskManager__execute_function_call = AsyncMock()

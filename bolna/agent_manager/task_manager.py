@@ -69,6 +69,7 @@ from bolna.helpers.function_calling_helpers import (
     prepare_api_request,
     validate_outbound_url,
 )
+from bolna.helpers.prompt_transcript import with_prompt_transcript
 from bolna.helpers.conversation_history import ConversationHistory
 from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
@@ -752,8 +753,8 @@ class TaskManager(BaseManager):
         # Dedicated LLM that decides language switches from the unbiased detector
         # transcript. Set up in __setup_transcriber only for gated multilingual agents.
         self.language_switcher = None
-        # Main-path replies generated since the last switch; None until the first switch.
-        self.replies_since_language_switch = None
+        # History length at the last switch; None until one. The prompt transcript window counts agent replies after it.
+        self.language_switch_history_start = None
         # Serializes switch decisions so overlapping turns can't interleave two
         # switch+follow-up sequences. Background-only: the caller-facing pipeline
         # (ASR -> main LLM -> TTS) never waits on this lock.
@@ -4296,10 +4297,15 @@ class TaskManager(BaseManager):
         # Pass detected language to LLM for pre_call_message selection
         meta_info["detected_language"] = self.language
 
+        transcript_due = self.prompt_transcript_due()
+        # Graph agents route on the full history, so their node prompt takes the transcript instead.
+        meta_info["prompt_transcript"] = transcript_due
+        llm_messages = with_prompt_transcript(messages) if transcript_due and not self.__is_graph_agent() else messages
+
         try:
-            # The note goes to the LLM only: `messages` is written back into history below.
+            # The transcript goes to the LLM only: `messages` is written back into history below.
             async for llm_message in self.tools["llm_agent"].generate(
-                self.__with_switch_transcript(messages), synthesize=synthesize, meta_info=meta_info
+                llm_messages, synthesize=synthesize, meta_info=meta_info
             ):
                 if (
                     isinstance(llm_message, dict) and "messages" in llm_message
@@ -7589,51 +7595,32 @@ class TaskManager(BaseManager):
             f"verbatim/legal — read those exactly as written; they are language-neutral."
         )
 
-    def __with_switch_transcript(self, messages: list, speculative: bool = False) -> list:
-        """For the first replies after a switch, send the history as prompt text (language_switch_turn_note flag).
+    def prompt_transcript_due(self, speculative: bool = False) -> bool:
+        """Whether this reply gets the earlier turns as prompt text (language_switch_prompt_transcript flag).
 
-        Some models keep the language of the chat history over every language instruction, so after a
-        switch they reply in the old language. Moving the earlier turns into the system prompt's
-        `## Transcript:` section, with only the caller's latest turn as a message, makes them follow
-        the switch. The speculative post-switch reply always gets it; main-path replies only for the
-        first LANGUAGE_SWITCH_TRANSCRIPT_REPLIES after a switch. Returns a new list; the caller's
-        messages are left untouched.
+        The speculative post-switch reply always does. Other replies do until the switch is followed by
+        LANGUAGE_SWITCH_TRANSCRIPT_REPLIES agent replies with text: those replies in the new language
+        are what flip the model, so tool follow-ups and replies dropped before they were stored don't count.
         """
-        if not self.task_config.get("tools_config", {}).get("language_switch_turn_note") or not self.language_switcher:
-            return messages
-        if not speculative:
-            if (
-                self.replies_since_language_switch is None
-                or self.replies_since_language_switch >= LANGUAGE_SWITCH_TRANSCRIPT_REPLIES
-            ):
-                return messages
-            self.replies_since_language_switch += 1
-        if not messages or messages[0].get("role") != "system":
-            return messages
-        last_user = next((i for i in range(len(messages) - 1, 0, -1) if messages[i].get("role") == "user"), None)
-        if last_user is None or not isinstance(messages[last_user].get("content"), str):
-            return messages
-        lines = []
-        for message in messages[1:last_user]:
-            content = message.get("content")
-            if message.get("role") == "tool":
-                lines.append(f"Tool result: {content}")
-            elif message.get("tool_calls"):
-                names = ", ".join(call.get("function", {}).get("name", "") for call in message["tool_calls"])
-                lines.append(f"Agent called: {names}")
-            elif isinstance(content, str) and content.strip():
-                speaker = "Agent" if message.get("role") == "assistant" else "Caller"
-                lines.append(f"{speaker}: {content.strip()}")
-        transcript = (
-            "\n".join(lines) + "\nThe conversation so far is in the Transcript above. Continue it from exactly "
-            "where it left off: do not greet again, re-introduce yourself or repeat a step already done.\n"
+        if (
+            not self.task_config.get("tools_config", {}).get("language_switch_prompt_transcript")
+            or not self.language_switcher
+        ):
+            return False
+        if speculative:
+            return True
+        start = self.language_switch_history_start
+        history = self.conversation_history.messages
+        if start is None or start > len(history):
+            return False
+        replies = sum(
+            1
+            for message in history[start:]
+            if message.get("role") == ChatRole.ASSISTANT
+            and isinstance(message.get("content"), str)
+            and message["content"].strip()
         )
-        prompt = messages[0].get("content") or ""
-        if "## Transcript:\n" in prompt:
-            prompt = prompt.replace("## Transcript:\n", f"## Transcript:\n{transcript}", 1)
-        else:
-            prompt = f"{prompt}\n\n## Transcript:\n{transcript}"
-        return [{**messages[0], "content": prompt}, *messages[last_user:]]
+        return replies < LANGUAGE_SWITCH_TRANSCRIPT_REPLIES
 
     def __apply_language_directive(self, label: str, context_note: str = None) -> None:
         """Install or refresh the language directive at the end of the system prompt.
@@ -7777,7 +7764,8 @@ class TaskManager(BaseManager):
         else:
             # Idle-flush: the locked ASR produced no turn — append the SAME trailing-utterance
             messages.append({"role": "user", "content": idle_user_text or detector_transcript})
-        messages = self.__with_switch_transcript(messages, speculative=True)
+        if self.prompt_transcript_due(speculative=True):
+            messages = with_prompt_transcript(messages)
         spec_meta = {
             "request_id": str(uuid.uuid4()),
             "sequence_id": -1,
@@ -7884,7 +7872,7 @@ class TaskManager(BaseManager):
         # Update TaskManager state so silence detection, fillers, and LLM
         # language stay in sync with the active pools.
         self.language = label
-        self.replies_since_language_switch = 0
+        self.language_switch_history_start = len(self.conversation_history.messages)
         # Reset silence timers to prevent __check_for_completion from
         # interpreting the switch gap as inactivity and hanging up.
         self.last_transmitted_timestamp = time.time()

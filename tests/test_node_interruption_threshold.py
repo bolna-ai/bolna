@@ -119,7 +119,7 @@ async def test_routing_info_applies_the_landed_nodes_threshold_before_it_speaks(
     tm.conversation_history = ConversationHistory()
     tm._stage_assistant_history = MagicMock()
     tm._inject_language_instruction = lambda messages: messages
-    tm._TaskManager__with_switch_transcript = lambda messages, **kwargs: messages
+    tm.prompt_transcript_due = lambda speculative=False: False
     tm._synthesize = AsyncMock()
     tm.tools["llm_agent"].get_node_by_id.return_value = {
         "id": "verify",

@@ -30,7 +30,7 @@ def _make_tm(history, generate):
     # Bind the real note builder so the speculative system prompt mirrors production.
     tm._TaskManager__language_directive = TaskManager._TaskManager__language_directive.__get__(tm, TaskManager)
     tm.task_config = {"tools_config": {}}
-    tm._TaskManager__with_switch_transcript = TaskManager._TaskManager__with_switch_transcript.__get__(tm, TaskManager)
+    tm.prompt_transcript_due = TaskManager.prompt_transcript_due.__get__(tm, TaskManager)
     tm.tools = {"llm_agent": MagicMock()}
     tm.tools["llm_agent"].generate = generate
     return tm
