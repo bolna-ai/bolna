@@ -24,6 +24,7 @@ def _make_tm(transcriber):
     tm.function_call_in_flight = False
     tm.output_task = MagicMock()
     tm.eager_llm_task = None
+    tm.speculation_gate = None
     tm.transcriber_output_queue = asyncio.Queue()
     tm.process_transcriber_request = AsyncMock(return_value=0)
     tm._set_call_details = MagicMock()
