@@ -822,6 +822,44 @@ class TestFirstDeliveryHold:
         mock_llm.assert_called_once()
         assert agent.current_node_id == "C"
 
+    async def test_static_node_holds_and_replays_when_first_response_undelivered(self):
+        # BOLNA-3043: the caller's tail of the previous answer must not be routed as the answer
+        # to a mid-flow static question that was never played.
+        agent = _static_extract_agent()
+        agent._advance_to_node("avail_ask", 0)
+
+        with patch.object(
+            agent,
+            "_decide_next_node_llm",
+            new_callable=AsyncMock,
+            return_value=_extraction("avail_check", {"availability": "Yes"}),
+        ) as mock_llm:
+            out = await _collect(agent.generate([{"role": "user", "content": "I am speaking candidate."}]))
+
+        mock_llm.assert_not_called()
+        assert agent.current_node_id == "avail_ask"
+        assert agent.node_extracted_data == {}
+        routing = [o["routing_info"] for o in out if isinstance(o, dict) and "routing_info" in o]
+        assert routing[-1]["routing_type"] == "hold"
+        assert routing[-1]["transitioned"] is False
+        static = [o for o in out if isinstance(o, dict) and "static_message" in o]
+        assert static and static[0]["static_message"] == "Are you available to speak right now?"
+
+    async def test_static_node_routes_after_first_response_delivered(self):
+        agent = _static_extract_agent()
+        agent._advance_to_node("avail_ask", 0)
+        agent.mark_first_response_delivered()
+
+        with patch.object(
+            agent,
+            "_decide_next_node_llm",
+            new_callable=AsyncMock,
+            return_value=_extraction("avail_check", {"availability": "Yes"}),
+        ):
+            await _collect(agent.generate([{"role": "user", "content": "yes"}]))
+
+        assert agent.current_node_id == "edu_ask"
+
 
 def _static_extract_agent():
     """Static question -> extract router (intent edge with parameters) -> check router (expression)."""

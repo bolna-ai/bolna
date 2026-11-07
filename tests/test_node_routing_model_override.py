@@ -12,7 +12,11 @@ from bolna.agent_types.graph_agent import GraphAgent
 from bolna.constants import default_reasoning_effort
 from bolna.llms import LiteLLM
 
-ENV = {"OPENAI_API_KEY": "platform-openai-key"}
+ENV = {
+    "OPENAI_API_KEY": "platform-openai-key",
+    "AZURE_OPENAI_BASE_URL": "https://platform.azure.example",
+    "AZURE_OPENAI_API_KEY": "platform-azure-key",
+}
 PROVIDERS = ["openai", "azure", "google", "groq"]
 
 

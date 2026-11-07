@@ -228,13 +228,19 @@ EXPLICIT_SWITCH = {
 }
 
 
+def trace_lines(log):
+    return [c.kwargs["message"] for c in log.call_args_list]
+
+
 async def test_explicit_mode_switches_past_all_detection_gates(monkeypatch):
     # 0.3s low-prob segment: ambient mode would gate this on confidence corroboration
     # or substance; explicit mode must switch.
     tm = make_tm(monkeypatch, dict(EXPLICIT_SWITCH))
-    await run_switch(tm)
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log") as log:
+        await run_switch(tm)
     tm.switch_language.assert_awaited_once()
     assert "switched" in outcomes(tm)
+    assert any(line.startswith("switched en → hi") for line in trace_lines(log))
 
 
 async def test_explicit_mode_low_self_confidence_still_switches(monkeypatch):
@@ -248,9 +254,11 @@ async def test_ambient_mode_same_evidence_is_gated(monkeypatch):
     # Same weak evidence, ambient prompt shape: must NOT switch (confidence 0.2 < bar).
     decision = {"target_language": "hi", "target_confidence": 0.2, "reasoning": "r", "languages": []}
     tm = make_tm(monkeypatch, decision, explicit_only=False)
-    await run_switch(tm)
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log") as log:
+        await run_switch(tm)
     tm.switch_language.assert_not_awaited()
     assert "gated:low_confidence" in outcomes(tm)
+    assert "not switched to hi: gated:low_confidence (confidence 0.2 < 0.7)" in trace_lines(log)
 
 
 async def test_explicit_mode_unsupported_target_still_blocked(monkeypatch):

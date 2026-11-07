@@ -257,6 +257,7 @@ class FakeStreamSynth:
 
     _upsert_turn_latency = StreamSynthesizer._upsert_turn_latency
     _record_turn_latency = StreamSynthesizer._record_turn_latency
+    reset_turn_state = StreamSynthesizer.reset_turn_state
     has_unsettled_turn_on = StreamSynthesizer.has_unsettled_turn_on
 
 

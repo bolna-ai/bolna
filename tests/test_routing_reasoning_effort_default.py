@@ -17,7 +17,11 @@ from bolna.constants import GPT5_MODEL_PREFIX, MODEL_REASONING_EFFORT_MAP
 # The map also carries realtime speech-to-speech models, which are never a routing model.
 GPT5_MODELS = sorted(m for m in MODEL_REASONING_EFFORT_MAP if m.startswith(GPT5_MODEL_PREFIX))
 AZURE_DEPLOYMENT_FORMS = ["azure/gpt-5.4-mini", "ptu-gpt-5.4-mini"]
-PLATFORM_ENV = {"OPENAI_API_KEY": "platform-openai-key", "AZURE_OPENAI_API_KEY": "platform-azure-key"}
+PLATFORM_ENV = {
+    "OPENAI_API_KEY": "platform-openai-key",
+    "AZURE_OPENAI_BASE_URL": "https://platform.azure.example",
+    "AZURE_OPENAI_API_KEY": "platform-azure-key",
+}
 
 
 def _registry():

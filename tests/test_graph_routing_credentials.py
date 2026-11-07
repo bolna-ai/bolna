@@ -225,6 +225,14 @@ def test_openai_conversation_aux_llm_reuses_its_own_key():
 
 
 # Real construction (no registry mock) for the paths whose behavior depends on the concrete LLM class.
+REAL_AGENT_ENV = {
+    "OPENAI_API_KEY": "plat",
+    "GOOGLE_API_KEY": "gg",
+    "AZURE_OPENAI_BASE_URL": "https://platform.azure.example",
+    "AZURE_OPENAI_API_KEY": "platform-azure-key",
+}
+
+
 def _real_agent(env=None, **overrides):
     config = {
         "agent_information": "Test agent",
@@ -235,9 +243,7 @@ def _real_agent(env=None, **overrides):
         "nodes": [{"id": "start", "prompt": "hi", "edges": []}],
     }
     config.update(overrides)
-    with patch.dict(
-        os.environ, env if env is not None else {"OPENAI_API_KEY": "plat", "GOOGLE_API_KEY": "gg"}, clear=True
-    ):
+    with patch.dict(os.environ, env if env is not None else REAL_AGENT_ENV, clear=True):
         return GraphAgent(config)
 
 
@@ -265,7 +271,12 @@ def test_already_prefixed_litellm_model_not_doubled():
 
 AZURE_ROUTING = {"routing_provider": "azure", "routing_model": "azure/gpt-4.1-mini"}
 # What the runtime carries: an Azure key, and no endpoint to spend it against.
-AZURE_KEY_ONLY_ENV = {"OPENAI_API_KEY": "plat", "GOOGLE_API_KEY": "gg", "AZURE_OPENAI_API_KEY": "platform-azure-key"}
+AZURE_KEY_ONLY_ENV = {
+    "OPENAI_API_KEY": "plat",
+    "GOOGLE_API_KEY": "gg",
+    "AZURE_OPENAI_API_KEY": "platform-azure-key",
+    "AZURE_OPENAI_BASE_URL": "https://platform.azure.example",
+}
 
 
 def test_injected_azure_routing_creds_build_the_real_client_without_a_platform_endpoint():

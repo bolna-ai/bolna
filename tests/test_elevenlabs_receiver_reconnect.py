@@ -304,7 +304,7 @@ async def test_mid_stream_text_send_on_closing_socket_keeps_context_for_the_rest
     synth.websocket = FakeSocket(state=CLOSING, send_raises=True)
     synth.context_id = CTX
 
-    await synth.sender("first half", sequence_id=4, end_of_llm_stream=False)
+    await synth.sender("The first half of this reply is done. And the", sequence_id=4, end_of_llm_stream=False)
     assert synth.connection_error is None
     assert synth.last_text_sent is False
     assert synth.context_id == CTX  # the rest of the turn continues this context on the replacement
@@ -326,7 +326,7 @@ async def test_sender_claims_the_socket_for_text_and_flush():
     first = FakeSocket(state=OPEN)
     synth.websocket = first
     synth.context_id = CTX
-    await synth.sender("hello there", sequence_id=4)
+    await synth.sender("Hello there, thanks for calling. How", sequence_id=4)
     assert synth.current_turn_socket is first
 
     second = FakeSocket(state=OPEN)

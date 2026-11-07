@@ -46,6 +46,8 @@ def _make_tm(sent_ts, text_synthesized=FULL_TEXT):
     tm.conversation_history = history
     tm.tools = {"input": _InputStub()}
     tm._turn_msg_map = {}
+    tm._pending_assistant_history = {}
+    tm._last_spoken_assistant = None
 
     marks = MarkEventMetaData()
     marks.update_data(
@@ -104,7 +106,7 @@ async def test_without_text_on_the_mark_the_turn_is_all_or_nothing():
     assert _assistant(history) is None  # no partial is recoverable
 
 
-# --------------------------------------------------------- the hangup-drain shortcut
+# --------------------------------------------------------- the hangup playout wait
 
 
 def _wait_tm(mark_data):
@@ -120,15 +122,9 @@ def _wait_tm(mark_data):
     return tm
 
 
-async def test_a_streamed_final_chunk_still_shortcuts_the_hangup_drain():
-    # Everything before the tail has ACKed; not waiting on it is the intended latency win.
-    tm = _wait_tm({"type": "", "text_synthesized": "tail", "is_final_chunk": True, "duration": 8.0})
-    await asyncio.wait_for(tm.wait_for_current_message(), timeout=1.0)
-
-
 @pytest.mark.parametrize("category", CACHED_SINGLE_MARK_CATEGORIES)
 async def test_a_cached_single_mark_is_waited_for_at_hangup(category):
-    """Its one mark is always the final chunk, so the shortcut would cut the whole clip off."""
+    """Its one mark is always the final chunk and holds the whole clip, so the hangup must wait it out."""
     tm = _wait_tm({"type": category, "text_synthesized": FULL_TEXT, "is_final_chunk": True, "duration": CLIP_SECONDS})
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(tm.wait_for_current_message(), timeout=0.2)
@@ -137,7 +133,7 @@ async def test_a_cached_single_mark_is_waited_for_at_hangup(category):
 # --------------------------------------------------------- the field the mark reads
 
 
-async def _static_turn(is_silence_trigger=False):
+async def _static_turn(is_silence_trigger=False, stage_history=None):
     """Drive the static branch of __do_llm_generation_impl and return the synthesized packet's meta."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -156,8 +152,9 @@ async def _static_turn(is_silence_trigger=False):
     tm.repeat_after_silence_seconds = None
     tm.tools = {"input": MagicMock(), "llm_agent": MagicMock()}
     tm.conversation_history = ConversationHistory()
-    tm._stage_assistant_history = MagicMock()
+    tm._stage_assistant_history = stage_history or MagicMock()
     tm._inject_language_instruction = lambda messages: messages
+    tm.prompt_transcript_due = lambda speculative=False: False
     tm._apply_node_interruption_threshold = lambda node: None
     tm._synthesize = AsyncMock()
 
@@ -182,8 +179,16 @@ async def test_the_generation_branch_leaves_the_text_unstamped():
     assert meta["message_category"] == "static_node"
 
 
-async def test_the_generation_branch_carries_the_silence_flag_forward():
-    assert (await _static_turn(is_silence_trigger=True))["is_silence_trigger"] is True
+@pytest.mark.parametrize("is_silence_trigger", [False, True], ids=["caller-turn", "silence-turn"])
+async def test_every_static_clip_the_caller_hears_is_recorded_in_history(is_silence_trigger):
+    """A silence re-prompt can route to a new node, such as a static end node whose goodbye is
+    the last line of the call; it is spoken, so the transcript must carry it."""
+    from unittest.mock import MagicMock
+
+    stage_history = MagicMock()
+    await _static_turn(is_silence_trigger=is_silence_trigger, stage_history=stage_history)
+    stage_history.assert_called_once()
+    assert stage_history.call_args.args[1] == FULL_TEXT
 
 
 def _stamp(**meta):
@@ -196,14 +201,6 @@ def test_the_cached_send_branch_stamps_the_text():
     assert meta["text_synthesized"] == FULL_TEXT
 
 
-def test_a_silence_reprompt_is_never_stamped():
-    """History deliberately never records a re-prompt; mark text would let sync_history
-    materialise one that was interrupted, so a barged re-prompt would appear and a fully
-    played one would not."""
-    meta = _stamp(message_category="static_node", text=FULL_TEXT, is_silence_trigger=True)
-    assert "text_synthesized" not in meta
-
-
 def test_other_cached_clips_are_not_stamped():
     for category in ("agent_welcome_message", "filler", "event_proactive"):
         assert "text_synthesized" not in _stamp(message_category=category, text=FULL_TEXT)
@@ -211,6 +208,6 @@ def test_other_cached_clips_are_not_stamped():
 
 def test_event_proactive_is_not_a_cached_single_mark_category():
     """It runs on sequence_id -1, which every output handler blanks text_synthesized for, so its
-    mark never carries text and neither the hangup guard nor the trim can act on it."""
+    mark never carries text and the trim cannot act on it."""
     assert "event_proactive" not in CACHED_SINGLE_MARK_CATEGORIES
     assert CACHED_SINGLE_MARK_CATEGORIES == ("static_node",)

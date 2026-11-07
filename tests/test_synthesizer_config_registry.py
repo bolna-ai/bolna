@@ -28,6 +28,7 @@ EXPECTED_FIELDS = {
         "similarity_boost": False,
         "speed": False,
         "style": False,
+        "pronunciation_dictionary_locators": False,
     },
     "openai": {"voice": True, "model": True, "speed": False},
     "deepgram": {
@@ -45,6 +46,8 @@ EXPECTED_FIELDS = {
         "language": True,
         "speed": False,
         "volume": False,
+        "pronunciation_dict_id": False,
+        "pronunciation_dict_fingerprint": False,
     },
     "smallest": {"voice": True, "voice_id": True, "model": True, "language": True, "speed": False},
     "sarvam": {
@@ -86,11 +89,11 @@ EXPECTED_FIELDS = {
         "model": False,
         "temperature": False,
         "acoustic_temperature": False,
-        "max_new_tokens": False,
         "audio_quality": False,
         "chunk_length_schedule": False,
     },
-    "custom": {"voice": True, "model": True, "speed": False},
+    "navana": {"voice": True, "voice_id": True, "model": True, "language": True},
+    "custom": {"voice": True, "model": True, "speed": False, "extra_body": False},
 }
 
 

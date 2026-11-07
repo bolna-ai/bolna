@@ -25,13 +25,14 @@ from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
 from bolna.constants import (
+    CARTESIA_PRONUNCIATION_DICT_MODEL_PREFIXES,
     CONTENT_POLICY_ERROR_MARKERS,
     PREPROCESS_DIR,
     PRE_FUNCTION_CALL_MESSAGE,
     TRANSFERING_CALL_FILLER,
     END_CALL_FUNCTION_PREFIX,
 )
-from bolna.enums import LogComponent, LogDirection, UsageSource
+from bolna.enums import LogComponent, LogDirection, NodeType, SynthesizerProvider, UsageSource
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
 import audioop
@@ -395,12 +396,65 @@ def get_md5_hash(text):
     return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
-def static_node_audio_key(text, provider=None, voice=None, voice_id=None, model=None, render_settings=""):
+def static_node_audio_key(
+    text, provider=None, voice=None, voice_id=None, model=None, render_settings="", pronunciation=None
+):
     """S3 filename stem for a static-node clip, bound to the voice and slider settings it was rendered with."""
     identity = "|".join(str(part or "") for part in (provider, voice, voice_id, model))
     if render_settings:
         identity = f"{identity}|{render_settings}"
+    # Only joins the key when set, so clips rendered without a dictionary keep their keys.
+    if pronunciation:
+        identity = f"{identity}|{pronunciation}"
     return get_md5_hash(f"{identity}|{text}")
+
+
+def cartesia_supports_pronunciation_dict(model):
+    return (model or "").startswith(CARTESIA_PRONUNCIATION_DICT_MODEL_PREFIXES)
+
+
+def pronunciation_rules_digest(rules):
+    """Stable digest of a synthesizer's pronunciation rules; empty when there are none."""
+    pairs = []
+    for rule in rules or []:
+        rule = rule.model_dump() if hasattr(rule, "model_dump") else rule
+        pairs.append([rule.get("word"), rule.get("say_as")])
+    if not pairs:
+        return ""
+    return hashlib.sha256(json.dumps(pairs, ensure_ascii=False).encode()).hexdigest()[:16]
+
+
+def pronunciation_dictionary_key(provider, provider_config, pronunciation_rules=None, on_platform_key=False):
+    """The provider pronunciation dictionaries a synthesizer config applies, as a cache-key part.
+
+    Empty when none apply, including a dictionary set on a model that ignores it. On Bolna's key the
+    dictionary is Bolna's own copy, keyed by its rules so one clip serves every region's copy."""
+    if hasattr(provider_config, "model_dump"):
+        provider_config = provider_config.model_dump()
+    config = provider_config or {}
+    key = ""
+    if provider == SynthesizerProvider.ELEVENLABS.value:
+        locators = [
+            locator.model_dump() if hasattr(locator, "model_dump") else locator
+            for locator in config.get("pronunciation_dictionary_locators") or []
+        ]
+        key = ",".join(
+            f"{locator.get('pronunciation_dictionary_id')}:{locator.get('version_id')}" for locator in locators
+        )
+    elif provider == SynthesizerProvider.CARTESIA.value and cartesia_supports_pronunciation_dict(config.get("model")):
+        key = config.get("pronunciation_dict_id") or ""
+        if key and config.get("pronunciation_dict_fingerprint"):
+            key = f"{key}@{config['pronunciation_dict_fingerprint']}"
+    # A dictionary edited in place keeps its ID, so the rules join the key to stop old clips matching.
+    digest = pronunciation_rules_digest(pronunciation_rules) if key else ""
+    if on_platform_key and digest:
+        return digest
+    return f"{key}#{digest}" if digest else key
+
+
+def static_node_ends_call(node: Optional[dict]) -> bool:
+    """A static node set to end_call hangs up after its message when it has no transitions to route on."""
+    return bool(node) and node.get("function_call") == END_CALL_FUNCTION_PREFIX and not node.get("edges")
 
 
 def is_valid_md5(hash_string):
@@ -492,11 +546,13 @@ def enrich_context_with_time_variables(context_data, timezone):
         recipient_data["current_year"] = now.year
 
 
-def update_prompt_with_context(prompt, context_data):
+def update_prompt_with_context(prompt, context_data, lang_code=None):
     if not context_data or not isinstance(context_data.get("recipient_data"), dict):
         return render_prompt(prompt, {})
     # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
     recipient_data = {k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS}
+    if lang_code and recipient_data.get(lang_code) and isinstance(recipient_data[lang_code], dict):
+        recipient_data.update(recipient_data[lang_code])
     return render_prompt(prompt, recipient_data)
 
 
@@ -653,6 +709,50 @@ def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, orig
     buffer = io.BytesIO()
     audio.export(buffer, format="wav")
     return buffer.getvalue()
+
+
+class StreamingPcmResampler:
+    """resample(format="pcm") for audio arriving in pieces: output equals resampling the whole stream,
+    so piece edges don't click. The last few samples wait for the next piece; reset() drops them."""
+
+    def __init__(self, original_sample_rate, target_sample_rate):
+        divisor = math.gcd(original_sample_rate, target_sample_rate)
+        self.up = target_sample_rate // divisor
+        self.down = original_sample_rate // divisor
+        # Same rate passes through; firwin rejects the 1:1 design.
+        self.window = _resample_fir(self.up, self.down) if self.up != self.down else None
+        # Input samples on each side of an output sample that the filter reads.
+        self.margin = math.ceil((len(self.window) // 2) / self.up) + 1 if self.window is not None else 0
+        self.reset()
+
+    def reset(self):
+        self.history = np.zeros(0, dtype=np.float32)
+        # Absolute input index of history[0]; kept a multiple of down so outputs land on whole indices.
+        self.history_start = 0
+        self.next_output = 0
+
+    def process(self, pcm_bytes):
+        if self.up == self.down:
+            return pcm_bytes
+        incoming = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
+        buffered = np.concatenate((self.history, incoming))
+        buffered_end = self.history_start + len(buffered)
+
+        # Output m sits at input m*down/up; it is final once margin input samples follow it.
+        ready = buffered_end - self.margin
+        end = (ready * self.up) // self.down + 1 if ready >= 0 else 0
+        end = max(end, self.next_output)
+
+        offset = self.history_start * self.up // self.down
+        resampled = scipy.signal.resample_poly(buffered, self.up, self.down, window=self.window)
+        out = resampled[self.next_output - offset : end - offset]
+        self.next_output = end
+
+        keep_from = (self.next_output * self.down - self.margin * self.up) // (self.up * self.down) * self.down
+        keep_from = max(keep_from, self.history_start)
+        self.history = buffered[keep_from - self.history_start :]
+        self.history_start = keep_from
+        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
 
 
 def normalized_similarity(first: str, second: str) -> float:
@@ -1132,6 +1232,60 @@ def select_message_by_language(message_config: Union[str, dict], detected_langua
     return ""
 
 
+def static_start_node(task: dict) -> Optional[dict]:
+    """A graph agent task's start node, when that node is static."""
+    llm_agent = (task.get("tools_config") or {}).get("llm_agent") or {}
+    if llm_agent.get("agent_type") != "graph_agent":
+        return None
+    llm_config = llm_agent.get("llm_config") or {}
+    start_node_id = llm_config.get("current_node_id")
+    start_node = next((n for n in llm_config.get("nodes") or [] if n.get("id") == start_node_id), None)
+    return start_node if start_node and start_node.get("node_type") == NodeType.STATIC else None
+
+
+def message_language_key(language: Optional[str]) -> Optional[str]:
+    """The key a language-keyed message is stored under: "hi-IN" and "multi-hi" both read "hi"."""
+    parts = (language or "").split("-")
+    return (parts[1] if parts[0] == "multi" and len(parts) > 1 else parts[0]) or None
+
+
+def static_node_message(node: dict, language: Optional[str] = None) -> str:
+    """A static node's message in a transcriber language, keyed as message_language_key reads it."""
+    return select_message_by_language(node.get("static_message"), message_language_key(language))
+
+
+def graph_opening_language(task: dict) -> Optional[str]:
+    """The language a graph call opens in: the one call setup pinned when it rendered the opening audio,
+    otherwise the transcriber's starting language."""
+    tools_config = task.get("tools_config") or {}
+    llm_config = (tools_config.get("llm_agent") or {}).get("llm_config") or {}
+    transcriber = tools_config.get("transcriber") or {}
+    return llm_config.get("opening_language") or message_language_key(
+        transcriber.get("active") or transcriber.get("language")
+    )
+
+
+def graph_opening_node(task: dict) -> Optional[dict]:
+    """The static start node that opens the call in place of the welcome message: only on a call whose
+    graph config sets static_start_opening, and only when the node has a message to say."""
+    llm_config = ((task.get("tools_config") or {}).get("llm_agent") or {}).get("llm_config") or {}
+    if not llm_config.get("static_start_opening"):
+        return None
+    node = static_start_node(task)
+    return node if node and static_node_message(node, graph_opening_language(task)).strip() else None
+
+
+def graph_opening_message(agent_config: dict) -> str:
+    """The line an agent opens the call with: its graph opening node's message when it has one, otherwise
+    its welcome message. The runtime and the call-setup pre-render both resolve it here so the audio and
+    the transcript carry one text."""
+    tasks = agent_config.get("tasks") or []
+    node = graph_opening_node(tasks[0]) if tasks else None
+    if node:
+        return static_node_message(node, graph_opening_language(tasks[0]))
+    return agent_config.get("agent_welcome_message") or ""
+
+
 def has_non_english_variants(message_config: Union[str, dict]) -> bool:
     """Check if dict has non-'en' languages."""
     return (
@@ -1202,11 +1356,10 @@ def soniox_ws_url(host):
     return f"{protocol}://{host}/transcribe-websocket"
 
 
-def build_soniox_config(api_key, model, audio_format, sample_rate, **extras):
-    """Soniox first-frame config (auth rides in it) — shared by transcriber + LID tap.
-    extras merge on top (language_hints, context, endpoint tuning...)."""
+def build_soniox_config(model, audio_format, sample_rate, **extras):
+    """Soniox first-frame config — shared by transcriber + LID tap. Auth rides in the
+    connect-time Authorization header, not here. extras merge on top (language_hints, context, endpoint tuning...)."""
     config = {
-        "api_key": api_key,
         "model": model,
         "audio_format": audio_format,
         "sample_rate": int(sample_rate),
@@ -1263,7 +1416,15 @@ def clean_gemini_schema(schema):
 
 
 def structure_system_prompt(
-    system_prompt, run_id, assistant_id, call_sid, context_data, timezone, is_web_based_call=False
+    system_prompt,
+    run_id,
+    assistant_id,
+    call_sid,
+    context_data,
+    timezone,
+    is_web_based_call=False,
+    language=None,
+    primary_language=None,
 ):
     final_prompt = system_prompt
     default_variables = {"agent_id": assistant_id, "execution_id": run_id}
@@ -1272,9 +1433,12 @@ def structure_system_prompt(
         enrich_context_with_time_variables(context_data, timezone)
         default_variables["agent_number"] = context_data.get("recipient_data", {}).get("agent_number")
         default_variables["user_number"] = context_data.get("recipient_data", {}).get("user_number")
+        if primary_language:
+            user_data = context_data.get("recipient_data", {})
+            context_data.get("recipient_data", {}).update(user_data.get(primary_language, {}))
 
         if not is_web_based_call:
-            final_prompt = update_prompt_with_context(system_prompt, context_data)
+            final_prompt = update_prompt_with_context(system_prompt, context_data, language)
 
         # call_sid is deliberately NOT exposed as a prompt variable: the model would echo it
         # into spoken text (and into the required transfer_call call_sid arg), yet the real sid

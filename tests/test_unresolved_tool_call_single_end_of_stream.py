@@ -63,10 +63,12 @@ def _task_manager(llm):
     tm.llm_latencies = SimpleNamespace(turn_latencies=[])
     tm._stamp_llm_latency_dict = MagicMock()
     tm._inject_language_instruction = lambda messages: messages
+    tm.prompt_transcript_due = lambda speculative=False: False
     tm._TaskManager__process_stop_words = lambda data, meta_info: data
     tm._TaskManager__store_into_history = MagicMock()
     tm._turn_audio_flushed = asyncio.Event()
     tm._turn_audio_flushed.set()
+    tm.turn_audio_flush_claims = 0
     tm._turn_eos_forwarded = False
     tm.synthesizer_tasks = []
     tm.forwarded = []

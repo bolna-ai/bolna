@@ -1,7 +1,18 @@
 import json
 import annotated_types
 from typing import Annotated, Any, Literal, Optional, List, Union, Dict, Callable
-from pydantic import BaseModel, Discriminator, Field, Tag, field_validator, ValidationError, Json, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    field_validator,
+    ValidationError,
+    Json,
+    model_validator,
+)
 from pydantic_core import PydanticCustomError
 from .providers import *
 from .enums import (
@@ -15,6 +26,7 @@ from .enums import (
     ExpressionOperator,
     ExpressionLogic,
     EdgeConditionType,
+    EdgeOrder,
     NodeType,
     VariableType,
 )
@@ -25,10 +37,15 @@ from .constants import (
     CARTESIA_VOLUME_MIN,
     DEEPGRAM_AURA_2_SPEED_MAX,
     DEEPGRAM_AURA_2_SPEED_MIN,
+    ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES,
     MODEL_REASONING_EFFORT_MAP,
     RESERVED_LLM_REQUEST_KEYS,
+    RESERVED_TTS_REQUEST_KEYS,
     OPENAI_TTS_SPEED_MAX,
     OPENAI_TTS_SPEED_MIN,
+    PRONUNCIATION_RULE_SAY_AS_MAX_LENGTH,
+    PRONUNCIATION_RULE_WORD_MAX_LENGTH,
+    PRONUNCIATION_RULES_MAX,
     RIME_TIME_SCALE_FACTOR_MAX,
     RIME_TIME_SCALE_FACTOR_MIN,
     SARVAM_LOUDNESS_MAX,
@@ -139,6 +156,19 @@ def tts_render_settings(provider: str, provider_config: Optional[dict], exclude=
     return ",".join(settings)
 
 
+def _pronunciation_locators_error(locators) -> Optional[str]:
+    if locators is None:
+        return None
+    if not isinstance(locators, list):
+        return "ElevenLabs pronunciation_dictionary_locators must be a list"
+    if len(locators) > ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES:
+        return f"ElevenLabs accepts at most {ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES} pronunciation dictionaries"
+    for locator in locators:
+        if not (isinstance(locator, dict) and locator.get("pronunciation_dictionary_id") and locator.get("version_id")):
+            return "Each ElevenLabs pronunciation dictionary needs both pronunciation_dictionary_id and version_id"
+    return None
+
+
 def tts_provider_config_error(provider: str, provider_config: Optional[dict]) -> Optional[str]:
     """Why a provider_config value is outside bolna's range for its model, or None when every value fits.
 
@@ -146,6 +176,10 @@ def tts_provider_config_error(provider: str, provider_config: Optional[dict]) ->
     config model would reject for missing fields. Building the config model enforces the same ranges."""
     if not isinstance(provider_config, dict):
         return None
+    if provider == SynthesizerProvider.ELEVENLABS.value:
+        locators_error = _pronunciation_locators_error(provider_config.get("pronunciation_dictionary_locators"))
+        if locators_error:
+            return locators_error
     model = provider_config.get("model")
     for key, value in provider_config.items():
         bounds = tts_control_range(provider, key, model)
@@ -170,6 +204,12 @@ class PollyConfig(BaseModel):
     # rate: Optional[str] = '100%'
 
 
+class PronunciationDictionaryLocator(BaseModel):
+    # The streaming socket requires both IDs, and every rule edit on ElevenLabs mints a new version.
+    pronunciation_dictionary_id: str = Field(min_length=1)
+    version_id: str = Field(min_length=1)
+
+
 class ElevenLabsConfig(BaseModel):
     voice: str
     voice_id: str
@@ -178,12 +218,29 @@ class ElevenLabsConfig(BaseModel):
     similarity_boost: Optional[float] = Field(default=0.75, ge=0.0, le=1.0)
     speed: Optional[float] = Field(default=1.0, ge=0.7, le=1.2)
     style: Optional[float] = Field(default=0.0, ge=0.0, le=1.0)
+    # Applied in order. Phoneme rules only take effect on eleven_flash_v2, eleven_v3 and eleven_v4.
+    pronunciation_dictionary_locators: Optional[List[PronunciationDictionaryLocator]] = Field(
+        default=None, max_length=ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES
+    )
 
 
 class OpenAIConfig(BaseModel):
     voice: str
     model: str
     speed: Optional[float] = Field(default=1.0, ge=OPENAI_TTS_SPEED_MIN, le=OPENAI_TTS_SPEED_MAX)
+
+
+def _no_reserved_tts_keys(extra_body):
+    reserved = sorted(RESERVED_TTS_REQUEST_KEYS.intersection(extra_body))
+    if reserved:
+        raise ValueError(f"extra_body cannot override request fields: {', '.join(reserved)}")
+    return extra_body
+
+
+class CustomTTSConfig(OpenAIConfig):
+    # Merged into every speech request to the customer's server. Checked on the field's own type, so the
+    # agent PATCH, which validates field by field, enforces it too.
+    extra_body: Optional[Annotated[Dict[str, Any], AfterValidator(_no_reserved_tts_keys)]] = None
 
 
 class DeepgramConfig(BaseModel):
@@ -211,6 +268,10 @@ class StandardVoiceConfig(BaseModel):
 class CartesiaConfig(StandardVoiceConfig):
     speed: Optional[float] = Field(default=1.0, ge=0.6, le=1.5)
     volume: Optional[float] = Field(default=1.0, ge=CARTESIA_VOLUME_MIN, le=CARTESIA_VOLUME_MAX)
+    # Sent on sonic-3 and newer only.
+    pronunciation_dict_id: Optional[str] = None
+    # Set on save from the customer's dictionary contents: Cartesia edits keep the ID, so cached clips key on this.
+    pronunciation_dict_fingerprint: Optional[str] = None
 
 
 class RimeConfig(StandardVoiceConfig):
@@ -252,13 +313,12 @@ class MayaConfig(BaseModel):
 
 
 class KalpaConfig(BaseModel):
-    voice: str = "Kiara"
+    voice: str = "Arjun"
     voice_id: Optional[str] = None
-    model: str = "kalpa-tts-multilingual-beta-v0.1"
-    temperature: Optional[float] = None
-    acoustic_temperature: Optional[float] = None
-    max_new_tokens: Optional[int] = None
-    audio_quality: Optional[str] = None
+    model: str = "kalpa-tts-1"
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=1.5)
+    acoustic_temperature: Optional[float] = Field(default=None, ge=0.0, le=1.5)
+    audio_quality: Optional[Literal["low", "medium", "high"]] = None
     chunk_length_schedule: Optional[List[int]] = None
 
 
@@ -280,6 +340,12 @@ class SonioxConfig(StandardVoiceConfig):
     reduce_silence: Optional[bool] = None
 
 
+class NavanaConfig(StandardVoiceConfig):
+    # voice_id is the id Navana addresses ("default_female", or a cloned "cv_..."); every voice speaks
+    # every language. model is "navana-tts", or "navana-tts-fast" for the distilled model.
+    pass
+
+
 # The config class each provider's provider_config is validated against. Adding a provider means
 # one entry here.
 SYNTHESIZER_CONFIG_MODELS = {
@@ -297,7 +363,8 @@ SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.KALPA.value: KalpaConfig,
     SynthesizerProvider.GEMINI.value: GeminiConfig,
     SynthesizerProvider.SONIOX.value: SonioxConfig,
-    SynthesizerProvider.CUSTOM.value: OpenAIConfig,
+    SynthesizerProvider.NAVANA.value: NavanaConfig,
+    SynthesizerProvider.CUSTOM.value: CustomTTSConfig,
 }
 
 
@@ -344,6 +411,7 @@ class Transcriber(BaseModel):
     eager_eot_threshold: Optional[float] = None
     eot_timeout_ms: Optional[int] = None
     language_hints: Optional[List[str]] = None
+    hinglish_mode: Optional[bool] = False
     delay: Optional[str] = "medium"
     noise_reduction: Optional[bool] = False
     vad_threshold: Optional[float] = 0.5
@@ -355,6 +423,29 @@ class Transcriber(BaseModel):
         return validate_attribute(value, TranscriberProvider.all_values())
 
 
+class PronunciationRule(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    word: str = Field(min_length=1, max_length=PRONUNCIATION_RULE_WORD_MAX_LENGTH)
+    say_as: str = Field(min_length=1, max_length=PRONUNCIATION_RULE_SAY_AS_MAX_LENGTH)
+
+
+def unique_pronunciation_words(rules):
+    seen = set()
+    for rule in rules or []:
+        word = rule.word.casefold()
+        if word in seen:
+            raise ValueError(f"Pronunciation rule for '{rule.word}' is listed more than once.")
+        seen.add(word)
+    return rules
+
+
+# One voice's word list, wherever it is declared, so every list follows the same limits.
+PronunciationRules = Annotated[
+    List[PronunciationRule], Field(max_length=PRONUNCIATION_RULES_MAX), AfterValidator(unique_pronunciation_words)
+]
+
+
 class Synthesizer(BaseModel):
     provider: str
     # Derived from the registry so a provider registered there is always accepted here.
@@ -363,6 +454,8 @@ class Synthesizer(BaseModel):
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
     caching: Optional[bool] = True
+    # Word -> say-as pairs to build a provider dictionary from; synthesis applies dictionaries by ID only.
+    pronunciation_rules: Optional[PronunciationRules] = None
 
     @model_validator(mode="before")
     def preprocess(cls, values):
@@ -608,7 +701,7 @@ class GraphEdge(BaseModel):
     # Optional parameters to collect during transition
     # Name -> type, e.g. {"city": "string"}, or name -> GraphEdgeParameter for a per-key definition.
     parameters: Optional[Dict[str, GraphEdgeParameterSpec]] = None
-    # lower = evaluated first within a tier (expression/intent/unconditional); does not rank across tiers.
+    # lower = evaluated first within a tier; across intent and expression only on an edge_order "priority" node.
     # Defaults: expression/unconditional=0, llm=100
     priority: Optional[int] = None
 
@@ -658,6 +751,8 @@ class GraphNode(BaseModel):
     routing_model: Optional[str] = None
     # Per-node routing effort; None inherits the agent's routing_reasoning_effort.
     routing_reasoning_effort: Optional[ReasoningEffort] = None
+    # None routes tiered.
+    edge_order: Optional[EdgeOrder] = None
     examples: Optional[Dict[str, str]] = None
     edges: List[GraphEdge] = Field(default_factory=list)
     function_call: Optional[str] = None
@@ -1019,6 +1114,7 @@ class ConversationConfig(BaseModel):
     trigger_user_online_message_after: Optional[int] = 10
     check_user_online_message: Optional[Union[str, Dict[str, str]]] = "Hey, are you still there"
     check_if_user_online: Optional[bool] = True
+    user_online_message_in_llm_history: Optional[bool] = False
     dtmf_enabled: Optional[bool] = False
     # Voicemail detection configuration
     voicemail: Optional[bool] = False

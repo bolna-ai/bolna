@@ -47,3 +47,11 @@ async def test_a_successful_render_is_passed_through_and_cached():
     packet = await _first_packet(synth)
     assert packet["data"] == b"audio-bytes"
     assert synth.cache.get("hello") == b"audio-bytes"
+
+
+async def test_the_bare_end_of_turn_marker_closes_the_turn_without_a_provider_call():
+    synth = _HttpSynth(b"audio-bytes")
+    packet = await _first_packet(synth, text="")
+    assert synth.calls == 0
+    assert packet["data"] == b"\x00"
+    assert packet["meta_info"]["end_of_synthesizer_stream"] is True

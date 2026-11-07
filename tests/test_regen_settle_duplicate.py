@@ -7,11 +7,14 @@ that carries a real continuation is answered normally; only a near-identical res
 """
 
 import logging
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.constants import DUPLICATE_RESPONSE_SIMILARITY
+from bolna.helpers.conversation_history import ConversationHistory
 from bolna.helpers.utils import normalized_similarity, restates_previous_text
 
 # The two replies from the incident: identical but for a leading "कृपया".
@@ -269,26 +272,201 @@ def _spawning_manager(pending_user_input, followup_turn_id):
 
 
 def test_a_followup_turn_inherits_its_parents_user_input():
-    tm = _spawning_manager(pending_user_input=(6, TOOL_CALLER_ASK), followup_turn_id=7)
+    tm = _spawning_manager(pending_user_input=(6, TOOL_CALLER_ASK, True), followup_turn_id=7)
     followup = TaskManager._spawn_followup_meta_info(tm, {"sequence_id": 6, "turn_id": 6, "response_uid": "r6"})
     TaskManager._stage_assistant_history(tm, followup, POST_TOOL_REPLY)
     assert tm._pending_assistant_history[7]["user_input"] == TOOL_CALLER_ASK
 
 
 def test_a_followup_does_not_claim_a_newer_user_turn():
-    tm = _spawning_manager(pending_user_input=(7, TOOL_BARGE_IN), followup_turn_id=8)
+    tm = _spawning_manager(pending_user_input=(7, TOOL_BARGE_IN, True), followup_turn_id=8)
     TaskManager._spawn_followup_meta_info(tm, {"sequence_id": 6, "turn_id": 6, "response_uid": "r6"})
-    assert tm._pending_user_input == (7, TOOL_BARGE_IN)
+    assert tm._pending_user_input == (7, TOOL_BARGE_IN, True)
 
 
 def test_a_barge_in_after_a_tool_call_is_answered():
-    tm = _spawning_manager(pending_user_input=(6, TOOL_CALLER_ASK), followup_turn_id=7)
+    tm = _spawning_manager(pending_user_input=(6, TOOL_CALLER_ASK, True), followup_turn_id=7)
     followup = TaskManager._spawn_followup_meta_info(tm, {"sequence_id": 6, "turn_id": 6, "response_uid": "r6"})
     TaskManager._stage_assistant_history(tm, followup, POST_TOOL_REPLY)
     TaskManager._commit_staged_assistant_history(tm, 7)
 
-    tm._pending_user_input = (8, TOOL_BARGE_IN)
+    tm._pending_user_input = (8, TOOL_BARGE_IN, False)
     barge_in_meta = {"sequence_id": 8, "turn_id": 8, "response_uid": "r8"}
     TaskManager._stage_assistant_history(tm, barge_in_meta, POST_TOOL_REPLY)
 
     assert _is_duplicate(tm, 8, barge_in_meta) is False
+
+
+PRE_CALL_LINE = "One moment, let me check that for you."
+
+
+def test_a_followup_restating_the_line_its_parent_just_spoke_is_suppressed():
+    """A tool follow-up continues its parent's reply, so it never counts as a fresh caller turn."""
+    tm = _spawning_manager(pending_user_input=(6, TOOL_CALLER_ASK, True), followup_turn_id=7)
+    parent_meta = {"sequence_id": 6, "turn_id": 6, "response_uid": "r6"}
+    TaskManager._stage_assistant_history(tm, parent_meta, PRE_CALL_LINE)
+    TaskManager._commit_staged_assistant_history(tm, 6)
+
+    followup = TaskManager._spawn_followup_meta_info(tm, parent_meta)
+    TaskManager._stage_assistant_history(tm, followup, PRE_CALL_LINE)
+
+    assert _is_duplicate(tm, 7, followup) is True
+
+
+# A caller who did not catch the reply asks again in the same words and the model answers in the same
+# words. Both sides restate the previous turn, so only timing tells this apart from a re-final: the
+# caller spoke after the reply had played, with nothing in flight, so the answer must be spoken.
+CALLER_REPEAT = " repeat please"
+REPEATED_ANSWER = "Certainly, I will repeat that for sure. Am I speaking with Priya?"
+
+
+def _live_manager():
+    """Real transcript, staging and commit paths; only the I/O around them is stubbed."""
+    tm = TaskManager.__new__(TaskManager)
+    tm.tools = {"input": MagicMock()}
+    tm.tools["input"].welcome_message_played.return_value = True
+    tm._speech_started_before_welcome = False
+    tm.conversation_history = ConversationHistory()
+    tm.voicemail_handler = SimpleNamespace(detected=False, trigger_check=lambda *args, **kwargs: None)
+    tm.language_detector = SimpleNamespace(collect_transcript=AsyncMock())
+    tm.interruption_manager = MagicMock()
+    tm._TaskManager__cleanup_downstream_tasks = AsyncMock()
+    tm.regen_settle_task = None
+    tm.regen_settle_can_fire = lambda: False
+    tm.kickoff_llm_generation = MagicMock()
+    tm.run_id = "run"
+    tm.transcriber_provider = "deepgram"
+    tm._pending_user_input = None
+    tm._pending_assistant_history = {}
+    tm._sent_audio_sequences = set()
+    tm._blocked_sequences = set()
+    tm._committed_assistant_sequences = set()
+    tm._last_spoken_assistant = None
+    tm._last_spoken_user_input = None
+    tm._turn_msg_map = {}
+    return tm
+
+
+async def _caller_says(tm, text, turn, reply_in_flight):
+    activity = dict.fromkeys(
+        ("response_in_pipeline", "audio_playing", "pending_marks", "pending_sequences", "pending_generation"), False
+    )
+    activity["audio_playing"] = reply_in_flight
+    tm._inflight_response_activity = lambda exclude_sequence_id=None: activity
+    meta = {"sequence_id": turn, "turn_id": turn, "response_uid": f"r{turn}"}
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+        await TaskManager._handle_transcriber_output(tm, "llm", text, meta)
+    return meta
+
+
+async def _second_identical_exchange(reply_in_flight):
+    tm = _live_manager()
+    first = await _caller_says(tm, CALLER_REPEAT, turn=1, reply_in_flight=False)
+    TaskManager._stage_assistant_history(tm, first, REPEATED_ANSWER)
+    TaskManager._commit_staged_assistant_history(tm, 1)
+
+    second = await _caller_says(tm, CALLER_REPEAT, turn=2, reply_in_flight=reply_in_flight)
+    TaskManager._stage_assistant_history(tm, second, REPEATED_ANSWER)
+    return _is_duplicate(tm, 2, second)
+
+
+async def test_a_caller_repeating_themselves_after_the_reply_played_is_answered_again():
+    assert await _second_identical_exchange(reply_in_flight=False) is False
+
+
+async def test_a_restatement_of_a_final_that_overlapped_the_reply_is_still_suppressed():
+    assert await _second_identical_exchange(reply_in_flight=True) is True
+
+
+# The caller's sentence was finalized twice. The second final cut the first reply 10ms in, before any of it was
+# heard, and the regen produced the same reply. Suppressing it as "already spoken" left the caller in silence.
+SAID_ONCE = "inr seven lakhs fifty thousand"
+NEXT_QUESTION = "Got it. Could you please share your expected annual compensation in lakhs per annum?"
+
+
+class _NothingAckedYet:
+    def get_heard_text_for_response(self, _uid):
+        return ""
+
+    def get_heard_text_for_turn(self, _turn_id):
+        return ""
+
+
+async def _reply_cut_then_regenerated(heard):
+    tm = _live_manager()
+    tm.tools["input"].get_response_heard_for_response.return_value = heard
+    tm.tools["input"].get_response_heard_for_turn.return_value = heard
+    tm.mark_event_meta_data = _NothingAckedYet()
+    tm._active_llm_client = lambda: None
+
+    first = await _caller_says(tm, SAID_ONCE, turn=4, reply_in_flight=False)
+    TaskManager._stage_assistant_history(tm, first, NEXT_QUESTION)
+    TaskManager._commit_staged_assistant_history(tm, 4)
+
+    # The re-final's cleanup cuts the reply: its first chunk is still unplayed.
+    sent_at = 1000.0
+    unplayed = [
+        (
+            "m1",
+            {
+                "type": "",
+                "text_synthesized": "Got it.",
+                "turn_id": 4,
+                "sequence_id": 4,
+                "response_uid": "r4",
+                "duration": 0.6,
+                "sent_ts": sent_at,
+            },
+        )
+    ]
+    await tm.sync_history(unplayed, interruption_processed_at=sent_at)
+
+    second = await _caller_says(tm, " " + SAID_ONCE, turn=5, reply_in_flight=True)
+    TaskManager._stage_assistant_history(tm, second, NEXT_QUESTION)
+    return _is_duplicate(tm, 5, second)
+
+
+async def test_a_regen_of_a_reply_cut_before_it_was_heard_is_spoken():
+    assert await _reply_cut_then_regenerated(heard="") is False
+
+
+async def test_a_regen_of_a_reply_the_caller_heard_is_still_suppressed():
+    assert await _reply_cut_then_regenerated(heard=NEXT_QUESTION) is True
+
+
+# The caller went quiet after a reply, and the [silence] re-prompt asked the same question again. A re-prompt answers no
+# caller words, so the gate had nothing to compare and dropped it as a restatement: the caller heard nothing.
+UNCLEAR_ANSWER = "booked a bill"
+REASKED = "I didn't get your response clearly. Could you please share your preferred work location for the role?"
+SILENCE_MARKER = "[silence] User was silent for 7.0 seconds"
+
+
+async def _silence_reprompt(tm, turn):
+    tm.tools["output"] = MagicMock()
+    tm.task_config = {"tools_config": {"output": {"format": "pcm"}}}
+    tm.response_in_pipeline = False
+    meta = {"sequence_id": turn, "turn_id": turn, "response_uid": f"r{turn}"}
+    tm._TaskManager__get_updated_meta_info = MagicMock(return_value=meta)
+    tm._run_llm_task = AsyncMock()
+    await TaskManager._inject_and_run_llm(tm, SILENCE_MARKER)
+    return meta
+
+
+async def _reprompt_after_reply():
+    tm = _live_manager()
+    first = await _caller_says(tm, UNCLEAR_ANSWER, turn=7, reply_in_flight=False)
+    TaskManager._stage_assistant_history(tm, first, REASKED)
+    TaskManager._commit_staged_assistant_history(tm, 7)
+    return tm, await _silence_reprompt(tm, turn=8)
+
+
+async def test_a_silence_reprompt_restating_the_last_question_is_spoken():
+    tm, reprompt = await _reprompt_after_reply()
+    TaskManager._stage_assistant_history(tm, reprompt, REASKED)
+    assert _is_duplicate(tm, 8, reprompt) is False
+
+
+async def test_a_caller_speaking_over_a_silence_reprompt_takes_the_turn_back():
+    tm, _ = await _reprompt_after_reply()
+    await _caller_says(tm, "bangalore", turn=9, reply_in_flight=True)
+    assert tm._pending_user_input == (9, "bangalore", False)

@@ -6,9 +6,9 @@ import contextlib
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from openai import APIError, BadRequestError
-from bolna.llms.openai_llm import OpenAiLLM
+from bolna.llms.openai_llm import OpenAiLLM, WSConnectError
 from bolna.llms.azure_llm import AzureLLM
-from bolna.llms.types import FunctionCallPayload
+from bolna.llms.types import FunctionCallPayload, LLMStreamChunk
 
 
 def _make_llm(**overrides):
@@ -759,6 +759,33 @@ class TestBuildResponsesInput:
         assert items[0]["content"] == "How are you?"
         assert items[0]["role"] == "user"
 
+    def test_a_changed_system_prompt_sends_full_history(self):
+        llm = _make_llm(use_responses_api=True, previous_response_id="resp_prev")
+        history = [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi there!"}]
+        llm._build_responses_input([{"role": "system", "content": "greeting node"}, *history])
+        llm.previous_response_id = "resp_prev"
+
+        _, items = llm._build_responses_input(
+            [{"role": "system", "content": "address node"}, *history, {"role": "user", "content": "Sure"}]
+        )
+
+        assert llm.previous_response_id is None
+        assert (items[0]["role"], items[0]["content"]) == ("system", "address node")
+        assert len(items) == 4
+
+    def test_an_unchanged_system_prompt_keeps_the_chain(self):
+        llm = _make_llm(use_responses_api=True, previous_response_id="resp_prev")
+        history = [{"role": "system", "content": "sys"}, {"role": "user", "content": "Hello"}]
+        llm._build_responses_input(history)
+        llm.previous_response_id = "resp_prev"
+
+        _, items = llm._build_responses_input(
+            [*history, {"role": "assistant", "content": "Hi"}, {"role": "user", "content": "Sure"}]
+        )
+
+        assert llm.previous_response_id == "resp_prev"
+        assert [i["content"] for i in items] == ["Sure"]
+
     def test_tool_results_sent_after_assistant_with_previous_id(self):
         """Tool results after the last assistant should be included."""
         llm = _make_llm(use_responses_api=True, previous_response_id="resp_prev")
@@ -779,6 +806,22 @@ class TestBuildResponsesInput:
         assert items[0]["output"] == "Order shipped"
         assert items[1]["type"] == "message"
         assert items[1]["content"] == "thanks"
+
+    def test_nudge_after_the_chain_head_goes_out_as_input(self):
+        """The are-you-still-there nudge is not on the chain, so a chained request must carry it."""
+        llm = _make_llm(use_responses_api=True, previous_response_id="resp_prev")
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Can I book you for Monday?"},
+            {"role": "assistant", "content": "Are you still there?", "message_category": "is_user_online_message"},
+            {"role": "user", "content": "yes"},
+        ]
+        _, items = llm._build_responses_input(messages)
+        assert [(i["role"], i["content"]) for i in items] == [
+            ("assistant", "Are you still there?"),
+            ("user", "yes"),
+        ]
 
     def test_fallback_to_full_when_no_assistant_with_previous_id(self):
         """If no assistant message found, send full history including system input item."""
@@ -871,6 +914,7 @@ def _make_azure_llm(**overrides):
     llm.compact_threshold = defaults.get("compact_threshold", None)
     llm._interruption_hint = defaults.get("_interruption_hint", None)
     llm.async_client = AsyncMock()  # AsyncAzureOpenAI mock (chat completions)
+    llm._overflow_client = None
     llm._responses_api_client = AsyncMock()  # AsyncOpenAI v1 mock (responses API)
     llm.model_args = {"model": llm.model, "max_tokens": llm.max_tokens, "temperature": llm.temperature}
     return llm
@@ -1403,6 +1447,49 @@ class TestWSTransportRouting:
         assert any("WS Hello" in c.data for c in chunks if isinstance(c.data, str))
         # HTTP client should NOT have been called
         llm.async_client.responses.create.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "error, keeps_socket", [(WSConnectError("refused"), False), (ConnectionError("drop"), True)]
+    )
+    async def test_ws_failure_falls_back_to_http_and_drops_only_an_unopenable_socket(self, error, keeps_socket):
+        llm = _make_llm(use_responses_api=True)
+
+        async def failing_stream(params):
+            raise error
+            yield
+
+        transport = MagicMock(stream_response=failing_stream, disconnect=AsyncMock())
+        llm._ws_transport = transport
+
+        async def http_stream(*args, **kwargs):
+            yield LLMStreamChunk(data="from http")
+
+        with patch.object(llm, "_generate_stream_responses", side_effect=http_stream):
+            chunks = [
+                c
+                async for c in llm.generate_stream(
+                    [{"role": "user", "content": "Hi"}], synthesize=False, meta_info=_make_meta_info()
+                )
+            ]
+
+        assert [c.data for c in chunks] == ["from http"]
+        assert (llm._ws_transport is transport) is keeps_socket
+
+    async def test_ws_request_keeps_a_float_temperature(self):
+        llm = _make_llm(use_responses_api=True, temperature=0.7)
+        sent = []
+
+        async def fake_stream(params):
+            sent.append(params)
+            yield {"type": "response.completed", "response": {"id": "resp_ws", "usage": None}}
+
+        llm._ws_transport = MagicMock(stream_response=fake_stream)
+        async for _ in llm.generate_stream(
+            [{"role": "user", "content": "Hi"}], synthesize=False, meta_info=_make_meta_info()
+        ):
+            pass
+
+        assert sent[0]["temperature"] == 0.7
 
     async def test_http_sse_used_when_no_ws_transport(self):
         llm = _make_llm(use_responses_api=True)

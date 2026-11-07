@@ -120,7 +120,7 @@ async def test_one_config_frame_opens_the_turn_and_text_end_closes_it():
     # The turn's final LLM chunk is routinely empty; end_of_llm_stream rides on it.
     await synth.sender("", 7, end_of_llm_stream=True)
 
-    configs = [f for f in synth.websocket.sent if "api_key" in f]
+    configs = [f for f in synth.websocket.sent if "voice" in f]
     texts = [f for f in synth.websocket.sent if "text" in f]
     assert len(configs) == 1
     assert configs[0]["audio_format"] == "pcm_mulaw"

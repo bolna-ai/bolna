@@ -19,6 +19,9 @@ from bolna.constants import (
     SONIOX_AUTO_LANGUAGE_VALUES,
     SONIOX_DEFAULT_MULTILINGUAL_HINTS,
     SONIOX_ENDPOINT_TOKEN,
+    SONIOX_FINALIZE_DISCARD_S,
+    SONIOX_FINALIZE_TOKEN,
+    SONIOX_REGION_HOSTS,
     SONIOX_WEBSOCKET_HOST,
 )
 
@@ -44,6 +47,7 @@ class SonioxTranscriber(BaseTranscriber):
         context=None,
         process_interim_results="true",
         language_hints=None,
+        hinglish_mode=False,
         **kwargs,
     ):
         super().__init__(input_queue)
@@ -56,11 +60,13 @@ class SonioxTranscriber(BaseTranscriber):
         self.keywords = keywords
         self.context = (context or "").strip()
         self.language_hints = language_hints
+        self.hinglish = bool(hinglish_mode) and not language_hints and (language or "").lower() == "hi"
         self.transcriber_output_queue = output_queue
         self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
 
-        self.api_key = kwargs.get("transcriber_key", os.getenv("SONIOX_API_KEY"))
-        self.soniox_host = os.getenv("SONIOX_HOST", SONIOX_WEBSOCKET_HOST)
+        self.endpoints = self._resolve_endpoints(kwargs.get("soniox_regions"), kwargs.get("transcriber_key"))
+        self._use_endpoint(0)
+        self._rejected_for_capacity = False
 
         # Soniox uses semantic endpoint detection (not a pure silence timer). Leave its own
         # default delay (~2s) unless explicitly tuned, so a brief pause mid-thought isn't cut off.
@@ -103,7 +109,11 @@ class SonioxTranscriber(BaseTranscriber):
         self.current_turn_interim_details = []
         self.turn_counter = 0
         self.last_interim_time = None
+        # Stream position (ms) where the turn's last final word ended: the caller's real speech end.
+        self.turn_last_word_end_ms = None
         self._last_detected_language = None
+        # Set while a discarded turn's flushed tokens are still due back (see discard_open_turn).
+        self.discard_until_fin_deadline = None
 
     def _resolve_audio_params(self):
         """Set encoding, sample rate and frame duration from the telephony/web I/O provider."""
@@ -132,6 +142,8 @@ class SonioxTranscriber(BaseTranscriber):
         lang = (self.language or "").lower()
         if lang in SONIOX_AUTO_LANGUAGE_VALUES:
             return SONIOX_DEFAULT_MULTILINGUAL_HINTS
+        if self.hinglish:
+            return ["hi", "en"]
         return [self.language]
 
     def _build_soniox_context(self):
@@ -145,17 +157,73 @@ class SonioxTranscriber(BaseTranscriber):
         return context or None
 
     def _build_config(self):
-        """First WebSocket frame: auth + stream config (Soniox carries the api_key here, not a header)."""
+        """First WebSocket frame: stream config (the api_key rides in the connect-time header)."""
         return build_soniox_config(
-            self.api_key,
             self.model,
             self.soniox_audio_format,
             self.sampling_rate,
             max_endpoint_delay_ms=self.max_endpoint_delay_ms,
             endpoint_sensitivity=self.endpoint_sensitivity,
             language_hints=self._resolve_language_hints() or None,
+            language_hints_strict=True if self.hinglish else None,
             context=self._build_soniox_context(),
         )
+
+    @staticmethod
+    def _resolve_endpoints(regions, transcriber_key):
+        """The regions, in order, whose key is in env, else the env host; a customer key always uses the env host."""
+        if regions and not transcriber_key:
+            endpoints = [
+                {"label": region, "host": SONIOX_REGION_HOSTS[region], "api_key": api_key}
+                for region in regions
+                if region in SONIOX_REGION_HOSTS and (api_key := os.getenv(f"SONIOX_{region.upper()}_API_KEY"))
+            ]
+            if endpoints:
+                return endpoints
+        return [
+            {
+                "label": "default",
+                "host": os.getenv("SONIOX_HOST", SONIOX_WEBSOCKET_HOST),
+                "api_key": transcriber_key or os.getenv("SONIOX_API_KEY"),
+            }
+        ]
+
+    def _use_endpoint(self, index):
+        self._endpoint_index = index
+        endpoint = self.endpoints[index]
+        self.endpoint_label = endpoint["label"]
+        self.soniox_host = endpoint["host"]
+        self.api_key = endpoint["api_key"]
+
+    def _next_endpoint_after_rejection(self):
+        """Move to the next endpoint if the current one refused the session for capacity."""
+        if not self._rejected_for_capacity or self._endpoint_index + 1 >= len(self.endpoints):
+            return False
+        refused = self.endpoint_label
+        self._use_endpoint(self._endpoint_index + 1)
+        self._rejected_for_capacity = False
+        self.connection_error = None
+        self.connection_time = None
+        # Token positions restart with the new session.
+        self._reset_turn_state()
+        logger.warning(f"Soniox endpoint {refused} refused the session for capacity, moving to {self.endpoint_label}")
+        return True
+
+    async def _drop_stream(self, ws):
+        """Close a refused connection and its tasks."""
+        tasks = [task for task in (self.sender_task, self.utterance_timeout_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.sender_task = None
+        self.utterance_timeout_task = None
+        # Bounded: the caller is waiting on the next connect.
+        try:
+            await asyncio.wait_for(ws.close(), timeout=1.0)
+        except Exception as e:
+            logger.error(f"Error closing refused Soniox websocket: {e}")
+        self.websocket_connection = None
+        self.connection_authenticated = False
 
     def get_soniox_ws_url(self):
         return soniox_ws_url(self.soniox_host)
@@ -169,15 +237,19 @@ class SonioxTranscriber(BaseTranscriber):
             ws_url = self.get_soniox_ws_url()
             logger.info(f"Connecting to Soniox websocket: {ws_url}")
             soniox_ws = await asyncio.wait_for(
-                websockets.connect(ws_url, ssl=get_ssl_context(ws_url)),
+                websockets.connect(
+                    ws_url,
+                    additional_headers={"Authorization": f"Bearer {self.api_key}"},
+                    ssl=get_ssl_context(ws_url),
+                ),
                 timeout=10.0,
             )
             await soniox_ws.send(json.dumps(self._build_config()))
             self.websocket_connection = soniox_ws
             self.connection_authenticated = True
             logger.info(
-                f"Connected to Soniox (model={self.model}, audio_format={self.soniox_audio_format}, "
-                f"sample_rate={self.sampling_rate})"
+                f"Connected to Soniox (endpoint={self.endpoint_label}, model={self.model}, "
+                f"audio_format={self.soniox_audio_format}, sample_rate={self.sampling_rate})"
             )
             return soniox_ws
         except asyncio.TimeoutError:
@@ -189,10 +261,10 @@ class SonioxTranscriber(BaseTranscriber):
         except Exception as e:
             raise ConnectionError(f"Unexpected error connecting to Soniox websocket: {e}")
 
-    def _audio_frame_seconds(self, num_bytes: int) -> float:
+    def _audio_frame_seconds(self, num_bytes: int, measured: bool = False) -> float:
         """Audio carried by one send. Measured where the input handler batches something other than
-        the constant it is booked at; every other path really does send the constant."""
-        if self.provider not in MEASURED_FRAME_PROVIDERS:
+        the constant it is booked at (and for pool keepalives); every other path sends the constant."""
+        if self.provider not in MEASURED_FRAME_PROVIDERS and not measured:
             return self.audio_frame_duration
         return num_bytes / ((1 if self.encoding == "mulaw" else 2) * self.sampling_rate)
 
@@ -219,7 +291,8 @@ class SonioxTranscriber(BaseTranscriber):
                 if not data:
                     continue
                 if isinstance(data, (bytes, bytearray)):
-                    self.record_audio_frame(self._audio_frame_seconds(len(data)), timestamp_ms())
+                    frame_seconds = self._audio_frame_seconds(len(data), measured=bool(ws_data_packet.get("keepalive")))
+                    self.record_audio_frame(frame_seconds, timestamp_ms())
                     self.count_audio_sent(len(data), self.sampling_rate, mulaw=self.encoding == "mulaw")
                 try:
                     await ws.send(data)
@@ -236,8 +309,11 @@ class SonioxTranscriber(BaseTranscriber):
             logger.error(f"Error in Soniox sender_stream: {e}")
             raise
 
-    def _start_turn(self):
+    def _start_turn(self, onset_ms=None):
         """Begin a new user turn on the first content token and record an eager latency stub."""
+        self.meta_info["user_start_ts_wall"] = self.audio_position_wall_time(
+            onset_ms / 1000 if onset_ms is not None else None
+        )
         self.turn_counter += 1
         self.current_turn_id = self.turn_counter
         now = timestamp_ms()
@@ -262,7 +338,10 @@ class SonioxTranscriber(BaseTranscriber):
         self.current_turn_id = None
         self.final_transcript = ""
         self.last_interim_time = None
+        self.turn_last_word_end_ms = None
         self.is_transcript_sent_for_processing = True
+        if self.meta_info is not None:
+            self.meta_info.pop("user_start_ts_wall", None)
 
     def _mark_last_interim_final(self):
         if not self.current_turn_interim_details:
@@ -289,6 +368,13 @@ class SonioxTranscriber(BaseTranscriber):
             }
         )
 
+    def turn_speech_end_wall(self):
+        """Wall-clock seconds the turn's last final word ended, or None (the endpoint offset applies then).
+        The endpoint delay is only Soniox's maximum, so subtracting it from now overshoots."""
+        if self.turn_last_word_end_ms is None:
+            return None
+        return self.audio_position_wall_time(self.turn_last_word_end_ms / 1000)
+
     def _find_audio_send_timestamp(self, audio_position_s):
         """Send-time (epoch ms) of the audio frame containing this position (seconds), or None."""
         for frame_start, frame_end, send_timestamp in self.audio_frame_timestamps:
@@ -307,6 +393,8 @@ class SonioxTranscriber(BaseTranscriber):
 
                 if res.get("error_code") is not None:
                     self.connection_error = f"{res.get('error_code')}: {res.get('error_message')}"
+                    # 429 is this region's limit; the next region has its own.
+                    self._rejected_for_capacity = str(res.get("error_code")) == "429"
                     logger.error(f"Soniox error: {self.connection_error}")
                     break
 
@@ -317,9 +405,15 @@ class SonioxTranscriber(BaseTranscriber):
                 new_final_text = ""
                 non_final_text = ""
                 latest_end_ms = None
+                earliest_start_ms = None
                 for token in res.get("tokens", []):
                     text = token.get("text", "")
                     if not text:
+                        continue
+                    if text == SONIOX_FINALIZE_TOKEN:
+                        self.discard_until_fin_deadline = None
+                        continue
+                    if self.is_discarded_turn_leftover():
                         continue
                     if text == SONIOX_ENDPOINT_TOKEN:
                         endpoint_hit = True
@@ -329,15 +423,22 @@ class SonioxTranscriber(BaseTranscriber):
                     end_ms = token.get("end_ms")
                     if end_ms is not None:
                         latest_end_ms = end_ms if latest_end_ms is None else max(latest_end_ms, end_ms)
+                    start_ms = token.get("start_ms")
+                    if start_ms is not None:
+                        earliest_start_ms = start_ms if earliest_start_ms is None else min(earliest_start_ms, start_ms)
                     if token.get("is_final"):
                         new_final_text += text
+                        if end_ms is not None and (
+                            self.turn_last_word_end_ms is None or end_ms > self.turn_last_word_end_ms
+                        ):
+                            self.turn_last_word_end_ms = end_ms
                     else:
                         non_final_text += text
 
                 has_content = bool(new_final_text or non_final_text)
 
                 if has_content and self.current_turn_id is None:
-                    self._start_turn()
+                    self._start_turn(earliest_start_ms)
                     yield create_ws_data_packet("speech_started", self.meta_info)
 
                 if new_final_text:
@@ -370,6 +471,7 @@ class SonioxTranscriber(BaseTranscriber):
                         logger.info(f"Soniox endpoint reached, yielding transcript: {final}")
                         self._build_finalized_turn_latency(final)
                         self.meta_info["user_stop_offset_ms"] = self.user_stop_offset_ms
+                        self.meta_info["user_stop_ts_wall"] = self.turn_speech_end_wall()
                         if self._last_detected_language:
                             self.meta_info["transcriber_detected_language"] = self._last_detected_language
                         yield create_ws_data_packet({"type": "transcript", "content": final}, self.meta_info)
@@ -390,6 +492,35 @@ class SonioxTranscriber(BaseTranscriber):
                 logger.error(f"Error processing Soniox message: {e}")
                 traceback.print_exc()
 
+    async def discard_open_turn(self):
+        """Close the turn in progress without delivering it, as a multilingual call switches away.
+
+        A standby leg only gets keepalive silence, so a sentence it was cut off in would never reach
+        an endpoint: it would drip out one keepalive at a time and be prefixed to the caller's next
+        utterance if the call switched back. Finalize flushes it now; the receiver drops what comes
+        back up to the <fin> marker. With no turn open there is nothing to flush or wait for.
+        """
+        turn_open = self.current_turn_id is not None
+        self._reset_turn_state()
+        if not turn_open or self.websocket_connection is None:
+            return
+        self.discard_until_fin_deadline = time.time() + SONIOX_FINALIZE_DISCARD_S
+        try:
+            await self.websocket_connection.send(json.dumps({"type": "finalize"}))
+        except Exception as e:
+            self.discard_until_fin_deadline = None
+            logger.warning(f"Soniox: could not finalize the discarded turn: {e}")
+
+    def is_discarded_turn_leftover(self) -> bool:
+        """True while tokens are the discarded turn's flushed words, i.e. before its <fin> arrives."""
+        if self.discard_until_fin_deadline is None:
+            return False
+        if time.time() < self.discard_until_fin_deadline:
+            return True
+        logger.warning("Soniox: no <fin> after finalizing the discarded turn; accepting tokens again")
+        self.discard_until_fin_deadline = None
+        return False
+
     async def _force_finalize_utterance(self):
         """Force-finalize a stuck utterance when Soniox never sends the endpoint token."""
         transcript_to_send = self.final_transcript.strip()
@@ -409,6 +540,7 @@ class SonioxTranscriber(BaseTranscriber):
             logger.error(f"Soniox force-finalize: error building turn latencies: {e}")
 
         self.meta_info["user_stop_offset_ms"] = self.user_stop_offset_ms
+        self.meta_info["user_stop_ts_wall"] = self.turn_speech_end_wall()
         if self._last_detected_language:
             self.meta_info["transcriber_detected_language"] = self._last_detected_language
 
@@ -499,38 +631,50 @@ class SonioxTranscriber(BaseTranscriber):
 
     async def transcribe(self):
         soniox_ws = None
-        # Audio positions restart at 0 on each connection; reset local frame bookkeeping with them.
-        self.reset_audio_frame_state()
-        self.reset_billed_audio()
         try:
             start_time = timestamp_ms()
-            try:
-                soniox_ws = await self.soniox_connect()
-            except (ValueError, ConnectionError) as e:
-                logger.error(f"Failed to establish Soniox connection: {e}")
-                self.connection_error = str(e)
-                await self.toggle_connection()
-                return
+            while True:
+                # Audio positions restart at 0 on each connection; reset local frame bookkeeping with them.
+                self.reset_audio_frame_state()
+                self.reset_billed_audio()
+                # A discard armed on a connection that closed before its <fin> means nothing on this one; left set, it would
+                # drop the caller's first words after a quick switch back.
+                self.discard_until_fin_deadline = None
+                try:
+                    soniox_ws = await self.soniox_connect()
+                except (ValueError, ConnectionError) as e:
+                    logger.error(f"Failed to establish Soniox connection: {e}")
+                    self.connection_error = str(e)
+                    await self.toggle_connection()
+                    return
 
-            if not self.connection_time:
-                self.connection_time = round(timestamp_ms() - start_time)
+                if not self.connection_time:
+                    self.connection_time = round(timestamp_ms() - start_time)
 
-            self.sender_task = asyncio.create_task(self.sender_stream(soniox_ws))
-            self.utterance_timeout_task = asyncio.create_task(self.monitor_utterance_timeout())
+                self.sender_task = asyncio.create_task(self.sender_stream(soniox_ws))
+                self.utterance_timeout_task = asyncio.create_task(self.monitor_utterance_timeout())
 
-            try:
-                async for message in self.receiver(soniox_ws):
-                    if self.connection_on:
-                        await self.push_to_transcriber_queue(message)
-                    else:
-                        break
-            except ConnectionClosedError as e:
-                logger.error(f"Soniox websocket closed during streaming: {e}")
-                self.connection_error = str(e)
-            except Exception as e:
-                logger.error(f"Error during Soniox streaming: {e}")
-                self.connection_error = str(e)
-                raise
+                try:
+                    async for message in self.receiver(soniox_ws):
+                        if self.connection_on:
+                            await self.push_to_transcriber_queue(message)
+                        else:
+                            break
+                except ConnectionClosedError as e:
+                    logger.error(f"Soniox websocket closed during streaming: {e}")
+                    self.connection_error = str(e)
+                except Exception as e:
+                    logger.error(f"Error during Soniox streaming: {e}")
+                    self.connection_error = str(e)
+                    raise
+
+                if not self._next_endpoint_after_rejection():
+                    break
+                await self._drop_stream(soniox_ws)
+                soniox_ws = None
+                # The caller hung up during the move.
+                if not self.connection_on:
+                    break
 
         except (ValueError, ConnectionError) as e:
             logger.error(f"Connection error in Soniox transcribe: {e}")
@@ -550,8 +694,9 @@ class SonioxTranscriber(BaseTranscriber):
                     self.websocket_connection = None
                     self.connection_authenticated = False
 
-            if self.sender_task is not None:
-                self.sender_task.cancel()
+            for task in (self.sender_task, self.utterance_timeout_task):
+                if task is not None:
+                    task.cancel()
 
             await self.push_to_transcriber_queue(
                 create_ws_data_packet("transcriber_connection_closed", self.closing_meta())

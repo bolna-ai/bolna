@@ -396,8 +396,11 @@ class AzureTranscriber(BaseTranscriber):
         # evt's repr carries only reason=ResultReason.Canceled, so log the details explicitly —
         # during the 2026-09 centralindia outage the endpoint never appeared until the call ended.
         details = evt.cancellation_details
-        logger.info(
-            f"Canceled event received: reason={getattr(details, 'reason', None)} "
+        reason = getattr(details, "reason", None)
+        # EndOfStream fires on every normal hangup once the push stream closes; only Error is a failure.
+        log = logger.error if reason == speechsdk.CancellationReason.Error else logger.info
+        log(
+            f"Canceled event received: reason={reason} "
             f"details={getattr(details, 'error_details', None)} | run_id - {self.run_id}"
         )
         self.connection_live = False

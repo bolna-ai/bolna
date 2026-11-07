@@ -25,6 +25,7 @@ def _telephony_task_manager(last_transmitted_timestamp, *, hang_conversation_aft
     now = time.time()
     tm.is_web_based_call = False
     tm.has_transfer = False
+    tm.transfer_call_params = {"provider": "plivo"}
     tm.start_time = now - age
     tm.stream_sid_ts = None
     tm.task_config = {
@@ -49,6 +50,7 @@ def _telephony_task_manager(last_transmitted_timestamp, *, hang_conversation_aft
     tm.trigger_user_online_message_after = 6
     tm.asked_if_user_is_still_there = False
     tm.tools = {"input": SimpleNamespace(is_audio_being_played_to_user=lambda: False)}
+    tm.opening_node = None
     tm.hangup_detail = None
     tm.hangups = []
     tm.ended = []
@@ -141,6 +143,15 @@ async def test_call_terminate_caps_a_telephony_call(monkeypatch):
     assert tm.hangup_detail == HangupReason.MAX_DURATION_REACHED
 
 
+async def test_call_terminate_caps_a_trunk_call(monkeypatch):
+    # A trunk call's audio rides the freeswitch fork, which is not a carrier handler.
+    tm = _telephony_task_manager(time.time(), hang_conversation_after=0, call_terminate=600, age=900)
+    tm.task_config["tools_config"]["input"]["provider"] = "freeswitch"
+    tm.transfer_call_params = {"provider": "trunk"}
+    assert await _drive(tm, monkeypatch) == "loop_exited"
+    assert tm.hangup_detail == HangupReason.MAX_DURATION_REACHED
+
+
 async def test_call_terminate_does_not_cut_a_call_below_its_cap(monkeypatch):
     tm = _telephony_task_manager(time.time(), hang_conversation_after=0, call_terminate=600, age=120)
     assert await _drive(tm, monkeypatch) == "still_spinning"
@@ -207,7 +218,14 @@ GOODBYE = _node("goodbye", repeat_after_silence_seconds=None)
 
 
 async def _run_silent_call(
-    monkeypatch, nodes, *, hang_conversation_after=20, max_silence_repeats=2, user_speaks_at=None, horizon_s=300
+    monkeypatch,
+    nodes,
+    *,
+    hang_conversation_after=20,
+    max_silence_repeats=2,
+    user_speaks_at=None,
+    horizon_s=300,
+    welcome_played=True,
 ):
     """Run the real completion loop on a fake clock for a caller who stays silent (optionally speaking
     once at user_speaks_at seconds). Returns the events: ("reprompt"|"user"|"hangup", node)."""
@@ -221,6 +239,9 @@ async def _run_silent_call(
     tm._silence_repeats_sent = 0
     tm._silence_period = None
     tm.check_if_user_online = False
+    if not welcome_played:
+        tm.opening_node = nodes[0]
+        tm.tools["input"].welcome_message_played = lambda: False
     tm.tools["llm_agent"] = graph
     tm.tools["output"] = SimpleNamespace(handle_interruption=AsyncMock())
     events = []
@@ -281,6 +302,11 @@ async def test_a_node_reached_through_a_silence_edge_gets_its_own_reprompts(monk
 async def test_the_user_speaking_starts_a_new_silence_period(monkeypatch):
     events = await _run_silent_call(monkeypatch, [_node("faq")], user_speaks_at=30)
     assert [kind for kind, _ in events] == ["reprompt", "reprompt", "user", "reprompt", "reprompt", "hangup"]
+
+
+async def test_an_opening_node_does_not_reprompt_before_its_message_has_played(monkeypatch):
+    events = await _run_silent_call(monkeypatch, [_node("greeting")], welcome_played=False)
+    assert events == [("hangup", "greeting")]
 
 
 async def test_no_cap_when_the_silence_hangup_is_off(monkeypatch):

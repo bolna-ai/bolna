@@ -31,6 +31,7 @@ def _target(llm_task=None, hangup_task=None):
         hangup_detail="END_CALL_TOOL",
         hangup_cancel_events=[],
         conversation_start_init_ts=0.0,
+        _invalidate_response_chain=MagicMock(),
     )
 
 
@@ -85,6 +86,12 @@ async def test_does_not_mark_cancelled_once_conversation_ended():
     tm.conversation_ended = True
     TaskManager._cancel_pending_hangup(tm)
     assert tm._hangup_cancelled is False
+
+
+async def test_drops_the_response_chain_so_the_closing_turn_context_does_not_linger():
+    tm = _target()
+    TaskManager._cancel_pending_hangup(tm)
+    tm._invalidate_response_chain.assert_called_once()
 
 
 async def test_restores_the_user_online_check_on_resume():
@@ -196,11 +203,14 @@ def _cleanup_target():
     tm.voicemail_handler = SimpleNamespace(cancel_task=lambda: None)
 
     output = SimpleNamespace(handle_interruption=AsyncMock())
-    synth = SimpleNamespace(handle_interruption=AsyncMock(), flush_synthesizer_stream=AsyncMock())
+    synth = SimpleNamespace(
+        handle_interruption=AsyncMock(), flush_synthesizer_stream=AsyncMock(), abandon_open_turn=MagicMock()
+    )
     inp = SimpleNamespace(
         welcome_message_played=MagicMock(return_value=True),
         reset_response_heard_by_user=MagicMock(),
         is_welcome_message_played=True,
+        is_audio_being_played_to_user=MagicMock(return_value=False),
     )
     tm.tools = {"output": output, "synthesizer": synth, "input": inp}
     tm._TaskManager__process_output_loop = AsyncMock()

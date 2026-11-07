@@ -1,5 +1,6 @@
 import asyncio
 from collections import OrderedDict
+import hashlib
 import os
 import re
 import time
@@ -11,6 +12,7 @@ from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
+from bolna.helpers.prompt_transcript import with_prompt_transcript
 from bolna.helpers.function_calling_helpers import guard_llm_base_url
 from bolna.helpers.utils import (
     now_ms,
@@ -20,15 +22,27 @@ from bolna.helpers.utils import (
     enrich_context_with_time_variables,
     get_md5_hash,
     select_message_by_language,
+    static_node_ends_call,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
-from bolna.enums import ChatRole, EdgeConditionType, ExpressionOperator, LLMProvider, NodeType, ToolScope
+from bolna.enums import (
+    ChatRole,
+    EdgeConditionType,
+    EdgeOrder,
+    ExpressionOperator,
+    LLMProvider,
+    NodeType,
+    ToolScope,
+)
 from bolna.llms.types import LLMStreamChunk, LatencyData
-from bolna.llms import OpenAiLLM, LiteLLM
+from bolna.llms import AzureLLM, OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 from bolna.constants import (
+    END_CALL_FUNCTION_PREFIX,
+    HANGUP_AFTER_REPLY,
     LANGUAGE_NAMES,
+    LLM_VENDOR_ENDPOINTS,
     RESPONSES_API_MODEL_PREFIXES,
     canonical_model,
     default_reasoning_effort,
@@ -39,9 +53,23 @@ from typing import List, Tuple, AsyncGenerator, Optional, Dict, Any
 
 # Conversation providers whose own key authenticates the hangup/voicemail OpenAiLLM hops; any
 # other provider (Gemini, Azure, the LiteLLM backends) needs the platform OpenAI key instead. A
-# Bolna-hosted endpoint serves only its own model, so its hops use the platform key too.
+# Bolna-hosted endpoint or a vendor's own endpoint serves only its own models, so its hops use the
+# platform key too.
 OPENAI_KEYED_PROVIDERS = frozenset(
-    p for p, cls in SUPPORTED_LLM_PROVIDERS.items() if cls is OpenAiLLM and p != LLMProvider.BOLNA.value
+    p
+    for p, cls in SUPPORTED_LLM_PROVIDERS.items()
+    if cls is OpenAiLLM and p != LLMProvider.BOLNA.value and p not in LLM_VENDOR_ENDPOINTS
+)
+
+# Conversation LLM settings that belong to the agent's provider, dropped when a node switches provider.
+AGENT_PROVIDER_BOUND_KWARGS = (
+    "llm_key",
+    "base_url",
+    "api_version",
+    "extra_body",
+    "service_tier",
+    "overflow_llm",
+    "openai_model_endpoints",
 )
 
 load_dotenv()
@@ -49,10 +77,15 @@ logger = configure_logger(__name__)
 
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
+_OUTRANKING_INTENTS_TRACE = "intent edges ranked above it checked first"
 # Root identifier in either syntax, so {{prior.loans}} still validates against recipient_data["prior"].
 _PROMPT_VAR_PATTERN = re.compile(r"\{\{?\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z0-9_]+|\[[^\[\]{}]+\])*\s*\}\}?")
 _ROUTER_REASONING_DESC = "Brief explanation of why this routing decision was made"
 _ROUTER_CONFIDENCE_DESC = "Confidence score from 0.0 to 1.0 for this routing decision"
+_END_NODE_INSTRUCTION = (
+    "This is the final turn: the call ends as soon as you finish speaking. Deliver this step's closing "
+    "message now. Do not ask the user anything or invite a reply."
+)
 
 # Time variables frozen per call for the conversation prompt; see _prompt_context.
 _TIME_VAR_KEYS = (
@@ -92,6 +125,7 @@ class GraphAgent(BaseAgent):
         self._silence_repeats = 0
         self._event_triggered_generation = False
         self._active_node_first_response_delivered = True
+        self._end_node_closed = False
         self._hold_until_first_delivery = not self.config.get("turn_based_conversation", False)
         self._last_deterministic_eval = None
         self._frozen_time_vars: Optional[Dict[str, Any]] = None
@@ -128,8 +162,8 @@ class GraphAgent(BaseAgent):
         self._active_conversation_llm = self.llm
         self._prewarm_conversation_overrides()
 
-        # Hangup/voicemail run on OpenAiLLM, so a conversation on a non-OpenAI provider lends no
-        # usable key and these fall back to the platform OpenAI key.
+        # Hangup runs on OpenAiLLM, so a conversation on a non-OpenAI provider lends no usable key and it falls
+        # back to the platform OpenAI key. Voicemail always runs on the platform Azure OpenAI deployment.
         aux_provider = self.config.get("aux_provider") or self.config.get("provider") or "openai"
         aux_model = (self.config.get("aux_model") or self.llm_model or "").split("/", 1)[-1]
         llm_kwargs = {}
@@ -141,13 +175,18 @@ class GraphAgent(BaseAgent):
                 llm_kwargs["llm_key"] = self.llm_key
             if self.base_url:
                 llm_kwargs["base_url"] = self.base_url
+            if self.config.get("openai_model_endpoints"):
+                llm_kwargs["openai_model_endpoints"] = self.config["openai_model_endpoints"]
             if aux_provider == LLMProvider.CUSTOM.value:
                 llm_kwargs["provider"] = aux_provider
                 llm_kwargs["extra_body"] = self.config.get("extra_body")
         self.conversation_completion_llm = OpenAiLLM(
             model=os.getenv("CHECK_FOR_COMPLETION_LLM", aux_model or "gpt-4o-mini"), **llm_kwargs
         )
-        self.voicemail_llm = OpenAiLLM(model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"), **llm_kwargs)
+        self.voicemail_llm = AzureLLM(
+            model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"),
+            base_url=os.getenv("AZURE_OPENAI_BASE_URL") or os.getenv("AZURE_OPENAI_ENDPOINT"),
+        )
 
     def _initialize_llm(self):
         """Initialize LLM with api_tools support (same pattern as KnowledgeBaseAgent)."""
@@ -162,6 +201,7 @@ class GraphAgent(BaseAgent):
                 "temperature": self.config.get("temperature", 0.7),
                 "max_tokens": self.config.get("max_tokens", 150),
                 "provider": provider,
+                "run_id": self.config.get("execution_id"),
             }
 
             for key in [
@@ -179,6 +219,7 @@ class GraphAgent(BaseAgent):
                 "compact_threshold",
                 "overflow_llm",
                 "extra_body",
+                "openai_model_endpoints",
             ]:
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]
@@ -213,14 +254,12 @@ class GraphAgent(BaseAgent):
             raw = raw.model_dump()
         override = {k: v for k, v in raw.items() if v is not None}
         if not override:
-            self._active_conversation_llm = self.llm
-            return self.llm
+            return self._activate_conversation_llm(self.llm)
 
-        cache_key = repr(sorted((k, str(v)) for k, v in override.items()))
+        cache_key = self._conversation_cache_key(node, override)
         llm = self._conversation_llm_cache.get(cache_key)
         if llm is not None:
-            self._active_conversation_llm = llm
-            return llm
+            return self._activate_conversation_llm(llm)
 
         node_id = (node or {}).get("id")
         try:
@@ -231,8 +270,7 @@ class GraphAgent(BaseAgent):
             logger.error(f"Conversation LLM override failed for node {node_id!r} ({e}) — using the agent LLM")
             built = None
         if built is None:
-            self._active_conversation_llm = self.llm
-            return self.llm
+            return self._activate_conversation_llm(self.llm)
 
         llm, kwargs = built
         if len(self._conversation_llm_cache) >= self._conversation_llm_cache_max_size:
@@ -244,8 +282,23 @@ class GraphAgent(BaseAgent):
             f"(effort={kwargs.get('reasoning_effort')}, responses_api={kwargs.get('use_responses_api', False)}) "
             f"for node {node_id!r}"
         )
+        return self._activate_conversation_llm(llm)
+
+    def _activate_conversation_llm(self, llm):
+        """Make llm the serving client. One that did not serve the previous turn cannot chain onto it."""
+        if llm is not self._active_conversation_llm:
+            llm.invalidate_response_chain()
         self._active_conversation_llm = llm
         return llm
+
+    def _conversation_cache_key(self, node: Optional[dict], override: dict) -> str:
+        """Nodes share a client only when their override and their own resolved credentials both match."""
+        key = repr(sorted((k, str(v)) for k, v in override.items()))
+        credentials = (self.config.get("node_llm_credentials") or {}).get((node or {}).get("id"))
+        if credentials is not None:
+            # A fingerprint, so no key material sits in a cache key that may be logged.
+            key += hashlib.sha256(json.dumps(credentials, sort_keys=True).encode()).hexdigest()
+        return key
 
     def _prewarm_conversation_overrides(self):
         """Build the override clients at graph load — the nodes are known, and constructing one
@@ -257,7 +310,7 @@ class GraphAgent(BaseAgent):
                 raw = raw.model_dump()
             if not any(v is not None for v in raw.values()):
                 continue
-            key = repr(sorted((k, str(v)) for k, v in raw.items() if v is not None))
+            key = self._conversation_cache_key(node, {k: v for k, v in raw.items() if v is not None})
             if key in seen:
                 continue
             seen.add(key)
@@ -286,14 +339,18 @@ class GraphAgent(BaseAgent):
                 kwargs[key] = override[key]
 
         if switched_provider:
-            # A node carries no credentials of its own, so the only options are the agent's key
-            # (wrong provider) or the platform env default (moves a BYOK customer onto our
-            # account, silently). Neither is acceptable — refuse until nodes can carry their own.
-            logger.error(
-                f"Node {node_id!r} switches provider {agent_provider!r}→{provider!r}, which carries no "
-                f"credentials of its own — override refused, serving the node on the agent LLM"
-            )
-            return None
+            # Only the caller knows which key the customer uses on the node's provider, so without its answer the
+            # override is refused rather than run on the agent's key or a platform default.
+            node_credentials = (self.config.get("node_llm_credentials") or {}).get(node_id)
+            if node_credentials is None:
+                logger.error(
+                    f"Node {node_id!r} switches provider {agent_provider!r}→{provider!r} with no credentials "
+                    f"resolved for it; override refused, serving the node on the agent LLM"
+                )
+                return None
+            for key in AGENT_PROVIDER_BOUND_KWARGS:
+                kwargs.pop(key, None)
+            kwargs.update({k: v for k, v in node_credentials.items() if v})
 
         llm_class = SUPPORTED_LLM_PROVIDERS.get(provider, OpenAiLLM)
         model_changed = "model" in override or switched_provider
@@ -462,7 +519,7 @@ class GraphAgent(BaseAgent):
             # follow_conversation (a PTU swap) overrides these: routing then rides the conversation's own.
             base_kwargs.update({k: v for k, v in explicit_routing_creds.items() if v})
         elif self.routing_provider == conv_provider:
-            for key in ("llm_key", "base_url", "api_version", "extra_body"):
+            for key in ("llm_key", "base_url", "api_version", "extra_body", "openai_model_endpoints"):
                 if self.config.get(key):
                     base_kwargs[key] = self.config[key]
             # Tier and overflow belong to the conversation's backend, so only routing riding it takes them.
@@ -698,9 +755,36 @@ class GraphAgent(BaseAgent):
             else:
                 llm.append(edge)
 
-        deterministic.sort(key=lambda e: e["priority"] if e.get("priority") is not None else 0)
-        llm.sort(key=lambda e: e["priority"] if e.get("priority") is not None else 100)
+        deterministic.sort(key=self._edge_priority)
+        llm.sort(key=self._edge_priority)
         return deterministic, llm
+
+    @staticmethod
+    def _edge_priority(edge: dict) -> int:
+        """The author's priority, else the type default: expression/unconditional 0, intent 100."""
+        if edge.get("priority") is not None:
+            return edge["priority"]
+        if edge.get("condition_type") in (EdgeConditionType.EXPRESSION, EdgeConditionType.UNCONDITIONAL):
+            return 0
+        return 100
+
+    @staticmethod
+    def _is_silence_turn(history: list) -> bool:
+        return bool(history and history[-1].get("content", "").startswith("[silence]"))
+
+    def _intents_outranking(
+        self, node: dict, matched_expression: Optional[dict], intent_edges: list, history: list
+    ) -> list:
+        """Intents outranking the matched expression on a priority node; same-node ones only if they extract."""
+        if matched_expression is None or node.get("edge_order") != EdgeOrder.PRIORITY or self._is_silence_turn(history):
+            return []
+        bar = self._edge_priority(matched_expression)
+        return [
+            edge
+            for edge in intent_edges
+            if self._edge_priority(edge) < bar
+            and (edge["to_node_id"] != matched_expression["to_node_id"] or edge.get("parameters"))
+        ]
 
     def _evaluate_deterministic_edges(self, edges: list) -> Tuple[Optional[dict], List[str]]:
         """Return (first matching deterministic edge or None, per-edge evaluation traces)."""
@@ -745,6 +829,7 @@ class GraphAgent(BaseAgent):
                 self.current_node_entry_index = 0  # caller should set to len(history)
                 self._silence_repeats = 0
                 self._active_node_first_response_delivered = False
+                self._end_node_closed = False
 
                 if self.current_node_id not in self.node_history or self.node_history[-1] != self.current_node_id:
                     self.node_history.append(self.current_node_id)
@@ -808,7 +893,7 @@ class GraphAgent(BaseAgent):
         unconditional = [e for e in node.get("edges", []) if e.get("condition_type") == EdgeConditionType.UNCONDITIONAL]
         if not unconditional:
             return None
-        return min(unconditional, key=lambda e: e["priority"] if e.get("priority") is not None else 0)
+        return min(unconditional, key=GraphAgent._edge_priority)
 
     def _consume_routing_tail(self):
         tail, self._pending_routing_tail = self._pending_routing_tail, None
@@ -867,14 +952,36 @@ class GraphAgent(BaseAgent):
             "is_silence_trigger": is_silence_trigger,
         }
 
+    async def _route_node(
+        self, node: dict, history: list, start_time: float
+    ) -> Tuple[Optional[dict], Optional[dict], str, Optional[tuple], Optional[tuple]]:
+        """One routing pass shared by both paths. Returns (matched, catch_all, eval_trace, decision, declined),
+        where decision/declined is the routing call's result when it chose an edge / chose none."""
+        deterministic_edges, intent_edges = self._classify_edges(node.get("edges", []))
+        catch_all = self._catch_all_edge(node)
+        matched, eval_trace = self._match_expression_edge(node, deterministic_edges)
+        contenders = intent_edges if matched is None else self._intents_outranking(node, matched, intent_edges, history)
+        if not contenders:
+            return matched, catch_all, eval_trace, None, None
+        if matched is not None:
+            eval_trace = f"{eval_trace}; {_OUTRANKING_INTENTS_TRACE}"
+        result = await self._decide_next_node_llm(
+            node, contenders, history, start_time, default_edge=matched or catch_all
+        )
+        next_node_id, *_ = result
+        if next_node_id is not None:
+            return matched, catch_all, eval_trace, result, None
+        return matched, catch_all, eval_trace, None, result
+
     async def _resolve_router_chain(self, history: list) -> List[dict]:
         """Hop silently through routers to a speaking node, one routing_info per hop.
-        Per hop: expression, then one intent-LLM call, then the unconditional catch-all.
+        Per hop: expression, then one intent-LLM call, then the unconditional catch-all. On a
+        router with edge_order "priority", intent edges ranked above the matched expression come first.
         The visited-set bounds the hops so the chain always terminates."""
         hops = []
         visited = set()
         self._begin_routing_turn()
-        is_silence_trigger = bool(history and history[-1].get("content", "").startswith("[silence]"))
+        is_silence_trigger = self._is_silence_turn(history)
 
         while self._node_type_of(self.get_node_by_id(self.current_node_id)) == NodeType.ROUTER:
             if self.current_node_id in visited:
@@ -892,15 +999,9 @@ class GraphAgent(BaseAgent):
             router_node = self.get_node_by_id(self.current_node_id)
             previous_node = self.current_node_id
 
-            deterministic_edges, intent_edges = self._classify_edges(router_node.get("edges", []))
-            catch_all = self._catch_all_edge(router_node)
-            edge, eval_trace = self._match_expression_edge(router_node, deterministic_edges)
+            edge, catch_all, eval_trace, decision, declined = await self._route_node(router_node, history, hop_start)
 
-            # Telemetry from an intent call that returned no match, carried onto the
-            # catch-all hop so its tokens are still counted and the call is still logged.
-            spent_messages = spent_tools = spent_usage = None
-
-            if edge is None and intent_edges:
+            if decision is not None:
                 (
                     next_node_id,
                     extracted_params,
@@ -910,33 +1011,35 @@ class GraphAgent(BaseAgent):
                     reasoning,
                     confidence,
                     routing_usage,
-                ) = await self._decide_next_node_llm(
-                    router_node, intent_edges, history, hop_start, default_edge=catch_all
+                ) = decision
+                self._advance_to_node(next_node_id, entry_index=len(history))
+                self._apply_extracted_params(extracted_params)
+                logger.info(
+                    f"Router dispatch (intent) on node '{previous_node}': -> {self.current_node_id} "
+                    f"| {reasoning} (latency: {latency_ms:.1f}ms)"
                 )
-                if next_node_id:
-                    self._advance_to_node(next_node_id, entry_index=len(history))
-                    self._apply_extracted_params(extracted_params)
-                    logger.info(
-                        f"Router dispatch (intent) on node '{previous_node}': -> {self.current_node_id} "
-                        f"| {reasoning} (latency: {latency_ms:.1f}ms)"
+                hops.append(
+                    self._router_hop_info(
+                        previous_node,
+                        routing_type="llm",
+                        latency_ms=latency_ms,
+                        started_at=hop_started_at,
+                        reasoning=reasoning,
+                        confidence=confidence,
+                        is_silence_trigger=is_silence_trigger,
+                        extracted_params=extracted_params,
+                        routing_messages=routing_messages,
+                        routing_tools=routing_tools,
+                        routing_expression=eval_trace,
+                        routing_usage=routing_usage,
                     )
-                    hops.append(
-                        self._router_hop_info(
-                            previous_node,
-                            routing_type="llm",
-                            latency_ms=latency_ms,
-                            started_at=hop_started_at,
-                            reasoning=reasoning,
-                            confidence=confidence,
-                            is_silence_trigger=is_silence_trigger,
-                            extracted_params=extracted_params,
-                            routing_messages=routing_messages,
-                            routing_tools=routing_tools,
-                            routing_usage=routing_usage,
-                        )
-                    )
-                    continue
-                spent_messages, spent_tools, spent_usage = routing_messages, routing_tools, routing_usage
+                )
+                continue
+
+            # Telemetry from an intent call that returned no match, carried onto the
+            # deterministic hop so its tokens are still counted and the call is still logged.
+            _, _, _, spent_messages, spent_tools, _, _, spent_usage = declined or (None,) * 8
+            if declined is not None:
                 eval_trace = f"{eval_trace}; intent: no match"
 
             if edge is None:
@@ -979,6 +1082,7 @@ class GraphAgent(BaseAgent):
         self.current_node_entry_index = entry_index
         self._silence_repeats = 0
         self._active_node_first_response_delivered = False
+        self._end_node_closed = False
         if not self.node_history or self.node_history[-1] != self.current_node_id:
             self.node_history.append(self.current_node_id)
 
@@ -1017,7 +1121,7 @@ class GraphAgent(BaseAgent):
         return (
             self._hold_until_first_delivery
             and node is not None
-            and self._node_type_of(node) == NodeType.LLM
+            and self._node_type_of(node) in (NodeType.LLM, NodeType.STATIC)
             and not self._active_node_first_response_delivered
         )
 
@@ -1068,15 +1172,29 @@ class GraphAgent(BaseAgent):
         Optional[float],
         Optional[dict],
     ]:
-        """LLM routing over the intent edges. A default_edge (the catch-all) is offered as
-        a described transition instead of stay_on_current_node, so the model commits."""
+        """LLM routing over the intent edges. A default_edge (the catch-all or a matched expression) is
+        offered as a described transition instead of stay_on_current_node, so the model commits."""
         option_edges = list(llm_edges)
         if default_edge is not None:
             # Always mark the default so the model can tell it apart from the intent edges,
             # appending the author's condition/description when there is one.
             hint = default_edge.get("function_description") or default_edge.get("condition")
             marker = "Default route: choose this only when none of the other transitions apply."
-            default_edge = {**default_edge, "function_description": f"{marker} {hint}" if hint else marker}
+            name = self._edge_function_name(default_edge)
+            if default_edge.get("condition_type") == EdgeConditionType.EXPRESSION:
+                # Fixed text keeps the routing prompt prefix cacheable.
+                marker = (
+                    "Default route: a rule on this node already chose this transition. "
+                    "Choose another transition only when the caller clearly asks for it."
+                )
+                # A same-node intent needs a distinct name to keep its parameters.
+                if any(self._edge_function_name(edge) == name for edge in llm_edges):
+                    name = f"{name}_default"
+            default_edge = {
+                **default_edge,
+                "function_name": name,
+                "function_description": f"{marker} {hint}" if hint else marker,
+            }
             option_edges.append(default_edge)
         tools = self._build_transition_tools_for_edges(option_edges, allow_stay=default_edge is None)
 
@@ -1238,12 +1356,17 @@ class GraphAgent(BaseAgent):
         # Inject time variables and turn counts for expression evaluation
         self._enrich_routing_context(history)
 
-        deterministic_edges, intent_edges = self._classify_edges(edges)
-        catch_all = self._catch_all_edge(current_node)
+        matched_edge, catch_all, self._last_deterministic_eval, decision, declined = await self._route_node(
+            current_node, history, start_time
+        )
+        if decision is not None:
+            return decision
+        # A declined call's telemetry rides on the deterministic result.
+        _, _, declined_latency_ms, r_messages, r_tools, _, _, r_usage = declined or (None,) * 8
 
-        # Tier 1: expression edges
-        matched_edge, self._last_deterministic_eval = self._match_expression_edge(current_node, deterministic_edges)
         if matched_edge:
+            if declined is not None:
+                self._last_deterministic_eval = f"{self._last_deterministic_eval}; intent: no match"
             latency_ms = (time.perf_counter() - start_time) * 1000
             ct = matched_edge.get("condition_type", EdgeConditionType.EXPRESSION)
             reasoning = f"{_DETERMINISTIC_REASONING_PREFIX}{ct}:{matched_edge.get('condition', ct)}"
@@ -1251,47 +1374,28 @@ class GraphAgent(BaseAgent):
                 f"Routing decision (expression) on node '{self.current_node_id}': "
                 f"-> {matched_edge['to_node_id']} | {self._last_deterministic_eval} (latency: {latency_ms:.1f}ms)"
             )
-            return matched_edge["to_node_id"], None, latency_ms, None, None, reasoning, 1.0, None
+            return matched_edge["to_node_id"], None, latency_ms, r_messages, r_tools, reasoning, 1.0, r_usage
 
-        # Tier 2: intent edges via one LLM call; the catch-all is offered as the default (no stay).
-        if intent_edges:
-            result = await self._decide_next_node_llm(
-                current_node, intent_edges, history, start_time, default_edge=catch_all
-            )
-            if result[0] is not None:
-                return result
-            if catch_all is not None:
-                # LLM declined: advance via the default, carrying the spent telemetry.
-                latency_ms, r_messages, r_tools, r_usage = result[2], result[3], result[4], result[7]
-                self._last_deterministic_eval = f"intent: no match; default -> {catch_all['to_node_id']}"
-                return (
-                    catch_all["to_node_id"],
-                    None,
-                    latency_ms,
-                    r_messages,
-                    r_tools,
-                    self._catch_all_reasoning(catch_all),
-                    1.0,
-                    r_usage,
-                )
-            return result  # no default: stay
-
-        # Tier 3: no intent edges, take the default if present, else stay.
         if catch_all is not None:
-            latency_ms = (time.perf_counter() - start_time) * 1000
-            self._last_deterministic_eval = f"default -> {catch_all['to_node_id']}"
+            if declined is not None:
+                latency_ms = declined_latency_ms
+                self._last_deterministic_eval = f"intent: no match; default -> {catch_all['to_node_id']}"
+            else:
+                latency_ms = (time.perf_counter() - start_time) * 1000
+                self._last_deterministic_eval = f"default -> {catch_all['to_node_id']}"
             return (
                 catch_all["to_node_id"],
                 None,
                 latency_ms,
-                None,
-                None,
+                r_messages,
+                r_tools,
                 self._catch_all_reasoning(catch_all),
                 1.0,
-                None,
+                r_usage,
             )
 
-        return None, None, 0, None, None, None, None, None
+        # No default: stay.
+        return declined if declined is not None else (None, None, 0, None, None, None, None, None)
 
     def get_node_by_id(self, node_id: str) -> Optional[dict]:
         return next((node for node in self.config.get("nodes", []) if node["id"] == node_id), None)
@@ -1356,6 +1460,10 @@ class GraphAgent(BaseAgent):
         fn = current_node.get("function_call")
         if not fn:
             return None
+        # Forcing end_call hangs up before the node speaks; the closing turn speaks and then hangs up instead,
+        # and "none" keeps end_call offered (an empty tools list breaks Anthropic) without letting the model end first.
+        if fn == END_CALL_FUNCTION_PREFIX:
+            return "none" if self._ends_call(current_node) else None
 
         missing = self._missing_forced_function_vars(current_node, fn)
         if missing:
@@ -1440,6 +1548,42 @@ class GraphAgent(BaseAgent):
             return False
         return any(msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids_for_fn for msg in node_history)
 
+    def _ends_call(self, node: Optional[dict]) -> bool:
+        # Only the first reply of a visit closes; once a barge-in keeps the call up, the node converses
+        # normally and the model ends the call through the end_call tool when the caller is done.
+        return bool(
+            node
+            and node.get("function_call") == END_CALL_FUNCTION_PREFIX
+            and not self._end_node_closed
+            and self.llm
+            and getattr(self.llm, "trigger_function_call", False)
+        )
+
+    async def _stream_node_reply(self, node_llm, node, messages, meta_info, synthesize, tool_choice, tools):
+        """Stream the node's reply; on an end_call node's closing turn, flag it so the task manager
+        hangs up once the reply has played."""
+        ends_call = self._ends_call(node)
+        if ends_call:
+            # A chained Responses request does not resend the system prompt, which carries the closing instruction.
+            node_llm.invalidate_response_chain()
+        spoke = False
+        async for chunk in node_llm.generate_stream(
+            messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=tools
+        ):
+            if ends_call and isinstance(chunk, LLMStreamChunk):
+                if chunk.is_function_call:
+                    ends_call = False  # another tool ran first; the follow-up turn on this node closes
+                    if str(getattr(chunk.data, "called_fun", "")).startswith(END_CALL_FUNCTION_PREFIX):
+                        # The model ended the call itself (Gemini ignores tool_choice); never close a second time.
+                        self._end_node_closed = True
+                elif isinstance(chunk.data, str) and chunk.data.strip():
+                    spoke = True
+            yield chunk
+        # An empty reply leaves the node open, so its next turn closes instead of hanging up in silence.
+        if ends_call and spoke and meta_info is not None:
+            meta_info[HANGUP_AFTER_REPLY] = True
+            self._end_node_closed = True
+
     def _prompt_context(self) -> Optional[dict]:
         """Context for prompt substitution with time frozen at call start.
 
@@ -1471,6 +1615,10 @@ class GraphAgent(BaseAgent):
         prompt_context = self._prompt_context()
         if prompt_context:
             node_prompt = update_prompt_with_context(node_prompt, prompt_context)
+        # The call ends after this reply, so a question here would be cut off by the hangup. Part of the
+        # system prompt, not its own message: Gemini keeps only the last system message.
+        if self._ends_call(current_node):
+            node_prompt = f"{node_prompt}\n\n{_END_NODE_INSTRUCTION}"
 
         if self.agent_information:
             agent_info = self.agent_information
@@ -1480,9 +1628,13 @@ class GraphAgent(BaseAgent):
         else:
             prompt = node_prompt
 
-        # Labels the turns that follow as messages, so they read as the call so far and not
-        # as more instructions.
-        prompt = f"{prompt}\n\n## Conversation History"
+        # Right after a language switch the earlier turns go into the prompt as a transcript instead
+        # (set by TaskManager, which keeps routing on the full history).
+        prompt_transcript = bool(meta_info and meta_info.get("prompt_transcript"))
+        if not prompt_transcript:
+            # Labels the turns that follow as messages, so they read as the call so far and not
+            # as more instructions.
+            prompt = f"{prompt}\n\n## Conversation History"
 
         # RAG depends on the latest message, so it goes in a trailing message rather
         # than the system prompt, keeping [system + history] a cacheable prefix.
@@ -1527,20 +1679,26 @@ class GraphAgent(BaseAgent):
         messages = [{"role": "system", "content": prompt}] + conversation
         if rag_message:
             messages.append(rag_message)
-        return messages
+        return with_prompt_transcript(messages) if prompt_transcript else messages
 
     def _static_message_chunk(self, current_node: Optional[dict]) -> Optional[dict]:
         """Resolve a static node's message for the active language and build its
         playback chunk: context-substituted text plus the audio-cache hash. None if empty."""
+        # Until the caller's language is detected, a call opened by its static start node keeps the opening's language.
         text = select_message_by_language(
             current_node.get("static_message") if current_node else None,
-            self.context_data.get("detected_language"),
+            self.context_data.get("detected_language") or self.config.get("opening_language"),
         )
         if not text:
             return None
         if self.context_data:
             text = update_prompt_with_context(text, self.context_data)
-        return {"static_message": text, "static_audio_hash": get_md5_hash(text)}
+        return {
+            "static_message": text,
+            "static_audio_hash": get_md5_hash(text),
+            # No model runs on a static node, so every play of an end_call node closes the call.
+            HANGUP_AFTER_REPLY: static_node_ends_call(current_node),
+        }
 
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator:
         meta_info = kwargs.get("meta_info", {})
@@ -1614,16 +1772,16 @@ class GraphAgent(BaseAgent):
                 )
                 yield {"messages": messages}
                 tool_choice = self._get_tool_choice_for_node(history=message)
-                forced_name = tool_choice["function"]["name"] if tool_choice else None
+                forced_name = tool_choice["function"]["name"] if isinstance(tool_choice, dict) else None
                 node_tools = self._tools_for_node(current_node, forced_name)
                 node_llm = self._conversation_llm_for(current_node)
-                async for chunk in node_llm.generate_stream(
-                    messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
+                async for chunk in self._stream_node_reply(
+                    node_llm, current_node, messages, meta_info, synthesize, tool_choice, node_tools
                 ):
                     yield chunk
                 return
 
-            is_silence_trigger = bool(message and message[-1].get("content", "").startswith("[silence]"))
+            is_silence_trigger = self._is_silence_turn(message)
             if is_silence_trigger:
                 self._silence_repeats += 1
 
@@ -1671,13 +1829,12 @@ class GraphAgent(BaseAgent):
                         "current_node": self.current_node_id,
                         "transitioned": next_node_id is not None,
                         "routing_type": routing_type,
-                        "routing_model": self._last_routing_model if routing_type == "llm" else self.routing_model,
+                        # Reset each turn, so this names the model any routing call this turn ran on.
+                        "routing_model": self._last_routing_model,
                         "routing_provider": getattr(self, "routing_provider", None),
                         "routing_latency_ms": round(routing_latency_ms, 1),
                         "routing_started_at": routing_started_at,
-                        "routing_reasoning_effort": self._last_routing_effort
-                        if routing_type == "llm"
-                        else getattr(self, "_routing_reasoning_effort_used", None),
+                        "routing_reasoning_effort": self._last_routing_effort,
                         "extracted_params": extracted_params or {},
                         "node_history": list(self.node_history),
                         "routing_messages": routing_messages,
@@ -1716,11 +1873,11 @@ class GraphAgent(BaseAgent):
             messages = await self._build_messages(message, meta_info=meta_info)
             yield {"messages": messages}
             tool_choice = self._get_tool_choice_for_node(history=message)
-            forced_name = tool_choice["function"]["name"] if tool_choice else None
+            forced_name = tool_choice["function"]["name"] if isinstance(tool_choice, dict) else None
             node_tools = self._tools_for_node(current_node, forced_name)
             node_llm = self._conversation_llm_for(current_node)
-            async for chunk in node_llm.generate_stream(
-                messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
+            async for chunk in self._stream_node_reply(
+                node_llm, current_node, messages, meta_info, synthesize, tool_choice, node_tools
             ):
                 yield chunk
 

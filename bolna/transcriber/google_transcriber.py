@@ -23,6 +23,9 @@ class GoogleTranscriber(BaseTranscriber):
     Uses threading to bridge async input_queue with blocking gRPC streaming.
     """
 
+    # toggle_connection joins the gRPC thread on the event loop, which stalls it for up to 2 s.
+    reopens_mid_call = False
+
     def __init__(
         self,
         telephony_provider,

@@ -354,6 +354,8 @@ def _make_transfer_self(tool_conf):
     # The POST itself lives in _execute_transfer_call_webhook; bind the real one so the
     # branch still runs end to end.
     me._execute_transfer_call_webhook = types.MethodType(TaskManager._execute_transfer_call_webhook, me)
+    me._is_trunk_call = types.MethodType(TaskManager._is_trunk_call, me)
+    me._transfer_provider = types.MethodType(TaskManager._transfer_provider, me)
     return me
 
 

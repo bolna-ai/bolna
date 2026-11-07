@@ -5,6 +5,7 @@ import os
 import time
 import traceback
 import uuid
+from collections import deque
 
 import aiohttp
 import websockets
@@ -13,10 +14,17 @@ from websockets.exceptions import InvalidHandshake
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
-from bolna.helpers.utils import create_ws_data_packet, get_synth_audio_format, resample, wav_bytes_to_pcm
+from bolna.helpers.utils import (
+    StreamingPcmResampler,
+    create_ws_data_packet,
+    get_synth_audio_format,
+    resample,
+    wav_bytes_to_pcm,
+)
 from bolna.constants import (
     SARVAM_LOUDNESS_MAX,
     SARVAM_LOUDNESS_MIN,
+    SARVAM_LOUDNESS_MODELS,
     SARVAM_MODEL_SAMPLING_RATE_MAPPING,
     SARVAM_STREAMING_WAV_HEADER_MODELS,
     SARVAM_TTS_SUPPORTED_LANGUAGES,
@@ -55,6 +63,12 @@ class SarvamSynthesizer(StreamSynthesizer):
 
         self.sampling_rate = int(sampling_rate)
         self.original_sampling_rate = SARVAM_MODEL_SAMPLING_RATE_MAPPING.get(model, None)
+        # Built on first raw-PCM chunk, once the stream header has confirmed the source rate.
+        self.stream_resampler = None
+        self.stream_resampler_rate = None
+        # (socket, sequence_id) per flush sent. Sarvam has no per-turn cancel, so each flush ends in a
+        # `final`, an abandoned turn's included, and the oldest entry owns the next one.
+        self.flushed_sequences = deque()
         self.api_url = "https://api.sarvam.ai/text-to-speech"
         self.ws_url = f"wss://api.sarvam.ai/text-to-speech/ws?model={model}&send_completion_event=true"
 
@@ -76,9 +90,43 @@ class SarvamSynthesizer(StreamSynthesizer):
     def _get_audio_format(self):
         return "wav"
 
+    def _unpack_receiver_message(self, item):
+        return item if isinstance(item, tuple) else (item, {})
+
+    def take_flush_owner(self, socket):
+        """Sequence whose flush this `final` on `socket` answers. Flushes on a replaced socket never get one."""
+        while self.flushed_sequences:
+            flushed_socket, sequence_id = self.flushed_sequences.popleft()
+            if flushed_socket is socket:
+                return sequence_id
+        return None
+
     def _process_audio_chunk(self, chunk):
-        """Detect format, resample, convert WAV to PCM."""
-        return self._process_audio_data(chunk)
+        """WS chunk. Raw PCM after the stream header is one continuous stream, resampled as such;
+        per-chunk resampling clicks at every chunk edge. Anything else converts on its own."""
+        if self.original_sampling_rate is None or get_synth_audio_format(chunk) != "pcm":
+            return self._process_audio_data(chunk)
+        if self.stream_resampler is None or self.stream_resampler_rate != self.original_sampling_rate:
+            self.stream_resampler = StreamingPcmResampler(self.original_sampling_rate, int(self.sampling_rate))
+            self.stream_resampler_rate = self.original_sampling_rate
+        try:
+            return self.stream_resampler.process(chunk) or None
+        except Exception as e:
+            logger.error(f"Error in resampling audio: {e}")
+            return None
+
+    def _process_http_audio(self, audio):
+        """A complete HTTP clip converts in one pass, outside the WS stream."""
+        return self._process_audio_data(audio)
+
+    def reset_stream_resampler(self):
+        # A finished or abandoned turn's held-back samples must not lead the next turn.
+        if self.stream_resampler is not None:
+            self.stream_resampler.reset()
+
+    async def handle_interruption(self):
+        self.reset_stream_resampler()
+        await super().handle_interruption()
 
     def _process_audio_data(self, audio):
         fmt = get_synth_audio_format(audio)
@@ -138,6 +186,7 @@ class SarvamSynthesizer(StreamSynthesizer):
             if end_of_llm_stream:
                 self.last_text_sent = True
                 try:
+                    self.flushed_sequences.append((self.websocket, sequence_id))
                     await self._send_json({"type": "flush"})
                 except Exception as e:
                     logger.info(f"Error sending end-of-stream signal: {e}")
@@ -159,6 +208,7 @@ class SarvamSynthesizer(StreamSynthesizer):
                     # A socket dying between recvs surfaces here, not below. self.websocket is
                     # still the dead one — once monitor_connection swaps it, this branch is skipped.
                     if self.has_unsettled_turn_on(self.websocket):
+                        self.reset_stream_resampler()
                         yield b"\x00"
                     if self.connection_error:
                         return
@@ -190,6 +240,12 @@ class SarvamSynthesizer(StreamSynthesizer):
 
                 event_type = data.get("data", {}).get("event_type") or data.get("event_type")
                 if event_type == "final":
+                    self.reset_stream_resampler()
+                    owner = self.take_flush_owner(draining_ws)
+                    if owner is not None and not self.should_synthesize_response(owner):
+                        # An abandoned turn's final: the turn now streaming keeps its flag and its own eos.
+                        yield b"\x00", {"retired_sequence_id": owner}
+                        continue
                     self.last_text_sent = False
                     yield b"\x00"
                     continue
@@ -209,6 +265,7 @@ class SarvamSynthesizer(StreamSynthesizer):
                 # marked in progress for the rest of the call.
                 if self.has_unsettled_turn_on(draining_ws):
                     logger.error("Sarvam WebSocket dropped mid-turn, ending the turn")
+                    self.reset_stream_resampler()
                     yield b"\x00"
                 await asyncio.sleep(0.05)
             except Exception as e:
@@ -229,7 +286,7 @@ class SarvamSynthesizer(StreamSynthesizer):
             "max_chunk_length": 250,
             "min_buffer_size": self.buffer_size,
         }
-        if self.model == "bulbul:v2":
+        if self.model in SARVAM_LOUDNESS_MODELS:
             data.update({"pitch": self.pitch, "loudness": self.loudness})
         return {"type": "config", "data": data}
 
@@ -305,15 +362,12 @@ class SarvamSynthesizer(StreamSynthesizer):
             "text": text,
             "speaker": self.voice_id,
             "pace": self.pace,
-            "pitch": self.pitch,
-            "loudness": self.loudness,
             "speech_sample_rate": self.sampling_rate,
             "enable_preprocessing": self.enable_preprocessing,
             "model": self.model,
         }
-        if self.model == "bulbul:v3":
-            payload.pop("pitch")
-            payload.pop("loudness")
+        if self.model in SARVAM_LOUDNESS_MODELS:
+            payload.update({"pitch": self.pitch, "loudness": self.loudness})
         return payload
 
     async def _generate_http(self, text):
