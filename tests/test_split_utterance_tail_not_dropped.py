@@ -8,6 +8,7 @@ tail and supersedes the in-flight turn, so dropping it would lose the user's rea
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.agent_manager.interruption_manager import InterruptionManager
@@ -44,6 +45,11 @@ def _make_tm(*, audio_playing, response_in_pipeline, function_call_in_flight=Fal
     tm._TaskManager__cleanup_downstream_tasks = AsyncMock()
     tm._end_call_on_component_error = AsyncMock()
     tm._report_component_health = AsyncMock()
+    tm.transcriber_duration = 0
+    tm._log_transcriber_connection_error = AsyncMock()
+    tm._TaskManager__process_http_transcription = AsyncMock(
+        wraps=TaskManager._TaskManager__process_http_transcription.__get__(tm, TaskManager)
+    )
     tm.task_config = {"tools_config": {"transcriber": {"provider": "deepgram"}}}
     tm._should_ignore_transcriber_input = TaskManager._should_ignore_transcriber_input.__get__(tm, TaskManager)
     tm._listen_transcriber = TaskManager._listen_transcriber.__get__(tm, TaskManager)
@@ -89,3 +95,65 @@ async def test_long_final_processed_while_audio_playing():
     }
     await _drive(tm, long_final)
     tm._handle_transcriber_output.assert_awaited_once()
+
+
+async def _drive_event_and_close(tm, data):
+    message = {"data": data, "meta_info": _TAIL_FINAL["meta_info"].copy()}
+    await tm.transcriber_output_queue.put(message)
+    await tm.transcriber_output_queue.put(
+        {"data": "transcriber_connection_closed", "meta_info": {"transcriber_duration": 2.5}}
+    )
+    await asyncio.wait_for(tm._listen_transcriber(), timeout=1)
+    assert tm.transcriber_duration == 2.5
+    tm._log_transcriber_connection_error.assert_awaited_once_with(None)
+    tm._end_call_on_component_error.assert_not_awaited()
+    return message
+
+
+@pytest.mark.parametrize("tts_stream", [False, True])
+@pytest.mark.parametrize(
+    "data",
+    [
+        "speech_started",
+        "session_started",
+        "transcriber_error",
+        {"type": "transcript", "content": "Please continue"},
+    ],
+)
+async def test_asr_events_do_not_use_http_transcription(tts_stream, data):
+    # ASR event packets must not become user text when speech output is buffered.
+    tm = _make_tm(audio_playing=False, response_in_pipeline=False)
+    tm.stream = tts_stream
+    message = await _drive_event_and_close(tm, data)
+
+    tm._TaskManager__process_http_transcription.assert_not_awaited()
+    if isinstance(data, dict):
+        tm._handle_transcriber_output.assert_awaited_once_with("llm", data["content"], message["meta_info"])
+    else:
+        tm._handle_transcriber_output.assert_not_awaited()
+    assert tm.stream is tts_stream
+
+
+@pytest.mark.parametrize("tts_stream", [False, True])
+@pytest.mark.parametrize("data", ["speech_ended", {"type": "speech_ended"}])
+async def test_both_speech_end_formats_reset_speaking_state(tts_stream, data):
+    # Sarvam can emit a bare string; other adapters use a typed event packet.
+    tm = _make_tm(audio_playing=False, response_in_pipeline=False)
+    tm.stream = tts_stream
+    tm._speech_started_before_welcome = True
+    tm.interruption_manager.on_user_speech_started()
+    await _drive_event_and_close(tm, data)
+
+    assert tm.interruption_manager.callee_speaking is False
+    assert tm._speech_started_before_welcome is False
+    tm._TaskManager__process_http_transcription.assert_not_awaited()
+    tm._handle_transcriber_output.assert_not_awaited()
+
+
+async def test_plain_http_transcript_still_reaches_conversation():
+    tm = _make_tm(audio_playing=False, response_in_pipeline=False)
+    tm.stream = False
+    message = await _drive_event_and_close(tm, "Please continue")
+
+    tm._TaskManager__process_http_transcription.assert_awaited_once_with(message)
+    tm._handle_transcriber_output.assert_awaited_once_with("llm", "Please continue", message["meta_info"])
