@@ -17,6 +17,7 @@ from bolna.helpers.utils import (
     convert_audio_to_wav,
     create_ws_data_packet,
     pcm_to_ulaw,
+    pcm_to_wav_bytes,
     resample,
 )
 
@@ -63,6 +64,8 @@ class OPENAISynthesizer(BaseSynthesizer):
         # Only a customer's endpoint takes extra params; OpenAI's own API never gets them.
         self.extra_body = extra_body if endpoint else None
         # Only our own servers are told the language; a customer's server never asked for the field.
+        self.platform_endpoint = platform_endpoint
+        self.pcm_sample_rate = int(pcm_sample_rate)
         self.language = _primary_language(language) if platform_endpoint else None
         self._endpoint_checked = endpoint is None or platform_endpoint
         http_client = DefaultAsyncHttpxClient(follow_redirects=False) if endpoint else None
@@ -76,7 +79,7 @@ class OPENAISynthesizer(BaseSynthesizer):
         self.use_mulaw = kwargs.get("use_mulaw", False)
         if self.streams_pcm:
             target_rate = MULAW_SAMPLE_RATE if self.use_mulaw else self.sample_rate
-            self.pcm_resampler = StreamingPcmResampler(int(pcm_sample_rate), target_rate)
+            self.pcm_resampler = StreamingPcmResampler(self.pcm_sample_rate, target_rate)
             self._pcm_carry = b""
             self._interruptions = 0
             self._chunk_read = None
@@ -149,12 +152,12 @@ class OPENAISynthesizer(BaseSynthesizer):
             raise SSRFError(f"Custom TTS endpoint rejected: {reason}") from None
         self._endpoint_checked = True
 
-    async def _generate_http(self, text):
+    async def _generate_http(self, text, response_format="mp3"):
         await self._check_endpoint()
         spoken_response = await self.async_client.audio.speech.create(
             model=self.model,
             voice=self.voice,
-            response_format="mp3",
+            response_format=response_format,
             input=text,
             speed=self.speed,
             extra_body=self._request_extras(),
@@ -166,7 +169,11 @@ class OPENAISynthesizer(BaseSynthesizer):
         return buffer.getvalue()
 
     async def synthesize(self, text):
-        return await self._generate_http(text)
+        if not self.platform_endpoint:
+            return await self._generate_http(text)
+        # Callers of our own servers get WAV, whose header carries the rate; they decode nothing else for it.
+        audio = await self._generate_http(text, response_format="pcm")
+        return pcm_to_wav_bytes(audio, sample_rate=self.pcm_sample_rate) if audio else None
 
     # ------------------------------------------------------------------
     # generate / push — use base _generate_http_loop

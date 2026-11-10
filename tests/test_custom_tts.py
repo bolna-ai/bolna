@@ -376,6 +376,15 @@ class TestBolnaProvider:
         await synth.set_target_language("kn-IN")
         assert synth._request_extras() == {"language": "kn"}
 
+    async def test_a_one_shot_render_is_wav_at_the_servers_rate(self, monkeypatch):
+        synth = self._bolna(monkeypatch)
+        create = AsyncMock(return_value=MagicMock(iter_bytes=lambda chunk_size: [b"\x01\x00\x02\x00"]))
+        synth.async_client.audio.speech.create = create
+        clip = await synth.synthesize("hello")
+        assert clip[:4] == b"RIFF" and clip.endswith(b"\x01\x00\x02\x00")
+        assert int.from_bytes(clip[24:28], "little") == 24000
+        assert create.call_args.kwargs["response_format"] == "pcm"
+
     def test_a_customer_endpoint_is_never_sent_a_language(self):
         assert _custom_tts(language="hi")._request_extras() is None
 
