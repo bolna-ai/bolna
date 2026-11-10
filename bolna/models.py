@@ -726,6 +726,8 @@ class GraphNodeLlmOverride(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     reasoning_effort: Optional[ReasoningEffort] = None
+    # Whose key the node runs on; the caller resolves it into node_llm_credentials. None follows the agent.
+    managed_by: Optional[Literal["bolna", "user"]] = None
 
     @model_validator(mode="after")
     def validate_effort_for_model(self):

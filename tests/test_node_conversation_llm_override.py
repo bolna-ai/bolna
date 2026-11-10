@@ -546,3 +546,56 @@ def test_nodes_with_the_same_override_and_credentials_share_one_client():
         a = agent._conversation_llm_for({"id": "a", "llm_config": AZURE_OVERRIDE})
         b = agent._conversation_llm_for({"id": "b", "llm_config": AZURE_OVERRIDE})
     assert a is b and a is not agent.llm
+
+
+# ------------------------------------------------------------------ managed_by: whose key a node runs on
+
+
+def test_the_node_schema_keeps_managed_by():
+    node = GraphNode(id="n1", prompt="hi", llm_config={"managed_by": "user"})
+    assert node.model_dump()["llm_config"]["managed_by"] == "user"
+
+
+def test_the_node_schema_rejects_an_unknown_managed_by():
+    with pytest.raises(ValueError):
+        GraphNode(id="n1", prompt="hi", llm_config={"managed_by": "someone"})
+
+
+def test_managed_by_alone_with_no_credentials_reuses_the_agent_llm():
+    with _agent() as agent:
+        assert agent._conversation_llm_for({"id": "n1", "llm_config": {"managed_by": "bolna"}}) is agent.llm
+        assert agent._conversation_llm_cache == {}
+
+
+def test_credentials_on_the_agents_own_provider_rekey_the_node():
+    with _agent(
+        service_tier="priority",
+        overflow_llm={"api_key": "o", "base_url": "https://o.example", "model": "m"},
+        node_llm_credentials={"n1": {"llm_key": "customer-openai-key"}},
+    ) as agent:
+        llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"managed_by": "user"}})
+    assert llm is not agent.llm
+    kwargs = llm.captured_kwargs
+    assert kwargs["provider"] == "openai"
+    assert kwargs["model"] == "gpt-4.1-mini"
+    assert kwargs["llm_key"] == "customer-openai-key"
+    # The agent's endpoint and our account's settings do not carry over onto another key.
+    assert not {"base_url", "service_tier", "overflow_llm"} & kwargs.keys()
+    assert "managed_by" not in kwargs
+
+
+def test_a_same_provider_model_override_without_credentials_still_inherits_the_agent_key():
+    with _agent(node_llm_credentials={"other": {"llm_key": "k"}}) as agent:
+        llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"model": "gpt-5", "managed_by": "user"}})
+    assert llm.captured_kwargs["llm_key"] == "conv-key"
+    assert "managed_by" not in llm.captured_kwargs
+
+
+def test_a_node_rekeyed_on_the_agents_provider_is_prewarmed():
+    nodes = [
+        {"id": "a", "prompt": "hi", "edges": [], "llm_config": {"managed_by": "user"}},
+        {"id": "b", "prompt": "hi", "edges": [], "llm_config": {"managed_by": "bolna"}},
+    ]
+    with _agent(nodes=nodes, current_node_id="a", node_llm_credentials={"a": {"llm_key": "customer"}}) as agent:
+        assert len(agent._conversation_llm_cache) == 1
+        assert agent.current_conversation_llm() is agent.llm

@@ -71,6 +71,9 @@ AGENT_PROVIDER_BOUND_KWARGS = (
     "overflow_llm",
     "openai_model_endpoints",
 )
+# Node llm_config fields that choose whose key the node runs on. The caller resolves them into
+# node_llm_credentials, so they are never client kwargs and alone do not make a node override anything.
+NODE_KEY_CHOICE_FIELDS = frozenset({"managed_by"})
 
 load_dotenv()
 logger = configure_logger(__name__)
@@ -247,13 +250,8 @@ class GraphAgent(BaseAgent):
         Unset fields inherit; the agent-level LLM is returned untouched when a node overrides
         nothing, so the common path allocates nothing and behaves exactly as before.
         """
-        raw = (node or {}).get("llm_config") or {}
-        # Nodes reach us as dicts, but a shallow dict() of a validated config leaves this one nested
-        # model intact — and an AttributeError here would kill the turn.
-        if hasattr(raw, "model_dump"):
-            raw = raw.model_dump()
-        override = {k: v for k, v in raw.items() if v is not None}
-        if not override:
+        override = self._node_override(node)
+        if not override and self._node_credentials(node) is None:
             return self._activate_conversation_llm(self.llm)
 
         cache_key = self._conversation_cache_key(node, override)
@@ -291,10 +289,23 @@ class GraphAgent(BaseAgent):
         self._active_conversation_llm = llm
         return llm
 
+    @staticmethod
+    def _node_override(node: Optional[dict]) -> dict:
+        """The node's set llm_config fields that shape its client."""
+        raw = (node or {}).get("llm_config") or {}
+        # Nodes reach us as dicts, but a shallow dict() of a validated config leaves this one nested
+        # model intact — and an AttributeError here would kill the turn.
+        if hasattr(raw, "model_dump"):
+            raw = raw.model_dump()
+        return {k: v for k, v in raw.items() if v is not None and k not in NODE_KEY_CHOICE_FIELDS}
+
+    def _node_credentials(self, node: Optional[dict]) -> Optional[dict]:
+        return (self.config.get("node_llm_credentials") or {}).get((node or {}).get("id"))
+
     def _conversation_cache_key(self, node: Optional[dict], override: dict) -> str:
         """Nodes share a client only when their override and their own resolved credentials both match."""
         key = repr(sorted((k, str(v)) for k, v in override.items()))
-        credentials = (self.config.get("node_llm_credentials") or {}).get((node or {}).get("id"))
+        credentials = self._node_credentials(node)
         if credentials is not None:
             # A fingerprint, so no key material sits in a cache key that may be logged.
             key += hashlib.sha256(json.dumps(credentials, sort_keys=True).encode()).hexdigest()
@@ -305,12 +316,10 @@ class GraphAgent(BaseAgent):
         opens a socket in Responses mode, which would otherwise land in a turn's first-token path."""
         seen = set()
         for node in self.config.get("nodes", []) or []:
-            raw = (node or {}).get("llm_config") or {}
-            if hasattr(raw, "model_dump"):
-                raw = raw.model_dump()
-            if not any(v is not None for v in raw.values()):
+            override = self._node_override(node)
+            if not override and self._node_credentials(node) is None:
                 continue
-            key = self._conversation_cache_key(node, {k: v for k, v in raw.items() if v is not None})
+            key = self._conversation_cache_key(node, override)
             if key in seen:
                 continue
             seen.add(key)
@@ -338,16 +347,17 @@ class GraphAgent(BaseAgent):
             if key in override:
                 kwargs[key] = override[key]
 
-        if switched_provider:
+        node_credentials = (self.config.get("node_llm_credentials") or {}).get(node_id)
+        if switched_provider and node_credentials is None:
             # Only the caller knows which key the customer uses on the node's provider, so without its answer the
             # override is refused rather than run on the agent's key or a platform default.
-            node_credentials = (self.config.get("node_llm_credentials") or {}).get(node_id)
-            if node_credentials is None:
-                logger.error(
-                    f"Node {node_id!r} switches provider {agent_provider!r}→{provider!r} with no credentials "
-                    f"resolved for it; override refused, serving the node on the agent LLM"
-                )
-                return None
+            logger.error(
+                f"Node {node_id!r} switches provider {agent_provider!r}→{provider!r} with no credentials "
+                f"resolved for it; override refused, serving the node on the agent LLM"
+            )
+            return None
+        if node_credentials is not None:
+            # Resolved for this node, so they win even on the agent's provider: the node may run on another key.
             for key in AGENT_PROVIDER_BOUND_KWARGS:
                 kwargs.pop(key, None)
             kwargs.update({k: v for k, v in node_credentials.items() if v})
