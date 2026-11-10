@@ -1,3 +1,5 @@
+import os
+
 from .synthesizer import (
     PollySynthesizer,
     ElevenlabsSynthesizer,
@@ -74,6 +76,17 @@ def custom_synthesizer(**kwargs):
     return OPENAISynthesizer(endpoint=endpoint, **kwargs)
 
 
+def bolna_synthesizer(**kwargs):
+    """Our own TTS on the OpenAI synthesizer, streamed, at the endpoint in the server's environment."""
+    endpoint = os.getenv("SPEECH_SYNTHESIZER_URL", "").replace("{model}", kwargs.get("model") or "")
+    if not endpoint:
+        raise ValueError("SPEECH_SYNTHESIZER_URL is not set")
+    kwargs["synthesizer_key"] = os.getenv("SPEECH_SYNTHESIZER_KEY") or "none"
+    kwargs["voice"] = kwargs.pop("voice_id", None) or kwargs.get("voice")
+    kwargs.pop("synthesizer_base_url", None)
+    return OPENAISynthesizer(endpoint=endpoint, response_format="pcm", platform_endpoint=True, **kwargs)
+
+
 SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.POLLY.value: PollySynthesizer,
     SynthesizerProvider.ELEVENLABS.value: elevenlabs_synthesizer,
@@ -91,6 +104,7 @@ SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.SONIOX.value: SonioxSynthesizer,
     SynthesizerProvider.NAVANA.value: NavanaSynthesizer,
     SynthesizerProvider.CUSTOM.value: custom_synthesizer,
+    SynthesizerProvider.BOLNA.value: bolna_synthesizer,
 }
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {

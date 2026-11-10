@@ -1,6 +1,7 @@
 """A customer's own TTS runs on OPENAISynthesizer against the endpoint and key the platform injects,
 never against OpenAI's, and never against a non-public address."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -240,3 +241,145 @@ class TestTurnTiming:
         (record,) = synth.turn_latencies
         assert (record["sequence_id"], record["tts_start_ms"], record["characters"]) == (1, 1000, len("hello there"))
         assert record["first_result_latency_ms"] >= 0 and record["total_stream_duration_ms"] >= 0
+
+
+class _Sequences:
+    def __init__(self):
+        self.current = {1}
+
+    def is_sequence_id_in_current_ids(self, sequence_id):
+        return sequence_id in self.current
+
+
+def _streaming_tts(monkeypatch, chunks, sent=None, **kwargs):
+    async def body():
+        for chunk in chunks:
+            yield chunk
+
+    def server(request):
+        if sent is not None:
+            sent.update(json.loads(request.content))
+        return httpx.Response(200, content=body())
+
+    monkeypatch.setattr("bolna.synthesizer.openai_synthesizer.validate_outbound_url", AsyncMock())
+    monkeypatch.setattr(
+        "bolna.synthesizer.openai_synthesizer.DefaultAsyncHttpxClient",
+        lambda **k: DefaultAsyncHttpxClient(transport=httpx.MockTransport(server), **k),
+    )
+    kwargs.setdefault("sampling_rate", 24000)
+    return _custom_tts(response_format="pcm", task_manager_instance=_Sequences(), **kwargs)
+
+
+async def _push(synth, text="hello", end=True):
+    await synth.push({"data": text, "meta_info": {"sequence_id": 1, "end_of_llm_stream": end}})
+
+
+class TestPcmStreaming:
+    """With response_format pcm the server's audio is played as it arrives, not after the whole clip."""
+
+    def test_mp3_stays_the_default_and_buffered(self):
+        assert CustomTTSConfig(voice="voice-1", model="tts-model").response_format == "mp3"
+        assert _custom_tts().streams_pcm is False
+
+    def test_the_openai_provider_never_streams(self):
+        assert SUPPORTED_SYNTHESIZER_MODELS["openai"](voice="alloy", response_format="pcm").streams_pcm is False
+
+    async def test_each_network_chunk_is_a_packet_and_the_turn_ends_with_the_sentinel(self, monkeypatch):
+        sent = {}
+        # The first chunk ends mid-sample; its odd byte must lead the next one.
+        synth = _streaming_tts(monkeypatch, [b"\x01\x00\x02", b"\x00\x03\x00"], sent, extra_body={"language": "hi"})
+        await _push(synth)
+        packets = [p async for p in _take(synth.generate(), 3)]
+        assert [p["data"] for p in packets] == [b"\x01\x00", b"\x02\x00\x03\x00", b"\x00"]
+        assert [p["meta_info"]["is_first_chunk"] for p in packets[:2]] == [True, False]
+        assert packets[0]["meta_info"]["format"] == "pcm"
+        assert packets[2]["meta_info"]["end_of_synthesizer_stream"] is True
+        assert (sent["response_format"], sent["language"]) == ("pcm", "hi")
+        assert synth.turn_latencies[0]["first_result_latency_ms"] <= synth.turn_latencies[0]["total_stream_duration_ms"]
+
+    async def test_telephony_gets_mulaw_at_8k(self, monkeypatch):
+        synth = _streaming_tts(monkeypatch, [b"\x00\x10" * 2400], use_mulaw=True, sampling_rate=8000)
+        await _push(synth)
+        packets = [p async for p in _take(synth.generate(), 2)]
+        assert packets[0]["meta_info"]["format"] == "mulaw"
+        # 2400 samples at 24 kHz are 800 at 8 kHz, one mu-law byte each, less the resampler's held tail.
+        assert 700 < len(packets[0]["data"]) <= 800
+
+    async def test_audio_packets_never_claim_the_end_of_the_turn(self, monkeypatch):
+        synth = _streaming_tts(monkeypatch, [b"\x01\x00"])
+        await _push(synth)
+        audio, end = [p async for p in _take(synth.generate(), 2)]
+        assert audio["meta_info"]["end_of_llm_stream"] is False
+        assert end["meta_info"]["end_of_llm_stream"] is True
+
+    async def test_a_retired_sequence_ends_with_its_own_end_packet(self, monkeypatch):
+        synth = _streaming_tts(monkeypatch, [b"\x01\x00", b"\x02\x00", b"\x03\x00"])
+        await _push(synth)
+        stream = synth.generate()
+        assert (await stream.__anext__())["data"] == b"\x01\x00"
+        synth.task_manager_instance.current.clear()
+        end = await stream.__anext__()
+        assert (end["data"], end["meta_info"]["sequence_id"]) == (b"\x00", 1)
+        with pytest.raises(StopAsyncIteration):
+            await stream.__anext__()
+
+    async def test_a_barge_in_stops_canned_speech_whose_sequence_never_retires(self, monkeypatch):
+        synth = _streaming_tts(monkeypatch, [b"\x01\x00", b"\x02\x00", b"\x03\x00"])
+        await _push(synth)
+        stream = synth.generate()
+        assert (await stream.__anext__())["data"] == b"\x01\x00"
+        await synth.handle_interruption()
+        with pytest.raises(StopAsyncIteration):
+            await stream.__anext__()
+
+    async def test_a_barge_in_wakes_a_read_the_server_never_answers(self, monkeypatch):
+        synth = _streaming_tts(monkeypatch, [b"\x01\x00"])
+        gate = asyncio.Event()
+
+        async def stalled(text):
+            yield b"\x01\x00"
+            await gate.wait()
+
+        synth._stream_pcm = stalled
+        await _push(synth)
+        stream = synth.generate()
+        await stream.__anext__()
+        waiting = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0)
+        await synth.handle_interruption()
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(waiting, 1)
+
+
+class TestBolnaProvider:
+    """Our own TTS servers run on the same synthesizer, streamed, at the endpoint in the server's environment."""
+
+    def _bolna(self, monkeypatch, **kwargs):
+        monkeypatch.setenv("SPEECH_SYNTHESIZER_URL", "https://tts.example.com/{model}/v1")
+        monkeypatch.setenv("SPEECH_SYNTHESIZER_KEY", "platform-tts-key")
+        kwargs = {"voice": "Ritvik", "voice_id": "ritvik", "model": "maya2-native", "language": "hi-IN", **kwargs}
+        return SUPPORTED_SYNTHESIZER_MODELS["bolna"](**kwargs)
+
+    def test_the_endpoint_and_key_come_from_the_environment(self, monkeypatch):
+        synth = self._bolna(monkeypatch, synthesizer_key="customer-key", synthesizer_base_url="https://evil.example")
+        assert _base_url(synth) == "https://tts.example.com/maya2-native/v1"
+        assert synth.async_client.api_key == "platform-tts-key"
+
+    def test_without_an_endpoint_setup_fails(self, monkeypatch):
+        monkeypatch.delenv("SPEECH_SYNTHESIZER_URL", raising=False)
+        with pytest.raises(ValueError):
+            SUPPORTED_SYNTHESIZER_MODELS["bolna"](voice="Ritvik", voice_id="ritvik", model="m", language="hi")
+
+    async def test_it_streams_the_voice_id_with_the_spoken_language(self, monkeypatch):
+        synth = self._bolna(monkeypatch)
+        assert (synth.streams_pcm, synth.voice, synth._request_extras()) == (True, "ritvik", {"language": "hi"})
+        await synth.set_target_language("kn-IN")
+        assert synth._request_extras() == {"language": "kn"}
+
+    def test_a_customer_endpoint_is_never_sent_a_language(self):
+        assert _custom_tts(language="hi")._request_extras() is None
+
+
+async def _take(stream, count):
+    for _ in range(count):
+        yield await stream.__anext__()
