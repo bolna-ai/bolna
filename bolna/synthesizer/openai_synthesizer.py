@@ -1,6 +1,9 @@
+import asyncio
 import io
 import os
+import re
 import time
+from contextlib import aclosing
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
@@ -9,12 +12,24 @@ from .base_synthesizer import BaseSynthesizer
 from bolna.constants import OPENAI_TTS_SPEED_MAX, OPENAI_TTS_SPEED_MIN
 from bolna.helpers.function_calling_helpers import SSRFError, validate_outbound_url
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import convert_audio_to_wav, resample
+from bolna.helpers.utils import (
+    StreamingPcmResampler,
+    convert_audio_to_wav,
+    create_ws_data_packet,
+    pcm_to_ulaw,
+    resample,
+)
 
 logger = configure_logger(__name__)
 load_dotenv()
 
 _CUSTOM_ENDPOINT_TIMEOUT_SECONDS = 20
+MULAW_SAMPLE_RATE = 8000
+
+
+def _primary_language(language):
+    """ "hi-IN" to "hi": speech servers take the bare language."""
+    return re.split(r"[-_]", language.strip().lower(), maxsplit=1)[0] if isinstance(language, str) else language
 
 
 class OPENAISynthesizer(BaseSynthesizer):
@@ -29,6 +44,10 @@ class OPENAISynthesizer(BaseSynthesizer):
         speed=1.0,
         endpoint=None,
         extra_body=None,
+        response_format="mp3",
+        pcm_sample_rate=24000,
+        language=None,
+        platform_endpoint=False,
         **kwargs,
     ):
         super().__init__(kwargs.get("task_manager_instance"), stream, buffer_size)
@@ -43,16 +62,30 @@ class OPENAISynthesizer(BaseSynthesizer):
         self.endpoint = endpoint
         # Only a customer's endpoint takes extra params; OpenAI's own API never gets them.
         self.extra_body = extra_body if endpoint else None
-        self._endpoint_checked = endpoint is None
+        # Only our own servers are told the language; a customer's server never asked for the field.
+        self.language = _primary_language(language) if platform_endpoint else None
+        self._endpoint_checked = endpoint is None or platform_endpoint
         http_client = DefaultAsyncHttpxClient(follow_redirects=False) if endpoint else None
         limits = {"timeout": _CUSTOM_ENDPOINT_TIMEOUT_SECONDS, "max_retries": 1} if endpoint else {}
         self.async_client = AsyncOpenAI(api_key=api_key, base_url=endpoint, http_client=http_client, **limits)
         self._timed_turn_key = None
         self._timed_turn = None
         self._timed_turn_started = None
+        # A customer's endpoint asked for raw PCM is played as it arrives; mp3 needs the whole clip to decode.
+        self.streams_pcm = bool(endpoint) and response_format == "pcm"
+        self.use_mulaw = kwargs.get("use_mulaw", False)
+        if self.streams_pcm:
+            target_rate = MULAW_SAMPLE_RATE if self.use_mulaw else self.sample_rate
+            self.pcm_resampler = StreamingPcmResampler(int(pcm_sample_rate), target_rate)
+            self._pcm_carry = b""
+            self._interruptions = 0
+            self._chunk_read = None
 
     def supports_websocket(self):
         return True
+
+    def get_sleep_time(self):
+        return 0.01 if self.streams_pcm else super().get_sleep_time()
 
     # ------------------------------------------------------------------
     # BaseSynthesizer hooks
@@ -96,6 +129,15 @@ class OPENAISynthesizer(BaseSynthesizer):
         if meta_info.get("end_of_llm_stream"):
             self._timed_turn_key = None
 
+    def _request_extras(self):
+        if self.language is None:
+            return self.extra_body
+        return {**(self.extra_body or {}), "language": self.language}
+
+    async def set_target_language(self, language):
+        if self.language is not None and language:
+            self.language = _primary_language(language)
+
     async def _check_endpoint(self):
         if self._endpoint_checked:
             return
@@ -115,7 +157,7 @@ class OPENAISynthesizer(BaseSynthesizer):
             response_format="mp3",
             input=text,
             speed=self.speed,
-            extra_body=self.extra_body,
+            extra_body=self._request_extras(),
         )
         buffer = io.BytesIO()
         for chunk in spoken_response.iter_bytes(chunk_size=4096):
@@ -131,5 +173,146 @@ class OPENAISynthesizer(BaseSynthesizer):
     # ------------------------------------------------------------------
 
     async def generate(self):
-        async for packet in self._generate_http_loop():
+        loop = self._generate_pcm_stream_loop() if self.streams_pcm else self._generate_http_loop()
+        async for packet in loop:
             yield packet
+
+    # ------------------------------------------------------------------
+    # Streamed PCM: one request per text piece, audio forwarded chunk by chunk
+    # ------------------------------------------------------------------
+
+    async def handle_interruption(self):
+        if not self.streams_pcm:
+            return
+        self._interruptions += 1
+        self._reset_pcm_stream()
+        # Wakes the loop out of a read that may never return; it then sees the count has moved.
+        if self._chunk_read is not None:
+            self._chunk_read.cancel()
+
+    async def monitor_connection(self):
+        """Open the connection at call start, so the first reply does not pay for the handshake."""
+        if not self.streams_pcm:
+            return
+        started = time.perf_counter()
+        try:
+            await self._check_endpoint()
+            await self.async_client.models.list()
+        except Exception as e:
+            logger.info(f"Speech endpoint warm-up did not complete: {e}")
+        self.connection_time = round((time.perf_counter() - started) * 1000)
+
+    def _reset_pcm_stream(self):
+        self.pcm_resampler.reset()
+        self._pcm_carry = b""
+        self.first_chunk_generated = False
+
+    def _convert_pcm_chunk(self, chunk):
+        """Resample a slice of the response body as part of one stream; mu-law for telephony."""
+        # A network chunk can end mid-sample; the odd byte waits for the next one.
+        data = self._pcm_carry + chunk
+        whole = len(data) - len(data) % 2
+        data, self._pcm_carry = data[:whole], data[whole:]
+        audio = self.pcm_resampler.process(data) if data else b""
+        if not audio:
+            return None
+        return pcm_to_ulaw(audio) if self.use_mulaw else audio
+
+    async def _stream_pcm(self, text):
+        await self._check_endpoint()
+        async with self.async_client.audio.speech.with_streaming_response.create(
+            model=self.model,
+            voice=self.voice,
+            response_format="pcm",
+            input=text,
+            speed=self.speed,
+            extra_body=self._request_extras(),
+        ) as response:
+            async for chunk in response.iter_bytes():
+                audio = self._convert_pcm_chunk(chunk)
+                if audio:
+                    yield audio
+        # A body that ends mid-sample must not shift every sample of the next piece.
+        self._pcm_carry = b""
+
+    async def _next_audio(self, stream):
+        """The stream's next audio, or None at its end; handle_interruption can cancel the wait."""
+
+        async def read():
+            try:
+                return await stream.__anext__()
+            except StopAsyncIteration:
+                return None
+
+        self._chunk_read = asyncio.ensure_future(read())
+        try:
+            return await self._chunk_read
+        finally:
+            self._chunk_read = None
+
+    async def _generate_pcm_stream_loop(self):
+        while True:
+            message = await self.internal_queue.get()
+            meta_info, text = message.get("meta_info"), message.get("data")
+            sequence_id = meta_info.get("sequence_id")
+            if not self.should_synthesize_response(sequence_id):
+                logger.info(f"Not synthesizing: sequence_id {sequence_id} not current")
+                return
+
+            meta_info["format"] = "mulaw" if self.use_mulaw else "pcm"
+            meta_info["text"] = text
+            meta_info["is_cached"] = False
+
+            if text and text.strip():
+                self.synthesized_characters += len(text)
+                started = time.perf_counter()
+                self._begin_turn_timing(meta_info, started)
+                # Canned speech shares sequence -1, which never retires, so a barge-in is seen by its count.
+                interruptions = self._interruptions
+                first_audio = True
+                async with aclosing(self._stream_pcm(text)) as stream:
+                    while True:
+                        try:
+                            audio = await self._next_audio(stream)
+                        except asyncio.CancelledError:
+                            # Only handle_interruption cancels the read alone; anything else is this task ending.
+                            if self._interruptions == interruptions:
+                                raise
+                            audio = None
+                        except Exception:
+                            # A request nobody is waiting for any more must not end the call.
+                            if self._interruptions == interruptions and self.should_synthesize_response(sequence_id):
+                                raise
+                            audio = None
+                        if self._interruptions != interruptions:
+                            logger.info(f"Stopping stream: sequence_id {sequence_id} was interrupted")
+                            return
+                        if not self.should_synthesize_response(sequence_id):
+                            logger.info(f"Stopping stream: sequence_id {sequence_id} not current")
+                            self._reset_pcm_stream()
+                            # The consumer clears its playing flag on a retired sequence's end packet.
+                            retired = {"sequence_id": sequence_id, "end_of_synthesizer_stream": True}
+                            retired["format"] = meta_info["format"]
+                            yield create_ws_data_packet(b"\x00", retired)
+                            return
+                        if audio is None:
+                            break
+                        # Only the end packet closes the turn; audio that says so releases a hangup wait early.
+                        packet_meta = {**meta_info, "end_of_llm_stream": False}
+                        if first_audio:
+                            first_audio = False
+                            if "first_result_latency_ms" not in self._timed_turn:
+                                latency = time.perf_counter() - started
+                                self._timed_turn["first_result_latency_ms"] = round(latency * 1000)
+                                self._upsert_turn_latency(dict(self._timed_turn))
+                                packet_meta["synthesizer_latency"] = latency
+                        self._stamp_first_chunk(packet_meta)
+                        self._stamp_mark_id(packet_meta)
+                        yield create_ws_data_packet(audio, packet_meta)
+                self._finish_chunk_timing(meta_info, len(text), started, time.perf_counter())
+
+            if meta_info.get("end_of_llm_stream"):
+                self._reset_pcm_stream()
+                self._stamp_end_of_stream(meta_info)
+                self._stamp_mark_id(meta_info)
+                yield create_ws_data_packet(b"\x00", meta_info)

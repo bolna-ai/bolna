@@ -93,7 +93,15 @@ EXPECTED_FIELDS = {
         "chunk_length_schedule": False,
     },
     "navana": {"voice": True, "voice_id": True, "model": True, "language": True},
-    "custom": {"voice": True, "model": True, "speed": False, "extra_body": False},
+    "bolna": {"voice": True, "voice_id": True, "model": True, "language": True},
+    "custom": {
+        "voice": True,
+        "model": True,
+        "speed": False,
+        "extra_body": False,
+        "response_format": False,
+        "pcm_sample_rate": False,
+    },
 }
 
 

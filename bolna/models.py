@@ -241,6 +241,10 @@ class CustomTTSConfig(OpenAIConfig):
     # Merged into every speech request to the customer's server. Checked on the field's own type, so the
     # agent PATCH, which validates field by field, enforces it too.
     extra_body: Optional[Annotated[Dict[str, Any], AfterValidator(_no_reserved_tts_keys)]] = None
+    # "pcm" asks the server for raw 16-bit mono PCM and plays it as it arrives; "mp3" waits for each whole clip.
+    response_format: Literal["mp3", "pcm"] = "mp3"
+    # Rate of the server's PCM, which the format itself does not carry.
+    pcm_sample_rate: int = Field(default=24000, gt=0)
 
 
 class DeepgramConfig(BaseModel):
@@ -346,6 +350,11 @@ class NavanaConfig(StandardVoiceConfig):
     pass
 
 
+class BolnaTTSConfig(StandardVoiceConfig):
+    # voice_id is the name the server knows the voice by; model picks the server.
+    pass
+
+
 # The config class each provider's provider_config is validated against. Adding a provider means
 # one entry here.
 SYNTHESIZER_CONFIG_MODELS = {
@@ -365,6 +374,7 @@ SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.SONIOX.value: SonioxConfig,
     SynthesizerProvider.NAVANA.value: NavanaConfig,
     SynthesizerProvider.CUSTOM.value: CustomTTSConfig,
+    SynthesizerProvider.BOLNA.value: BolnaTTSConfig,
 }
 
 
