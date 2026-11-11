@@ -24,6 +24,24 @@ logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 logging.getLogger("LiteLLM Router").setLevel(logging.WARNING)
 logging.getLogger("LiteLLM Proxy").setLevel(logging.WARNING)
 
+# Claude models after 4.6 reject sampling parameters with a 400, so temperature must not be sent.
+_NO_TEMPERATURE_MODEL_PREFIXES = (
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-haiku-5",
+    "claude-fable",
+    "claude-mythos",
+)
+
+
+def accepts_temperature(model):
+    """False for models that reject temperature; the provider prefix and Bedrock region prefix are ignored."""
+    name = (model or "").rsplit("/", 1)[-1]
+    name = name.split("anthropic.", 1)[-1]
+    return not name.startswith(_NO_TEMPERATURE_MODEL_PREFIXES)
+
 
 class LiteLLM(BaseLLM):
     def __init__(self, model, max_tokens=30, buffer_size=40, temperature=0.0, language=DEFAULT_LANGUAGE_CODE, **kwargs):
@@ -32,7 +50,9 @@ class LiteLLM(BaseLLM):
         self.started_streaming = False
 
         self.language = language
-        self.model_args = {"max_tokens": max_tokens, "temperature": temperature, "model": self.model}
+        self.model_args = {"max_tokens": max_tokens, "model": self.model}
+        if accepts_temperature(self.model):
+            self.model_args["temperature"] = temperature
         self.api_key = kwargs.get("llm_key", os.getenv("LITELLM_MODEL_API_KEY"))
         self.api_base = kwargs.get("base_url", os.getenv("LITELLM_MODEL_API_BASE"))
         self.api_version = kwargs.get("api_version", os.getenv("LITELLM_MODEL_API_VERSION"))
@@ -189,9 +209,10 @@ class LiteLLM(BaseLLM):
                 "parallel_tool_calls": False,
                 "stream": True,
                 "stream_options": {"include_usage": True},
-                "temperature": 0.0,
             }
         )
+        if accepts_temperature(self.model):
+            model_args["temperature"] = 0.0
         stream = await acompletion(**model_args)
         return await read_routing_stream(stream, parsed_tools)
 
