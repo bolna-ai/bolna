@@ -112,6 +112,8 @@ def _retry_delay(retry_after, attempt):
 
 
 class KalpaSynthesizer(StreamSynthesizer):
+    settles_lost_turns = True  # receiver() ends each utterance lost with its socket
+
     def __init__(
         self,
         voice=None,
