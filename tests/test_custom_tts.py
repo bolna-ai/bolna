@@ -257,7 +257,9 @@ def _streaming_tts(monkeypatch, chunks, sent=None, **kwargs):
             yield chunk
 
     def server(request):
-        if sent is not None:
+        if isinstance(sent, list):
+            sent.append(json.loads(request.content)["input"])
+        elif sent is not None:
             sent.update(json.loads(request.content))
         return httpx.Response(200, content=body())
 
@@ -268,6 +270,10 @@ def _streaming_tts(monkeypatch, chunks, sent=None, **kwargs):
     )
     kwargs.setdefault("sampling_rate", 24000)
     return _custom_tts(response_format="pcm", task_manager_instance=_Sequences(), **kwargs)
+
+
+# 10 ms of speech-level audio at 24 kHz, the unit the stream is passed on in; each differs so order shows.
+_A, _B, _C = (bytes([0, level]) * 240 for level in (0x10, 0x20, 0x30))
 
 
 async def _push(synth, text="hello", end=True):
@@ -287,10 +293,11 @@ class TestPcmStreaming:
     async def test_each_network_chunk_is_a_packet_and_the_turn_ends_with_the_sentinel(self, monkeypatch):
         sent = {}
         # The first chunk ends mid-sample; its odd byte must lead the next one.
-        synth = _streaming_tts(monkeypatch, [b"\x01\x00\x02", b"\x00\x03\x00"], sent, extra_body={"language": "hi"})
+        audio = _A + _B + _C
+        synth = _streaming_tts(monkeypatch, [audio[:961], audio[961:]], sent, extra_body={"language": "hi"})
         await _push(synth)
         packets = [p async for p in _take(synth.generate(), 3)]
-        assert [p["data"] for p in packets] == [b"\x01\x00", b"\x02\x00\x03\x00", b"\x00"]
+        assert [p["data"] for p in packets] == [_A + _B, _C, b"\x00"]
         assert [p["meta_info"]["is_first_chunk"] for p in packets[:2]] == [True, False]
         assert packets[0]["meta_info"]["format"] == "pcm"
         assert packets[2]["meta_info"]["end_of_synthesizer_stream"] is True
@@ -306,17 +313,17 @@ class TestPcmStreaming:
         assert 700 < len(packets[0]["data"]) <= 800
 
     async def test_audio_packets_never_claim_the_end_of_the_turn(self, monkeypatch):
-        synth = _streaming_tts(monkeypatch, [b"\x01\x00"])
+        synth = _streaming_tts(monkeypatch, [_A])
         await _push(synth)
         audio, end = [p async for p in _take(synth.generate(), 2)]
         assert audio["meta_info"]["end_of_llm_stream"] is False
         assert end["meta_info"]["end_of_llm_stream"] is True
 
     async def test_a_retired_sequence_ends_with_its_own_end_packet(self, monkeypatch):
-        synth = _streaming_tts(monkeypatch, [b"\x01\x00", b"\x02\x00", b"\x03\x00"])
+        synth = _streaming_tts(monkeypatch, [_A, _B, _C])
         await _push(synth)
         stream = synth.generate()
-        assert (await stream.__anext__())["data"] == b"\x01\x00"
+        assert (await stream.__anext__())["data"] == _A
         synth.task_manager_instance.current.clear()
         end = await stream.__anext__()
         assert (end["data"], end["meta_info"]["sequence_id"]) == (b"\x00", 1)
@@ -324,20 +331,20 @@ class TestPcmStreaming:
             await stream.__anext__()
 
     async def test_a_barge_in_stops_canned_speech_whose_sequence_never_retires(self, monkeypatch):
-        synth = _streaming_tts(monkeypatch, [b"\x01\x00", b"\x02\x00", b"\x03\x00"])
+        synth = _streaming_tts(monkeypatch, [_A, _B, _C])
         await _push(synth)
         stream = synth.generate()
-        assert (await stream.__anext__())["data"] == b"\x01\x00"
+        assert (await stream.__anext__())["data"] == _A
         await synth.handle_interruption()
         with pytest.raises(StopAsyncIteration):
             await stream.__anext__()
 
     async def test_a_barge_in_wakes_a_read_the_server_never_answers(self, monkeypatch):
-        synth = _streaming_tts(monkeypatch, [b"\x01\x00"])
+        synth = _streaming_tts(monkeypatch, [_A])
         gate = asyncio.Event()
 
-        async def stalled(text):
-            yield b"\x01\x00"
+        async def stalled(text, tail_ms, pad_tail):
+            yield _A
             await gate.wait()
 
         synth._stream_pcm = stalled
@@ -349,6 +356,37 @@ class TestPcmStreaming:
         await synth.handle_interruption()
         with pytest.raises(StopAsyncIteration):
             await asyncio.wait_for(waiting, 1)
+
+
+class TestSentenceRequests:
+    """The server renders each request as a finished sentence, so a request never ends mid-sentence."""
+
+    async def _requests(self, monkeypatch, pieces):
+        sent = []
+        synth = _streaming_tts(monkeypatch, [_A], sent)
+        for i, piece in enumerate(pieces):
+            await _push(synth, piece, end=i == len(pieces) - 1)
+        packets = [p async for p in _take(synth.generate(), len(pieces) + 1)]
+        return sent, packets
+
+    async def test_the_end_of_a_piece_cut_mid_sentence_is_spoken_with_the_next_piece(self, monkeypatch):
+        sent, packets = await self._requests(
+            monkeypatch, ["We have two products: Shaving", "Cream and Razor Blade. Go."]
+        )
+        assert sent == ["We have two products:", "Shaving Cream and Razor Blade. Go."]
+        assert packets[0]["meta_info"]["text"] == "We have two products:"
+
+    async def test_a_piece_with_no_sentence_or_clause_end_is_spoken_whole(self, monkeypatch):
+        sent, _ = await self._requests(monkeypatch, ["one two three", "four."])
+        assert sent == ["one two three", "four."]
+
+    async def test_a_barge_in_drops_the_held_text(self, monkeypatch):
+        synth = _streaming_tts(monkeypatch, [_A])
+        await _push(synth, "First. Second half", end=False)
+        stream = synth.generate()
+        await stream.__anext__()
+        await synth.handle_interruption()
+        assert synth._held_text is None
 
 
 class TestBolnaProvider:
