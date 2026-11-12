@@ -7,6 +7,8 @@ import socket
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 import aiohttp
+import httpcore
+import httpx
 from yarl import URL
 from bolna.helpers.logger_config import configure_logger
 from bolna.enums import LogComponent, LogDirection
@@ -33,7 +35,7 @@ def _parse_blocked_networks(cidrs):
     return tuple(networks)
 
 
-# Comma-separated CIDRs that count as internal too, for a private network outside RFC 1918.
+# Comma-separated CIDRs treated as internal on top of the non-public ranges.
 _BLOCKED_NETWORKS = _parse_blocked_networks(os.getenv("OUTBOUND_BLOCKED_CIDRS", ""))
 
 
@@ -130,6 +132,54 @@ def outbound_connector(url):
     if host in _ALLOWLISTED_HOSTS:
         return None
     return aiohttp.TCPConnector(socket_factory=_guarded_socket)
+
+
+class _GuardedNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Resolves the host itself and dials only an allowed address; TLS still verifies the requested hostname."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        options = {"timeout": timeout, "local_address": local_address, "socket_options": socket_options}
+        if host.lower() in _ALLOWLISTED_HOSTS:
+            return await self._inner.connect_tcp(host, port, **options)
+        try:
+            infos = await asyncio.wait_for(
+                asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM), timeout
+            )
+        except asyncio.TimeoutError:
+            raise httpcore.ConnectTimeout(f"Timed out resolving {host}") from None
+        except OSError as e:
+            raise httpcore.ConnectError(f"Could not resolve {host}: {e}") from None
+        addresses = list(dict.fromkeys(info[4][0] for info in infos))
+        allowed = [address for address in addresses if not _is_disallowed_ip(ipaddress.ip_address(address))]
+        if not allowed:
+            logger.warning(f"Blocked outbound connection to {host}, which resolves to non-public {addresses}")
+            raise httpcore.ConnectError("blocked by outbound URL policy")
+        for address in allowed[:-1]:
+            try:
+                return await self._inner.connect_tcp(address, port, **options)
+            except (httpcore.ConnectError, httpcore.ConnectTimeout):
+                continue
+        return await self._inner.connect_tcp(allowed[-1], port, **options)
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise httpcore.ConnectError("blocked by outbound URL policy")
+
+    async def sleep(self, seconds):
+        await self._inner.sleep(seconds)
+
+
+def guarded_transport(**kwargs):
+    """httpx counterpart of ``outbound_connector``, for clients that call a customer-supplied base_url."""
+    transport = httpx.AsyncHTTPTransport(**kwargs)
+    # httpx exposes no network-backend option; fail closed if its pool stops looking like this.
+    pool = getattr(transport, "_pool", None)
+    if not isinstance(getattr(pool, "_network_backend", None), httpcore.AsyncNetworkBackend):
+        raise RuntimeError("Cannot guard outbound connections with this httpx version")
+    pool._network_backend = _GuardedNetworkBackend(pool._network_backend)
+    return transport
 
 
 async def validate_outbound_url(url):

@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bolna.agent_manager.task_manager import TaskManager
+from bolna.helpers.function_calling_helpers import SSRFError
 
 
 @pytest.fixture(autouse=True)
@@ -329,6 +330,19 @@ async def test_pre_call_webhook_refuses_internal_address(local_http_server):
 
     assert paths == []
     assert "blocked by outbound URL policy" in me.function_tool_api_call_details[0]["error"]
+
+
+async def test_pre_call_webhook_blocked_detail_hides_resolved_address():
+    """The recorded detail reaches the customer, so a blocked URL must not name the address it resolved to."""
+    me = _make_self()
+
+    async def blocked(url):
+        raise SSRFError("Blocked request to non-public address 10.1.2.3 (resolved from internal.example)")
+
+    with patch("bolna.agent_manager.task_manager.validate_outbound_url", blocked):
+        await _fire_and_wait(me, "http://internal.example/hook")
+
+    assert me.function_tool_api_call_details[0]["error"] == "blocked by outbound URL policy"
 
 
 async def test_pre_call_webhook_dispatch_url_may_be_internal(monkeypatch, local_http_server):

@@ -62,6 +62,7 @@ from bolna.constants import (
     WEBCALL_TTS_SAMPLE_RATE,
 )
 from bolna.helpers.function_calling_helpers import (
+    SSRFError,
     outbound_connector,
     redacted_url,
     resolve_tool_name,
@@ -1239,6 +1240,10 @@ class TaskManager(BaseManager):
                             status_code=response.status,
                             content_type=response.headers.get("Content-Type"),
                         )
+            except SSRFError as exc:
+                # The reason names the resolved address; the recorded detail is shown to the customer.
+                logger.warning(f"pre_call_webhook to {target_url} blocked: {exc}")
+                self._finalize_api_call_detail(api_call_detail, error="blocked by outbound URL policy")
             except Exception as exc:
                 logger.warning(f"pre_call_webhook to {target_url} failed (ignored): {exc}")
                 self._finalize_api_call_detail(api_call_detail, error=exc)

@@ -265,7 +265,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
         # http2=False: cancelled h2 requests leak streams until the connection pins at 100 (barge-in)
-        http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False)
+        http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False, guarded=is_custom)
 
         if compatible_endpoint:
             base_url = kwargs.get("base_url")

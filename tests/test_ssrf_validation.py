@@ -3,7 +3,8 @@
 Covers ``validate_outbound_url`` directly: scheme/host/port rejection, non-public
 IP literals (incl. the cloud metadata endpoint), and the DNS-pointed-inward case
 where a public-looking hostname resolves to an internal address. Also covers the
-connect-time check in ``outbound_connector`` and the OUTBOUND_BLOCKED_CIDRS ranges.
+connect-time checks (``outbound_connector`` for aiohttp, ``guarded_transport`` for httpx)
+and the OUTBOUND_BLOCKED_CIDRS ranges.
 """
 
 import asyncio
@@ -11,16 +12,22 @@ import errno
 import ipaddress
 import socket
 
+import httpx
+import openai
 import pytest
 
+from bolna.agent_types.webhook_agent import WebhookAgent
 from bolna.helpers import function_calling_helpers as fch
 from bolna.helpers.function_calling_helpers import (
     SSRFError,
     _guarded_socket,
     _parse_blocked_networks,
+    guarded_transport,
     trigger_api,
     validate_outbound_url,
 )
+from bolna.llms.openai_llm import OpenAiLLM
+from bolna.providers import SUPPORTED_SYNTHESIZER_MODELS
 
 
 @pytest.mark.parametrize(
@@ -92,7 +99,7 @@ async def test_allows_hostname_resolving_to_public_ip(monkeypatch):
 
 @pytest.fixture
 def blocked_range(monkeypatch):
-    """A public range configured as internal, the way OUTBOUND_BLOCKED_CIDRS marks a VPC outside RFC 1918."""
+    """A public range configured as internal through OUTBOUND_BLOCKED_CIDRS."""
     monkeypatch.setattr(fch, "_BLOCKED_NETWORKS", (ipaddress.ip_network("44.10.0.0/16"),))
 
 
@@ -166,3 +173,78 @@ async def test_tool_call_reaches_allowlisted_internal_host(monkeypatch, local_ht
 
     assert result["status_code"] == 200
     assert paths == ["/"]
+
+
+async def test_guarded_transport_refuses_internal_address(local_http_server):
+    port, paths = local_http_server
+    async with httpx.AsyncClient(transport=guarded_transport()) as client:
+        with pytest.raises(httpx.ConnectError, match="blocked by outbound URL policy"):
+            await client.get(f"http://localhost:{port}/")
+    assert paths == []
+
+
+async def test_guarded_transport_dials_the_address_it_checked(monkeypatch, local_http_server):
+    """The host is resolved once, and the connection goes to that checked address."""
+    port, paths = local_http_server
+    loop = asyncio.get_running_loop()
+    lookups = []
+
+    async def fake_getaddrinfo(host, p, *args, **kwargs):
+        lookups.append(host)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", p))]
+
+    monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(fch, "_is_disallowed_ip", lambda ip: str(ip) != "127.0.0.1")
+    async with httpx.AsyncClient(transport=guarded_transport()) as client:
+        response = await client.get(f"http://pinned.example:{port}/")
+
+    assert response.status_code == 200
+    assert lookups == ["pinned.example"]
+    assert paths == ["/"]
+
+
+async def test_guarded_transport_reaches_allowlisted_host(monkeypatch, local_http_server):
+    port, paths = local_http_server
+    monkeypatch.setattr(fch, "_ALLOWLISTED_HOSTS", frozenset({"localhost"}))
+    async with httpx.AsyncClient(transport=guarded_transport()) as client:
+        response = await client.get(f"http://localhost:{port}/")
+    assert response.status_code == 200
+    assert paths == ["/"]
+
+
+def _chat(llm):
+    return llm.async_client.with_options(max_retries=0).chat.completions.create(
+        model="m", messages=[{"role": "user", "content": "hi"}]
+    )
+
+
+async def test_custom_llm_client_refuses_internal_address(local_http_server):
+    port, paths = local_http_server
+    llm = OpenAiLLM(model="m", provider="custom", base_url=f"http://localhost:{port}/v1", llm_key="k")
+    with pytest.raises(openai.APIConnectionError):
+        await _chat(llm)
+    assert paths == []
+
+
+async def test_platform_llm_endpoint_is_not_guarded(local_http_server):
+    """Only a customer endpoint is guarded; a platform endpoint may be internal."""
+    port, paths = local_http_server
+    llm = OpenAiLLM(model="m", base_url=f"http://localhost:{port}/v1", llm_key="k")
+    await _chat(llm)
+    assert paths == ["/v1/chat/completions"]
+
+
+async def test_custom_tts_client_refuses_internal_address(local_http_server):
+    port, paths = local_http_server
+    synth = SUPPORTED_SYNTHESIZER_MODELS["custom"](
+        voice="v", model="m", synthesizer_base_url=f"http://localhost:{port}/v1", synthesizer_key="k"
+    )
+    with pytest.raises(openai.APIConnectionError):
+        await synth.async_client.with_options(max_retries=0).audio.speech.create(model="m", voice="v", input="hi")
+    assert paths == []
+
+
+async def test_webhook_agent_refuses_internal_address(local_http_server):
+    port, paths = local_http_server
+    assert await WebhookAgent(webhook_url=f"http://localhost:{port}/hook").execute({"a": 1}) is None
+    assert paths == []
