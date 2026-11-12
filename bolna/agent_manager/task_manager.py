@@ -5222,13 +5222,17 @@ class TaskManager(BaseManager):
                         run_id=self.run_id,
                         tool_name=called_fun,
                     )
+                    # A customer URL's redirect is not followed, so the transfer never reached its endpoint.
+                    redirected = customer_url and 300 <= response.status < 400
+                    refused = redirected or response.status >= 400
                     self._finalize_api_call_detail(
                         function_call_log,
                         response=response_text,
                         status_code=response.status,
                         content_type=response.headers.get("Content-Type"),
+                        error="redirect not followed" if redirected else None,
                     )
-                    if self._is_trunk_call() and response.status >= 400 and not self._transfer_unsettled(response_text):
+                    if self._is_trunk_call() and refused and not self._transfer_unsettled(response_text):
                         # Nothing was dialled, so no ringback holds the caller and the watchdog takes over again.
                         self._trunk_transfer_refused = True
                     self.transfer_call_events.append(
@@ -5240,7 +5244,7 @@ class TaskManager(BaseManager):
                             "sequence_id": meta_info.get("sequence_id"),
                             "status_code": response.status,
                             "latency_ms": function_call_log.get("latency_ms"),
-                            "success": response.status < 400,
+                            "success": not refused,
                         }
                     )
                     _transfer_end_recorded = True

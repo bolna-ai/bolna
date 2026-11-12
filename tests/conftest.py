@@ -82,11 +82,14 @@ def language_switch_tm(monkeypatch):
 
 @pytest.fixture
 async def local_http_server():
-    """HTTP server on 127.0.0.1 answering "ok"; yields its port and the paths it was asked for."""
+    """HTTP server on 127.0.0.1 answering "ok", or a 302 for a path under /redirect; yields its port and the
+    paths it was asked for."""
     paths = []
 
     async def handle(request):
         paths.append(request.path)
+        if request.path.startswith("/redirect"):
+            return web.Response(status=302, headers={"Location": "/landed"})
         return web.Response(text="ok")
 
     app = web.Application()

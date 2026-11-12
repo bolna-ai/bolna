@@ -399,6 +399,18 @@ async def test_transfer_to_customer_url_refuses_internal_address(local_http_serv
     assert "blocked by outbound URL policy" in str(me._finalize_api_call_detail.call_args.kwargs["error"])
 
 
+async def test_transfer_to_customer_url_fails_on_a_redirect(monkeypatch, local_http_server):
+    port, paths = local_http_server
+    monkeypatch.setattr("bolna.helpers.function_calling_helpers._is_disallowed_ip", lambda ip: False)
+    me = _make_transfer_post_self()
+
+    await _post_transfer(me, f"http://127.0.0.1:{port}/redirect")
+
+    assert paths == ["/redirect"]
+    assert me._finalize_api_call_detail.call_args.kwargs["error"] == "redirect not followed"
+    assert me.transfer_call_events[-1]["success"] is False
+
+
 async def test_transfer_blocked_detail_hides_resolved_address():
     me = _make_transfer_post_self()
 
