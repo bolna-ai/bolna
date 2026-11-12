@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
 from .base_synthesizer import BaseSynthesizer
+from .pcm_shaping import FINAL_TAIL_MS, PcmEdgeTrimmer, split_speakable
 from bolna.constants import OPENAI_TTS_SPEED_MAX, OPENAI_TTS_SPEED_MIN
 from bolna.helpers.function_calling_helpers import SSRFError, validate_outbound_url
 from bolna.helpers.logger_config import configure_logger
@@ -80,7 +81,9 @@ class OPENAISynthesizer(BaseSynthesizer):
         if self.streams_pcm:
             target_rate = MULAW_SAMPLE_RATE if self.use_mulaw else self.sample_rate
             self.pcm_resampler = StreamingPcmResampler(self.pcm_sample_rate, target_rate)
-            self._pcm_carry = b""
+            self.pcm_trimmer = PcmEdgeTrimmer(self.pcm_sample_rate)
+            # (sequence_id, text): the end of a piece that stops mid-sentence, spoken with the next piece.
+            self._held_text = None
             self._interruptions = 0
             self._chunk_read = None
 
@@ -211,21 +214,19 @@ class OPENAISynthesizer(BaseSynthesizer):
 
     def _reset_pcm_stream(self):
         self.pcm_resampler.reset()
-        self._pcm_carry = b""
+        self.pcm_trimmer.reset()
+        self._held_text = None
         self.first_chunk_generated = False
 
-    def _convert_pcm_chunk(self, chunk):
-        """Resample a slice of the response body as part of one stream; mu-law for telephony."""
-        # A network chunk can end mid-sample; the odd byte waits for the next one.
-        data = self._pcm_carry + chunk
-        whole = len(data) - len(data) % 2
-        data, self._pcm_carry = data[:whole], data[whole:]
+    def _convert_pcm_chunk(self, data):
+        """Resample whole samples as part of one stream; mu-law for telephony."""
         audio = self.pcm_resampler.process(data) if data else b""
         if not audio:
             return None
         return pcm_to_ulaw(audio) if self.use_mulaw else audio
 
-    async def _stream_pcm(self, text):
+    async def _stream_pcm(self, text, tail_ms, pad_tail):
+        """One request's audio with its edge silence set: tail_ms after the speech, padded up to it when pad_tail."""
         await self._check_endpoint()
         async with self.async_client.audio.speech.with_streaming_response.create(
             model=self.model,
@@ -236,11 +237,12 @@ class OPENAISynthesizer(BaseSynthesizer):
             extra_body=self._request_extras(),
         ) as response:
             async for chunk in response.iter_bytes():
-                audio = self._convert_pcm_chunk(chunk)
+                audio = self._convert_pcm_chunk(self.pcm_trimmer.feed(chunk))
                 if audio:
                     yield audio
-        # A body that ends mid-sample must not shift every sample of the next piece.
-        self._pcm_carry = b""
+        audio = self._convert_pcm_chunk(self.pcm_trimmer.finish(tail_ms, pad=pad_tail))
+        if audio:
+            yield audio
 
     async def _next_audio(self, stream):
         """The stream's next audio, or None at its end; handle_interruption can cancel the wait."""
@@ -266,18 +268,25 @@ class OPENAISynthesizer(BaseSynthesizer):
                 logger.info(f"Not synthesizing: sequence_id {sequence_id} not current")
                 return
 
+            final = bool(meta_info.get("end_of_llm_stream"))
+            held = self._held_text[1] if self._held_text and self._held_text[0] == sequence_id else ""
+            text = f"{held} {text or ''}".strip()
+            # A piece that stops mid-sentence would be rendered as a sentence of its own; its end waits for the rest.
+            text, rest, pause_ms = (text, "", FINAL_TAIL_MS) if final else split_speakable(text)
+            self._held_text = (sequence_id, rest) if rest else None
+
             meta_info["format"] = "mulaw" if self.use_mulaw else "pcm"
             meta_info["text"] = text
             meta_info["is_cached"] = False
 
-            if text and text.strip():
+            if text:
                 self.synthesized_characters += len(text)
                 started = time.perf_counter()
                 self._begin_turn_timing(meta_info, started)
                 # Canned speech shares sequence -1, which never retires, so a barge-in is seen by its count.
                 interruptions = self._interruptions
                 first_audio = True
-                async with aclosing(self._stream_pcm(text)) as stream:
+                async with aclosing(self._stream_pcm(text, pause_ms, pad_tail=not final)) as stream:
                     while True:
                         try:
                             audio = await self._next_audio(stream)
