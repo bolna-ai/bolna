@@ -244,7 +244,31 @@ async def test_custom_tts_client_refuses_internal_address(local_http_server):
     assert paths == []
 
 
-async def test_webhook_agent_refuses_internal_address(local_http_server):
+async def test_webhook_agent_refuses_internal_address(monkeypatch, local_http_server):
     port, paths = local_http_server
+
+    async def preflight_passes(url):
+        return None
+
+    monkeypatch.setattr("bolna.agent_types.webhook_agent.validate_outbound_url", preflight_passes)
     assert await WebhookAgent(webhook_url=f"http://localhost:{port}/hook").execute({"a": 1}) is None
     assert paths == []
+
+
+async def test_guarded_transport_moves_past_an_unresponsive_address(monkeypatch, local_http_server):
+    """A dead first address costs a short delay, not the whole connect timeout."""
+    port, paths = local_http_server
+    loop = asyncio.get_running_loop()
+
+    async def fake_getaddrinfo(host, p, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, p)) for ip in ("192.0.2.1", "127.0.0.1")]
+
+    monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(fch, "_is_disallowed_ip", lambda ip: False)
+    started = loop.time()
+    async with httpx.AsyncClient(transport=guarded_transport(), timeout=httpx.Timeout(5.0)) as client:
+        response = await client.get(f"http://two-addresses.example:{port}/")
+
+    assert response.status_code == 200
+    assert paths == ["/"]
+    assert loop.time() - started < 2

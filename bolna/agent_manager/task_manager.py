@@ -5084,8 +5084,8 @@ class TaskManager(BaseManager):
             payload["call_sid"] = call_sid
 
         # A URL on the tool is the customer's; the fallback is operator config and may be internal.
-        customer_url = url is not None
-        if url is None:
+        customer_url = bool(url)
+        if not customer_url:
             url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
 
             try:

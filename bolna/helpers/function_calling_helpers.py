@@ -134,6 +134,9 @@ def outbound_connector(url):
     return aiohttp.TCPConnector(socket_factory=_guarded_socket)
 
 
+_HAPPY_EYEBALLS_DELAY_S = 0.25
+
+
 class _GuardedNetworkBackend(httpcore.AsyncNetworkBackend):
     """Resolves the host itself and dials only an allowed address; TLS still verifies the requested hostname."""
 
@@ -157,12 +160,34 @@ class _GuardedNetworkBackend(httpcore.AsyncNetworkBackend):
         if not allowed:
             logger.warning(f"Blocked outbound connection to {host}, which resolves to non-public {addresses}")
             raise httpcore.ConnectError("blocked by outbound URL policy")
-        for address in allowed[:-1]:
-            try:
-                return await self._inner.connect_tcp(address, port, **options)
-            except (httpcore.ConnectError, httpcore.ConnectTimeout):
-                continue
-        return await self._inner.connect_tcp(allowed[-1], port, **options)
+        return await self._connect_first(allowed, port, options)
+
+    async def _connect_first(self, addresses, port, options):
+        """Happy eyeballs: stagger the attempts, keep the first connection and close the rest."""
+        pending, winner, error = set(), None, None
+        try:
+            for index, address in enumerate(addresses):
+                pending.add(asyncio.create_task(self._inner.connect_tcp(address, port, **options)))
+                more = index < len(addresses) - 1
+                while pending:
+                    done, pending = await asyncio.wait(
+                        pending, timeout=_HAPPY_EYEBALLS_DELAY_S if more else None, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for attempt in done:
+                        if attempt.exception() is not None:
+                            error = attempt.exception()
+                        elif winner is None:
+                            winner = attempt.result()
+                        else:
+                            await attempt.result().aclose()
+                    if winner is not None:
+                        return winner
+                    if more:
+                        break
+            raise error
+        finally:
+            for attempt in pending:
+                attempt.cancel()
 
     async def connect_unix_socket(self, path, timeout=None, socket_options=None):
         raise httpcore.ConnectError("blocked by outbound URL policy")
