@@ -62,6 +62,8 @@ from bolna.constants import (
     WEBCALL_TTS_SAMPLE_RATE,
 )
 from bolna.helpers.function_calling_helpers import (
+    SSRFError,
+    outbound_connector,
     redacted_url,
     resolve_tool_name,
     trigger_api,
@@ -1202,8 +1204,10 @@ class TaskManager(BaseManager):
             try:
                 # ``target_url`` is user-controlled only on the direct fallback path;
                 # the dispatch URL is operator-set env config and may be internal.
+                connector = None
                 if not dispatch_url:
                     await validate_outbound_url(target_url)
+                    connector = outbound_connector(target_url)
                 convert_to_request_log(
                     str(payload),
                     meta_info,
@@ -1213,7 +1217,9 @@ class TaskManager(BaseManager):
                     run_id=self.run_id,
                     tool_name=webhook_tool_name,
                 )
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with aiohttp.ClientSession(
+                    connector=connector, timeout=aiohttp.ClientTimeout(total=10)
+                ) as session:
                     # allow_redirects=False: a redirect hop is not re-validated and would
                     # reopen the SSRF path past the pre-flight check above.
                     async with session.post(target_url, json=payload, allow_redirects=False) as response:
@@ -1234,6 +1240,10 @@ class TaskManager(BaseManager):
                             status_code=response.status,
                             content_type=response.headers.get("Content-Type"),
                         )
+            except SSRFError as exc:
+                # The reason names the resolved address; the recorded detail is shown to the customer.
+                logger.warning(f"pre_call_webhook to {target_url} blocked: {exc}")
+                self._finalize_api_call_detail(api_call_detail, error="blocked by outbound URL policy")
             except Exception as exc:
                 logger.warning(f"pre_call_webhook to {target_url} failed (ignored): {exc}")
                 self._finalize_api_call_detail(api_call_detail, error=exc)
@@ -5073,7 +5083,9 @@ class TaskManager(BaseManager):
             call_sid = self.tools["input"].get_call_sid()
             payload["call_sid"] = call_sid
 
-        if url is None:
+        # A URL on the tool is the customer's; the fallback is operator config and may be internal.
+        customer_url = bool(url)
+        if not customer_url:
             url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
 
             try:
@@ -5165,7 +5177,7 @@ class TaskManager(BaseManager):
             await self.tools["output"].handle(eos_packet)
             return
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=outbound_connector(url) if customer_url else None) as session:
             logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
             while self.tools["input"].is_audio_being_played_to_user():
                 await asyncio.sleep(1)
@@ -5195,7 +5207,9 @@ class TaskManager(BaseManager):
             )
             _transfer_end_recorded = False
             try:
-                async with session.post(url, json=payload) as response:
+                if customer_url:
+                    await validate_outbound_url(url)
+                async with session.post(url, json=payload, allow_redirects=not customer_url) as response:
                     response_text = await response.text()
                     logger.info(f"Response from the server after call transfer: {response_text}")
                     convert_to_request_log(
@@ -5208,13 +5222,17 @@ class TaskManager(BaseManager):
                         run_id=self.run_id,
                         tool_name=called_fun,
                     )
+                    # A customer URL's redirect is not followed, so the transfer never reached its endpoint.
+                    redirected = customer_url and 300 <= response.status < 400
+                    refused = redirected or response.status >= 400
                     self._finalize_api_call_detail(
                         function_call_log,
                         response=response_text,
                         status_code=response.status,
                         content_type=response.headers.get("Content-Type"),
+                        error="redirect not followed" if redirected else None,
                     )
-                    if self._is_trunk_call() and response.status >= 400 and not self._transfer_unsettled(response_text):
+                    if self._is_trunk_call() and refused and not self._transfer_unsettled(response_text):
                         # Nothing was dialled, so no ringback holds the caller and the watchdog takes over again.
                         self._trunk_transfer_refused = True
                     self.transfer_call_events.append(
@@ -5226,13 +5244,16 @@ class TaskManager(BaseManager):
                             "sequence_id": meta_info.get("sequence_id"),
                             "status_code": response.status,
                             "latency_ms": function_call_log.get("latency_ms"),
-                            "success": response.status < 400,
+                            "success": not refused,
                         }
                     )
                     _transfer_end_recorded = True
             except Exception as transfer_exc:
                 logger.warning(f"Transfer webhook did not respond (call likely redirected): {transfer_exc}")
-                self._finalize_api_call_detail(function_call_log, error=transfer_exc)
+                blocked = isinstance(transfer_exc, SSRFError)
+                self._finalize_api_call_detail(
+                    function_call_log, error="blocked by outbound URL policy" if blocked else transfer_exc
+                )
                 self.transfer_call_events.append(
                     {
                         "type": "transfer_end",

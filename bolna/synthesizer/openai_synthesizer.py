@@ -7,7 +7,7 @@ from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
 from .base_synthesizer import BaseSynthesizer
 from bolna.constants import OPENAI_TTS_SPEED_MAX, OPENAI_TTS_SPEED_MIN
-from bolna.helpers.function_calling_helpers import SSRFError, validate_outbound_url
+from bolna.helpers.function_calling_helpers import SSRFError, guarded_transport, validate_outbound_url
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import convert_audio_to_wav, resample
 
@@ -44,7 +44,9 @@ class OPENAISynthesizer(BaseSynthesizer):
         # Only a customer's endpoint takes extra params; OpenAI's own API never gets them.
         self.extra_body = extra_body if endpoint else None
         self._endpoint_checked = endpoint is None
-        http_client = DefaultAsyncHttpxClient(follow_redirects=False) if endpoint else None
+        http_client = (
+            DefaultAsyncHttpxClient(follow_redirects=False, transport=guarded_transport()) if endpoint else None
+        )
         limits = {"timeout": _CUSTOM_ENDPOINT_TIMEOUT_SECONDS, "max_retries": 1} if endpoint else {}
         self.async_client = AsyncOpenAI(api_key=api_key, base_url=endpoint, http_client=http_client, **limits)
         self._timed_turn_key = None
