@@ -5083,6 +5083,8 @@ class TaskManager(BaseManager):
             call_sid = self.tools["input"].get_call_sid()
             payload["call_sid"] = call_sid
 
+        # A URL on the tool is the customer's; the fallback is operator config and may be internal.
+        customer_url = url is not None
         if url is None:
             url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
 
@@ -5175,7 +5177,7 @@ class TaskManager(BaseManager):
             await self.tools["output"].handle(eos_packet)
             return
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=outbound_connector(url) if customer_url else None) as session:
             logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
             while self.tools["input"].is_audio_being_played_to_user():
                 await asyncio.sleep(1)
@@ -5205,7 +5207,9 @@ class TaskManager(BaseManager):
             )
             _transfer_end_recorded = False
             try:
-                async with session.post(url, json=payload) as response:
+                if customer_url:
+                    await validate_outbound_url(url)
+                async with session.post(url, json=payload, allow_redirects=not customer_url) as response:
                     response_text = await response.text()
                     logger.info(f"Response from the server after call transfer: {response_text}")
                     convert_to_request_log(
@@ -5242,7 +5246,10 @@ class TaskManager(BaseManager):
                     _transfer_end_recorded = True
             except Exception as transfer_exc:
                 logger.warning(f"Transfer webhook did not respond (call likely redirected): {transfer_exc}")
-                self._finalize_api_call_detail(function_call_log, error=transfer_exc)
+                blocked = isinstance(transfer_exc, SSRFError)
+                self._finalize_api_call_detail(
+                    function_call_log, error="blocked by outbound URL policy" if blocked else transfer_exc
+                )
                 self.transfer_call_events.append(
                     {
                         "type": "transfer_end",

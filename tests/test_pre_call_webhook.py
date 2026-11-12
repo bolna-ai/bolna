@@ -355,6 +355,72 @@ async def test_pre_call_webhook_dispatch_url_may_be_internal(monkeypatch, local_
     assert paths == ["/dispatch"]
 
 
+def _make_transfer_post_self():
+    """Stand-in that drives _execute_transfer_call_webhook through the real POST."""
+    inp = MagicMock()
+    inp.io_provider = "plivo"
+    inp.get_call_sid = MagicMock(return_value="call-abc")
+    inp.is_audio_being_played_to_user = MagicMock(return_value=False)
+    me = _make_self()
+    me.tools = {"input": inp}
+    me.transfer_call_params = None
+    me.transfer_call_events = []
+    me.conversation_start_init_ts = 0
+    me._finalize_api_call_detail = MagicMock()
+    me._extract_api_call_runtime_args = TaskManager._extract_api_call_runtime_args
+    me._is_trunk_call = types.MethodType(TaskManager._is_trunk_call, me)
+    me._transfer_provider = types.MethodType(TaskManager._transfer_provider, me)
+    me._transfer_unsettled = TaskManager._transfer_unsettled
+    return me
+
+
+async def _post_transfer(me, url):
+    real_sleep = asyncio.sleep
+
+    async def no_wait(delay, *args, **kwargs):
+        await real_sleep(0)
+
+    with (
+        patch("bolna.agent_manager.task_manager.asyncio.sleep", no_wait),
+        patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+    ):
+        await TaskManager._execute_transfer_call_webhook(
+            me, "transfer_call", url, json.dumps({"call_transfer_number": "+15559998888"}), {}, {}
+        )
+
+
+async def test_transfer_to_customer_url_refuses_internal_address(local_http_server):
+    port, paths = local_http_server
+    me = _make_transfer_post_self()
+
+    await _post_transfer(me, f"http://localhost:{port}/transfer")
+
+    assert paths == []
+    assert "blocked by outbound URL policy" in str(me._finalize_api_call_detail.call_args.kwargs["error"])
+
+
+async def test_transfer_blocked_detail_hides_resolved_address():
+    me = _make_transfer_post_self()
+
+    async def blocked(url):
+        raise SSRFError("Blocked request to non-public address 10.1.2.3 (resolved from internal.example)")
+
+    with patch("bolna.agent_manager.task_manager.validate_outbound_url", blocked):
+        await _post_transfer(me, "http://internal.example/transfer")
+
+    assert me._finalize_api_call_detail.call_args.kwargs["error"] == "blocked by outbound URL policy"
+
+
+async def test_transfer_to_operator_url_may_be_internal(monkeypatch, local_http_server):
+    port, paths = local_http_server
+    monkeypatch.setenv("CALL_TRANSFER_WEBHOOK_URL", f"http://127.0.0.1:{port}/transfer")
+    me = _make_transfer_post_self()
+
+    await _post_transfer(me, None)
+
+    assert paths == ["/transfer"]
+
+
 def test_build_call_context_has_common_fields_only():
     """Call context carries the common call-state fields — and NO transfer-specific ones."""
     me = _make_self()
