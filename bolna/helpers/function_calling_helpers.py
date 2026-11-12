@@ -352,9 +352,13 @@ def prepare_api_request(param, api_token, headers_data, **kwargs):
 
     if headers_data and isinstance(headers_data, dict):
         for k, v in headers_data.items():
+            # Header names are case-insensitive: a configured "content-type" replaces the default, not joins it.
+            for existing in [name for name in headers if name.lower() == k.lower()]:
+                del headers[existing]
             headers[k] = v
 
-    if headers.get("Content-Type").lower().startswith("application/x-www-form-urlencoded"):
+    configured_type = next((v for k, v in headers.items() if k.lower() == "content-type"), None)
+    if str(configured_type or "").lower().startswith("application/x-www-form-urlencoded"):
         content_type = "form"
 
     return {
