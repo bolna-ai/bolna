@@ -313,6 +313,34 @@ async def test_pre_call_webhook_swallows_errors():
         await asyncio.sleep(0)
 
 
+async def _fire_and_wait(me, webhook_url):
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+        TaskManager.fire_pre_call_webhook(me, webhook_url, "custom_task_x", {}, {})
+        await asyncio.gather(*list(me.background_tasks))
+
+
+async def test_pre_call_webhook_refuses_internal_address(local_http_server):
+    """The customer URL is dialed through the guarded connector, so an internal address is refused
+    even when the pre-flight check passes."""
+    port, paths = local_http_server
+    me = _make_self()
+
+    await _fire_and_wait(me, f"http://localhost:{port}/hook")
+
+    assert paths == []
+    assert "blocked by outbound URL policy" in me.function_tool_api_call_details[0]["error"]
+
+
+async def test_pre_call_webhook_dispatch_url_may_be_internal(monkeypatch, local_http_server):
+    port, paths = local_http_server
+    monkeypatch.setenv("PRE_CALL_WEBHOOK_DISPATCH_URL", f"http://127.0.0.1:{port}/dispatch")
+    me = _make_self()
+
+    await _fire_and_wait(me, "https://customer.example/notify")
+
+    assert paths == ["/dispatch"]
+
+
 def test_build_call_context_has_common_fields_only():
     """Call context carries the common call-state fields — and NO transfer-specific ones."""
     me = _make_self()

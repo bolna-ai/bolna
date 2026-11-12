@@ -16,6 +16,7 @@ os.environ["AZURE_OPENAI_BASE_URL"] = "https://test-resource.openai.azure.com"
 os.environ["AZURE_OPENAI_API_KEY"] = "test-azure-key"
 
 import pytest  # noqa: E402
+from aiohttp import web
 from unittest.mock import AsyncMock, MagicMock
 
 from bolna.agent_manager.task_manager import TaskManager
@@ -77,3 +78,21 @@ def language_switch_tm(monkeypatch):
         return tm
 
     return _build
+
+
+@pytest.fixture
+async def local_http_server():
+    """HTTP server on 127.0.0.1 answering "ok"; yields its port and the paths it was asked for."""
+    paths = []
+
+    async def handle(request):
+        paths.append(request.path)
+        return web.Response(text="ok")
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 0).start()
+    yield runner.addresses[0][1], paths
+    await runner.cleanup()

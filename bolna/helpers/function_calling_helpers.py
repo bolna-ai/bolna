@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import ipaddress
 import json
 import os
@@ -20,6 +21,20 @@ ALLOWED_URL_SCHEMES = ("http", "https")
 _ALLOWLISTED_HOSTS = frozenset(
     h.strip().lower() for h in os.getenv("BOLNA_TOOL_URL_HOST_ALLOWLIST", "").split(",") if h.strip()
 )
+
+
+def _parse_blocked_networks(cidrs):
+    networks = []
+    for cidr in filter(None, (c.strip() for c in cidrs.split(","))):
+        try:
+            networks.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            logger.error(f"Ignoring invalid OUTBOUND_BLOCKED_CIDRS entry {cidr!r}")
+    return tuple(networks)
+
+
+# Comma-separated CIDRs that count as internal too, for a private network outside RFC 1918.
+_BLOCKED_NETWORKS = _parse_blocked_networks(os.getenv("OUTBOUND_BLOCKED_CIDRS", ""))
 
 
 class SSRFError(ValueError):
@@ -94,20 +109,37 @@ def _is_disallowed_ip(ip):
         or ip.is_reserved
         or ip.is_multicast
         or ip.is_unspecified
+        or any(ip in network for network in _BLOCKED_NETWORKS)
     )
 
 
+def _guarded_socket(addr_info):
+    """aiohttp socket factory that refuses to dial a disallowed address."""
+    family, type_, proto, _, sockaddr = addr_info
+    if _is_disallowed_ip(ipaddress.ip_address(sockaddr[0])):
+        logger.warning(f"Blocked outbound connection to non-public address {sockaddr[0]}")
+        # aiohttp's connect error names the host and this reason, never the resolved address.
+        raise OSError(errno.EACCES, "blocked by outbound URL policy")
+    return socket.socket(family=family, type=type_, proto=proto)
+
+
+def outbound_connector(url):
+    """Connector that checks the address it dials, so DNS changed after the pre-flight check cannot
+    reach an internal host. None for an allowlisted host."""
+    host = (urlsplit(url).hostname or "").lower()
+    if host in _ALLOWLISTED_HOSTS:
+        return None
+    return aiohttp.TCPConnector(socket_factory=_guarded_socket)
+
+
 async def validate_outbound_url(url):
-    """SSRF guard for user-supplied URLs.
+    """SSRF guard for user-supplied URLs, run before the request.
 
     Rejects non-http(s) schemes and any host that resolves to a non-public
     address (loopback, RFC-1918, link-local incl. the 169.254.169.254 cloud
-    metadata endpoint, reserved, etc.). Raises ``SSRFError`` on a blocked URL.
-
-    Resolution happens here rather than only checking the literal string so that
-    a hostname pointing at an internal address is also rejected. (A short
-    rebind-after-check window remains; closing it fully needs connect-time
-    pinning, which we can layer on later.)
+    metadata endpoint, reserved, etc.) or into OUTBOUND_BLOCKED_CIDRS. Raises
+    ``SSRFError`` on a blocked URL. Pair it with ``outbound_connector``, which
+    repeats the check on the address actually dialed.
     """
     if not isinstance(url, str):
         raise SSRFError("Missing or invalid request URL")
@@ -306,7 +338,9 @@ async def trigger_api(
             run_id=run_id,
             tool_name=called_fun,
         )
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as session:
+        async with aiohttp.ClientSession(
+            connector=outbound_connector(url), timeout=aiohttp.ClientTimeout(total=timeout_seconds)
+        ) as session:
             response = None
             response_text = None
             if method.lower() == "get":

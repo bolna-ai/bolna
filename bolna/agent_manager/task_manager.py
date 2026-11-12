@@ -62,6 +62,7 @@ from bolna.constants import (
     WEBCALL_TTS_SAMPLE_RATE,
 )
 from bolna.helpers.function_calling_helpers import (
+    outbound_connector,
     redacted_url,
     resolve_tool_name,
     trigger_api,
@@ -1202,8 +1203,10 @@ class TaskManager(BaseManager):
             try:
                 # ``target_url`` is user-controlled only on the direct fallback path;
                 # the dispatch URL is operator-set env config and may be internal.
+                connector = None
                 if not dispatch_url:
                     await validate_outbound_url(target_url)
+                    connector = outbound_connector(target_url)
                 convert_to_request_log(
                     str(payload),
                     meta_info,
@@ -1213,7 +1216,9 @@ class TaskManager(BaseManager):
                     run_id=self.run_id,
                     tool_name=webhook_tool_name,
                 )
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with aiohttp.ClientSession(
+                    connector=connector, timeout=aiohttp.ClientTimeout(total=10)
+                ) as session:
                     # allow_redirects=False: a redirect hop is not re-validated and would
                     # reopen the SSRF path past the pre-flight check above.
                     async with session.post(target_url, json=payload, allow_redirects=False) as response:
