@@ -11,8 +11,6 @@ import numpy as np
 SENTENCE_PAUSE_MS = 300
 CLAUSE_PAUSE_MS = 120
 FINAL_TAIL_MS = 100
-# The longest silence left inside a request: the model's own pauses run up to 0.8 s, mid-phrase as well.
-MAX_PAUSE_MS = 300
 LEAD_MS = 20
 # Text held back for the next piece waits on the LLM; past this the audio already sent may run out first.
 MAX_HELD_CHARACTERS = 100
@@ -24,8 +22,6 @@ _ABBREVIATION = re.compile(r"(?:\b[A-Za-z]\.|\b(?:Rs|Mr|Mrs|Ms|Dr|No|St|vs|etc)\
 
 _FRAME_MS = 10
 _SILENCE_DBFS = -50.0
-_PAUSE_FRAMES = 20
-_SPEECH_FRAMES = 8
 
 
 def _last_end(pattern, text, start=0):
@@ -58,10 +54,8 @@ def split_speakable(text):
 class PcmEdgeTrimmer:
     """Streams 16-bit mono PCM through, replacing a request's leading and trailing silence with a set length.
 
-    Audio is passed on as it arrives. Only silence is held back, until speech follows it (then it was a pause inside
-    the request and is passed on, shortened to MAX_PAUSE_MS) or the request ends (then it is the tail). A burst shorter than real speech
-    after a pause is held with the silence, so a click at the end of a request goes with the tail. The first sound
-    of a request is passed on at once, so first audio never waits.
+    Audio is passed on as it arrives. Only silence is held back, until sound follows it (then it is passed on whole)
+    or the request ends (then it is the tail). Nothing but silence is ever removed.
     """
 
     def __init__(self, sample_rate):
@@ -71,10 +65,6 @@ class PcmEdgeTrimmer:
     def reset(self):
         self._carry = b""
         self._held = bytearray()
-        self._silent_run = 0
-        self._paused = False
-        self._burst = 0
-        self._speech_at = 0
         self._started = False
 
     def _ms(self, milliseconds):
@@ -85,19 +75,6 @@ class PcmEdgeTrimmer:
         rms = float(np.sqrt(np.mean(samples * samples)))
         return 20 * np.log10(rms / 32768 + 1e-9) < _SILENCE_DBFS
 
-    def _release(self):
-        held = bytes(self._held)
-        if not self._started:
-            held = held[max(0, self._speech_at - self._ms(LEAD_MS)) :]
-            self._started = True
-        elif self._speech_at > self._ms(MAX_PAUSE_MS):
-            # Keeps the decay into the pause and the onset out of it.
-            half = self._ms(MAX_PAUSE_MS) // 2
-            held = held[:half] + held[self._speech_at - half :]
-        self._held.clear()
-        self._silent_run, self._paused, self._burst = 0, False, 0
-        return held
-
     def feed(self, chunk):
         data = self._carry + chunk
         whole = len(data) - len(data) % self.frame_bytes
@@ -105,27 +82,19 @@ class PcmEdgeTrimmer:
         out = bytearray()
         for start in range(0, len(data), self.frame_bytes):
             frame = data[start : start + self.frame_bytes]
-            self._held += frame
             if self._is_silent(frame):
-                self._silent_run += 1
-                self._paused = self._paused or (self._started and self._silent_run >= _PAUSE_FRAMES)
+                self._held += frame
                 continue
-            self._silent_run = 0
-            if not self._burst:
-                self._speech_at = len(self._held) - self.frame_bytes
-            if not self._paused:
-                out += self._release()
-                continue
-            self._burst += 1
-            if self._burst >= _SPEECH_FRAMES:
-                out += self._release()
+            out += self._held if self._started else self._held[max(0, len(self._held) - self._ms(LEAD_MS)) :]
+            out += frame
+            self._held.clear()
+            self._started = True
         return bytes(out)
 
     def finish(self, tail_ms, pad=False):
         """The request's tail: up to tail_ms of its trailing silence, padded to tail_ms with silence when pad is set."""
         keep = self._ms(tail_ms)
-        held = bytes(self._held) if self._started else b""
-        tail = bytes(len(held[:keep])) if self._paused else held[:keep]
+        tail = bytes(self._held[:keep]) if self._started else b""
         if pad:
             tail += bytes(keep - len(tail))
         self.reset()
