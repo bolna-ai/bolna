@@ -474,6 +474,10 @@ class InterruptionManager:
         """Returns True if user is currently speaking."""
         return self.callee_speaking
 
+    def get_last_user_start_ts(self) -> float:
+        """Wall-clock onset of the caller's latest speech, -1 before they first speak."""
+        return self._last_user_start_ts
+
     def is_valid_sequence(self, sequence_id: int) -> bool:
         """Returns True if sequence_id is still valid."""
         return sequence_id in self.sequence_ids

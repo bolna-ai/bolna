@@ -2644,8 +2644,8 @@ class TaskManager(BaseManager):
 
     async def sync_history(self, mark_events_data, interruption_processed_at, extend_with_playback_estimate=False):
         """Sync history to reflect only what was actually spoken. Uses confirmed text or falls back to pending marks.
-        extend_with_playback_estimate: end-of-call only — credit the unACKed tail proportionally
-        to the wall clock elapsed since the last ACK (marks can lag playback and get lost)."""
+        extend_with_playback_estimate: credit the unACKed tail proportionally to the wall clock
+        elapsed since the last ACK (marks can lag playback and get lost), up to when the caller began talking over it."""
         try:
             mark_events_data = list(mark_events_data)
             target_turn_id = self._get_latest_turn_id_from_marks(mark_events_data)
@@ -2700,7 +2700,12 @@ class TaskManager(BaseManager):
                 if pending_tail and last_ack_ts:
                     # Proportional by the wall clock since the last ACK. The ACK itself lags true
                     # playout end, so this window under-credits — it can't stamp unheard text.
-                    tail_play_time = max(0.0, interruption_processed_at - last_ack_ts)
+                    # A barge-in is detected words after the caller starts; don't credit what they spoke over.
+                    heard_until = interruption_processed_at
+                    caller_onset = self.interruption_manager.get_last_user_start_ts()
+                    if last_ack_ts < caller_onset < heard_until:
+                        heard_until = caller_onset
+                    tail_play_time = max(0.0, heard_until - last_ack_ts)
                     tail_text = self.estimate_played_text_for_time(pending_tail, tail_play_time)
                     if tail_text:
                         logger.info(
@@ -2906,7 +2911,12 @@ class TaskManager(BaseManager):
         if not self.tools["input"].welcome_message_played():
             self.tools["input"].is_welcome_message_played = True
 
-        await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
+        # Credit the chunk that was mid-playback, or the next reply re-asks what the caller already heard.
+        await self.sync_history(
+            self.mark_event_meta_data.fetch_cleared_mark_event_data().items(),
+            current_ts,
+            extend_with_playback_estimate=True,
+        )
         self.tools["input"].reset_response_heard_by_user()
 
         self.interruption_manager.invalidate_pending_responses()
