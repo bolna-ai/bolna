@@ -1,5 +1,5 @@
-"""The final chunk's mark never arrived before hangup, so end-of-call sync trimmed the last
-agent message even though the tail audio played."""
+"""A chunk whose mark hadn't come back yet was trimmed from history although most of it played:
+at hangup (final chunk) and at barge-in (the chunk playing when the caller cut in)."""
 
 import time
 
@@ -30,8 +30,17 @@ class _InputStub:
         return 0.0
 
 
+class _InterruptionStub:
+    def __init__(self, caller_onset=-1):
+        self.caller_onset = caller_onset
+
+    def get_last_user_start_ts(self):
+        return self.caller_onset
+
+
 def _make_tm():
     tm = TaskManager.__new__(TaskManager)
+    tm.interruption_manager = _InterruptionStub()
     history = ConversationHistory()
     history.append_user("haan main purchase karne mein interested hoon")
     history.append_assistant(FULL_TEXT, turn_id=8, response_uid="r8")
@@ -106,4 +115,32 @@ async def test_end_of_call_zero_elapsed_keeps_strict_ack_trim():
 async def test_interruption_path_still_trims_to_acked_text():
     tm, history, marks = _make_tm()
     await tm.sync_history(marks.mark_event_meta_data.items(), time.time())
+    assert _assistant_content(history) == PREFIX.strip()
+
+
+async def test_barge_in_credits_the_chunk_playing_up_to_the_callers_onset():
+    # Replays a prod barge-in: the playing 9.6s chunk was cut 9s in, the caller started 7.5s in.
+    tm, history, marks = _make_tm()
+    last_ack = marks.get_last_ack_ts_for_turn(8)
+    tm.interruption_manager.caller_onset = last_ack + 7.5
+    await tm.sync_history(marks.mark_event_meta_data.items(), last_ack + 9.0, extend_with_playback_estimate=True)
+    content = _assistant_content(history)
+    by_onset = tm.estimate_played_text_for_time([{"text": TAIL, "duration": 9.6}], 7.5)
+    assert content == PREFIX + by_onset
+    assert len(content) < len(FULL_TEXT)
+
+
+async def test_barge_in_onset_from_an_earlier_turn_does_not_cap_the_credit():
+    tm, history, marks = _make_tm()
+    last_ack = marks.get_last_ack_ts_for_turn(8)
+    tm.interruption_manager.caller_onset = last_ack - 5  # caller's previous turn, before this chunk played
+    await tm.sync_history(marks.mark_event_meta_data.items(), last_ack + 20, extend_with_playback_estimate=True)
+    assert _assistant_content(history) == FULL_TEXT
+
+
+async def test_barge_in_onset_before_any_tail_audio_keeps_strict_ack_trim():
+    tm, history, marks = _make_tm()
+    last_ack = marks.get_last_ack_ts_for_turn(8)
+    tm.interruption_manager.caller_onset = last_ack + 0.01
+    await tm.sync_history(marks.mark_event_meta_data.items(), last_ack + 3, extend_with_playback_estimate=True)
     assert _assistant_content(history) == PREFIX.strip()
