@@ -3,7 +3,6 @@ import numpy as np
 from bolna.synthesizer.pcm_shaping import (
     CLAUSE_PAUSE_MS,
     LEAD_MS,
-    MAX_PAUSE_MS,
     SENTENCE_PAUSE_MS,
     PcmEdgeTrimmer,
     split_speakable,
@@ -58,13 +57,9 @@ class TestPcmEdgeTrimmer:
         assert _ms(_shape(audio, 300, pad=True)) == 1300
         assert _ms(_shape(audio, 300, pad=False)) == 1050
 
-    def test_a_pause_inside_the_request_is_kept_and_a_click_after_the_tail_is_dropped(self):
-        audio = _speech(800) + _silence(250) + _speech(700) + _silence(470) + _speech(50) + _silence(20)
-        assert _ms(_shape(audio, 100, pad=False)) == 800 + 250 + 700 + 100
-
-    def test_a_long_pause_inside_the_request_is_shortened(self):
-        audio = _speech(800) + _silence(820) + _speech(700)
-        assert _ms(_shape(audio, 0, pad=False)) == 800 + MAX_PAUSE_MS + 700
+    def test_nothing_but_edge_silence_is_removed(self):
+        audio = _speech(800) + _silence(820) + _speech(30) + _silence(470) + _speech(50) + _silence(20)
+        assert _ms(_shape(audio, 0, pad=False)) == 800 + 820 + 30 + 470 + 50
 
     def test_the_first_sound_is_passed_on_at_once(self):
         trimmer = PcmEdgeTrimmer(RATE)
