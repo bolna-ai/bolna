@@ -122,6 +122,8 @@ class GraphAgent(BaseAgent):
 
         self.node_history = [self.current_node_id]
         self.current_node_entry_index = 0
+        # History index past the input held before the active node's first delivered response.
+        self._held_until_index = 0
         self._silence_repeats = 0
         self._event_triggered_generation = False
         self._active_node_first_response_delivered = True
@@ -827,6 +829,7 @@ class GraphAgent(BaseAgent):
                 previous_node = self.current_node_id
                 self.current_node_id = edge["to_node_id"]
                 self.current_node_entry_index = 0  # caller should set to len(history)
+                self._held_until_index = 0
                 self._silence_repeats = 0
                 self._active_node_first_response_delivered = False
                 self._end_node_closed = False
@@ -853,10 +856,11 @@ class GraphAgent(BaseAgent):
         return {"matched": False, "event": event_name}
 
     def _compute_turn_counts(self, history: list) -> tuple:
-        """Count (node_turns, total_turns) from history. A node just entered this
-        turn (entry_index == len(history), as during a router hop) has 0 node turns."""
+        """Count (node_turns, total_turns) from history. A node just entered this turn (entry_index ==
+        len(history), as during a router hop) has 0 node turns, and input held before the node's first
+        delivered response is not one of its turns."""
         total_turns = sum(1 for msg in history if msg.get("role") == "user")
-        node_history = history[self.current_node_entry_index :]
+        node_history = history[max(self.current_node_entry_index, self._held_until_index) :]
         node_turns = sum(1 for msg in node_history if msg.get("role") == "user")
         return node_turns, total_turns
 
@@ -1080,6 +1084,7 @@ class GraphAgent(BaseAgent):
     def _advance_to_node(self, node_id: str, entry_index: int) -> None:
         self.current_node_id = node_id
         self.current_node_entry_index = entry_index
+        self._held_until_index = 0
         self._silence_repeats = 0
         self._active_node_first_response_delivered = False
         self._end_node_closed = False
@@ -1798,6 +1803,7 @@ class GraphAgent(BaseAgent):
                     f"Holding on node '{self.current_node_id}' until its first response is delivered; "
                     f"user input registered as context, not a routing trigger"
                 )
+                self._held_until_index = len(message)
                 yield {"routing_info": self._hold_routing_info(is_silence_trigger)}
             else:
                 previous_node = self.current_node_id
