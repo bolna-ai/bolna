@@ -81,6 +81,28 @@ class TestChatCompletions:
 
         assert "stop" not in create.call_args.kwargs
 
+    @pytest.mark.parametrize("model", REASONING_MODEL_IDS)
+    async def test_temperature_is_omitted_above_effort_none(self, model):
+        """Only effort `none` accepts a custom temperature; the configured 0.2 would be a 400."""
+        llm = _openai_llm(model, reasoning_effort="low")
+        create = _capture_chat_kwargs(llm)
+
+        with pytest.raises(RuntimeError):
+            async for _ in llm._generate_stream_chat([{"role": "user", "content": "hi"}]):
+                pass
+
+        assert "temperature" not in create.call_args.kwargs
+
+    async def test_temperature_is_kept_at_effort_none(self):
+        llm = _openai_llm("gpt-5.4-mini", reasoning_effort="none")
+        create = _capture_chat_kwargs(llm)
+
+        with pytest.raises(RuntimeError):
+            async for _ in llm._generate_stream_chat([{"role": "user", "content": "hi"}]):
+                pass
+
+        assert create.call_args.kwargs["temperature"] == 0.2
+
     async def test_a_non_reasoning_model_still_gets_stop(self):
         llm = _openai_llm("gpt-4.1-mini")
         create = _capture_chat_kwargs(llm)
@@ -124,3 +146,21 @@ class TestAzureDeployments:
         assert llm.model_family == model
         assert llm.model_args["max_completion_tokens"] == 150
         assert llm.model_args["reasoning_effort"] == expected
+
+    async def test_a_deployment_omits_temperature_above_effort_none(self):
+        with patch("bolna.llms.azure_llm.AsyncAzureOpenAI"):
+            llm = AzureLLM(
+                model="azure/ptu-gpt-6-astra",
+                max_tokens=150,
+                temperature=0.2,
+                llm_key="test-key",
+                api_version="2026-01-01",
+                base_url="https://example.openai.azure.com",
+            )
+        llm._create_completion = AsyncMock(side_effect=RuntimeError("stop stream"))
+
+        with pytest.raises(RuntimeError):
+            async for _ in llm._generate_stream_chat([{"role": "user", "content": "hi"}]):
+                pass
+
+        assert "temperature" not in llm._create_completion.call_args.args[0]
