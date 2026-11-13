@@ -11,6 +11,8 @@ import numpy as np
 SENTENCE_PAUSE_MS = 300
 CLAUSE_PAUSE_MS = 120
 FINAL_TAIL_MS = 100
+# The longest silence left inside a request: the model's own pauses run up to 0.8 s, mid-phrase as well.
+MAX_PAUSE_MS = 300
 LEAD_MS = 20
 # Text held back for the next piece waits on the LLM; past this the audio already sent may run out first.
 MAX_HELD_CHARACTERS = 100
@@ -57,7 +59,7 @@ class PcmEdgeTrimmer:
     """Streams 16-bit mono PCM through, replacing a request's leading and trailing silence with a set length.
 
     Audio is passed on as it arrives. Only silence is held back, until speech follows it (then it was a pause inside
-    the request and is passed on whole) or the request ends (then it is the tail). A burst shorter than real speech
+    the request and is passed on, shortened to MAX_PAUSE_MS) or the request ends (then it is the tail). A burst shorter than real speech
     after a pause is held with the silence, so a click at the end of a request goes with the tail. The first sound
     of a request is passed on at once, so first audio never waits.
     """
@@ -88,6 +90,10 @@ class PcmEdgeTrimmer:
         if not self._started:
             held = held[max(0, self._speech_at - self._ms(LEAD_MS)) :]
             self._started = True
+        elif self._speech_at > self._ms(MAX_PAUSE_MS):
+            # Keeps the decay into the pause and the onset out of it.
+            half = self._ms(MAX_PAUSE_MS) // 2
+            held = held[:half] + held[self._speech_at - half :]
         self._held.clear()
         self._silent_run, self._paused, self._burst = 0, False, 0
         return held
