@@ -45,6 +45,8 @@ def _llm_streaming(tool_name, spoken):
     call = SimpleNamespace(index=0, id="call-1", function=SimpleNamespace(name=tool_name, arguments="{}"))
     chunks = ([_chunk(spoken)] if spoken else []) + [_chunk(tool_calls=[call]), _chunk(finish_reason="tool_calls")]
     llm.async_client.chat.completions.create = MagicMock(side_effect=lambda **_: _async_value(_stream(*chunks)))
+    llm._first_chunk_timeout_s = None
+    llm._open_stream_with_deadline = OpenAiLLM._open_stream_with_deadline.__get__(llm)
     return llm
 
 

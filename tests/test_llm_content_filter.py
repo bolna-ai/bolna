@@ -46,6 +46,9 @@ def _stub_llm(error):
     llm.run_id = "a66bfe9a-e1b8-4d5a-9ee4-635362306936"
     llm._create_completion = AsyncMock(side_effect=error)
     llm.async_client.chat.completions.create = AsyncMock(side_effect=error)
+    llm._first_chunk_timeout_s = None
+    llm._open_stream_with_deadline = OpenAiLLM._open_stream_with_deadline.__get__(llm)
+    llm._open_turn_stream = AzureLLM._open_turn_stream.__get__(llm)
     return llm
 
 
