@@ -217,6 +217,9 @@ def stub_chat_llm():
     llm.llm_host = None
     llm.request_log_model = "gemma4"
     llm._find_text_tool_call_start = MagicMock(return_value=-1)
+    llm._first_chunk_timeout_s = None
+    llm._open_stream_with_deadline = OpenAiLLM._open_stream_with_deadline.__get__(llm)
+    llm._open_turn_stream = AzureLLM._open_turn_stream.__get__(llm)
     return llm
 
 
