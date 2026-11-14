@@ -183,10 +183,12 @@ async def test_an_unset_call_terminate_caps_nothing(monkeypatch):
 
 class _SilentCallGraph:
     """Graph agent stand-in for a silent caller: each [silence] turn bumps _silence_repeats and
-    follows a matching expression edge, as GraphAgent's routing does."""
+    follows a matching expression edge, as GraphAgent's routing does. The caller never speaks, so
+    every node turn is a silence turn and _node_turns equals _silence_repeats."""
 
     get_node_by_id = GraphAgent.get_node_by_id
     silence_exit_threshold = GraphAgent.silence_exit_threshold
+    silence_exit_pending = GraphAgent.silence_exit_pending
 
     def __init__(self, nodes, start):
         self.config = {"nodes": nodes}
@@ -195,19 +197,24 @@ class _SilentCallGraph:
 
     def silence_turn(self):
         self._silence_repeats += 1
+        context = {"_silence_repeats": self._silence_repeats, "_node_turns": self._silence_repeats}
         for edge in self.get_node_by_id(self.current_node_id).get("edges", []):
-            if evaluate_edge_expression(edge, {"_silence_repeats": self._silence_repeats}):
+            if evaluate_edge_expression(edge, context):
                 self.current_node_id = edge["to_node_id"]
                 self._silence_repeats = 0
                 return
 
 
-def _silence_edge(to_node_id, at_least):
+def _counter_edge(variable, to_node_id, at_least):
     return {
         "to_node_id": to_node_id,
         "condition_type": "expression",
-        "expression": {"conditions": [{"variable": "_silence_repeats", "operator": "gte", "value": at_least}]},
+        "expression": {"conditions": [{"variable": variable, "operator": "gte", "value": at_least}]},
     }
+
+
+def _silence_edge(to_node_id, at_least):
+    return _counter_edge("_silence_repeats", to_node_id, at_least)
 
 
 def _node(node_id, *edges, repeat_after_silence_seconds=8):
@@ -297,6 +304,13 @@ async def test_a_node_reached_through_a_silence_edge_gets_its_own_reprompts(monk
     nodes = [_node("a", _silence_edge("b", 2)), _node("b", _silence_edge("goodbye", 2)), GOODBYE]
     events = await _run_silent_call(monkeypatch, nodes)
     assert events == [("reprompt", "a"), ("reprompt", "a"), ("reprompt", "b"), ("reprompt", "b"), ("hangup", "goodbye")]
+
+
+async def test_a_silence_turn_that_moves_to_the_next_question_grants_no_new_reprompts(monkeypatch):
+    # each question moves on after two node turns, and a [silence] turn counts as one
+    questions = [_node(f"q{i}", _counter_edge("_node_turns", f"q{i + 1}", 2)) for i in range(10)] + [_node("q10")]
+    events = await _run_silent_call(monkeypatch, questions)
+    assert events == [("reprompt", "q0"), ("reprompt", "q0"), ("hangup", "q1")]
 
 
 async def test_the_user_speaking_starts_a_new_silence_period(monkeypatch):
