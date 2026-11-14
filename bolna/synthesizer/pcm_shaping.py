@@ -12,7 +12,8 @@ SENTENCE_PAUSE_MS = 300
 CLAUSE_PAUSE_MS = 120
 FINAL_TAIL_MS = 100
 LEAD_MS = 20
-# Text held back for the next piece waits on the LLM; past this the audio already sent may run out first.
+# Text held back for the next piece waits on the LLM; past this the audio already sent may run out first, and a
+# reply's first audio would wait too long.
 MAX_HELD_CHARACTERS = 100
 
 _CLOSERS = r"[\"'”’)\]]*"
@@ -27,9 +28,13 @@ _SILENCE_DBFS = -50.0
 def _last_end(pattern, text, start=0):
     end = None
     for match in pattern.finditer(text, start):
+        before = text[: match.start()].split()[-1:]
         if match.group().startswith(".") and (
             _ABBREVIATION.search(text[: match.end()]) or text[match.end() :].lstrip()[:1].isdigit()
         ):
+            continue
+        # Servers of this kind misread a code or number that ends a request ("BS100," came out as "BS").
+        if pattern is _CLAUSE_END and before and any(ch.isdigit() for ch in before[0]):
             continue
         end = match.end()
     return end
@@ -38,17 +43,19 @@ def _last_end(pattern, text, start=0):
 def split_speakable(text):
     """(text to speak now, text to hold for the next piece, pause after the spoken part in ms).
 
-    Speaks up to the last sentence end, or the last clause end when that would hold back too much or there is no
-    sentence end; text with neither is spoken whole with no pause, since the phrase continues in the next piece.
+    Speaks up to the last sentence end. Text with no sentence end waits for the rest of its sentence; once more
+    than MAX_HELD_CHARACTERS would wait, it is spoken up to its last clause end, or whole when it has none.
     """
-    cut, pause = _last_end(_SENTENCE_END, text), SENTENCE_PAUSE_MS
-    if cut is None or len(text) - cut > MAX_HELD_CHARACTERS:
-        clause = _last_end(_CLAUSE_END, text, cut or 0)
-        if clause is not None:
-            cut, pause = clause, CLAUSE_PAUSE_MS
-    if cut is None:
-        return text, "", 0
-    return text[:cut].rstrip(), text[cut:].strip(), pause
+    sentence = _last_end(_SENTENCE_END, text)
+    waiting = len(text) - (sentence or 0)
+    if waiting <= MAX_HELD_CHARACTERS:
+        return (text[:sentence].rstrip(), text[sentence:].strip(), SENTENCE_PAUSE_MS) if sentence else ("", text, 0)
+    clause = _last_end(_CLAUSE_END, text, sentence or 0)
+    if clause is not None:
+        return text[:clause].rstrip(), text[clause:].strip(), CLAUSE_PAUSE_MS
+    if sentence is not None:
+        return text[:sentence].rstrip(), text[sentence:].strip(), SENTENCE_PAUSE_MS
+    return text, "", 0
 
 
 class PcmEdgeTrimmer:

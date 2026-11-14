@@ -35,16 +35,25 @@ class TestSplitSpeakable:
         assert split_speakable("Sure. क्या आप ये") == ("Sure.", "क्या आप ये", SENTENCE_PAUSE_MS)
         assert split_speakable("करना होगा। तोह just") == ("करना होगा।", "तोह just", SENTENCE_PAUSE_MS)
 
-    def test_falls_back_to_a_clause_end(self):
-        assert split_speakable("So just to confirm, would you") == ("So just to confirm,", "would you", CLAUSE_PAUSE_MS)
+    def test_short_text_with_no_sentence_end_waits_for_its_sentence(self):
+        assert split_speakable("So just to confirm, would you") == ("", "So just to confirm, would you", 0)
 
-    def test_a_long_remainder_is_cut_at_its_last_clause_end(self):
+    def test_a_long_wait_is_cut_at_its_last_clause_end(self):
         tail = "and then " * 12 + "we stop, okay"
         spoken, held, pause = split_speakable(f"Done. {tail}")
         assert (held, pause) == ("okay", CLAUSE_PAUSE_MS) and spoken.endswith("we stop,")
 
+    def test_a_request_never_ends_on_a_code_or_number_before_a_comma(self):
+        text = "we have arranged a special offer and " * 3 + "you get it with code BS100, bringing"
+        spoken, held, pause = split_speakable(text)
+        assert (spoken, held, pause) == (text, "", 0)
+
+    def test_long_text_with_no_boundary_is_spoken_whole(self):
+        text = "word " * 30
+        assert split_speakable(text) == (text, "", 0)
+
     def test_a_period_in_an_amount_or_abbreviation_is_not_an_end(self):
-        assert split_speakable("It costs Rs. 500 for 2. 5 kg now") == ("It costs Rs. 500 for 2. 5 kg now", "", 0)
+        assert split_speakable("It costs Rs. 500 for 2. 5 kg now") == ("", "It costs Rs. 500 for 2. 5 kg now", 0)
 
 
 class TestPcmEdgeTrimmer:
