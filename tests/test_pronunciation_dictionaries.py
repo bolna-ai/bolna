@@ -16,7 +16,14 @@ from bolna.helpers.utils import (
 )
 from pydantic import TypeAdapter, ValidationError
 
-from bolna.models import CartesiaConfig, ElevenLabsConfig, PronunciationRules, Synthesizer, tts_provider_config_error
+from bolna.models import (
+    CartesiaConfig,
+    ElevenLabsConfig,
+    PronunciationRules,
+    Synthesizer,
+    tts_audio_identity,
+    tts_provider_config_error,
+)
 from bolna.providers import elevenlabs_synthesizer as build_elevenlabs_synthesizer
 from bolna.synthesizer import cartesia_synthesizer, elevenlabs_synthesizer
 from bolna.synthesizer.cartesia_synthesizer import CartesiaSynthesizer
@@ -330,11 +337,55 @@ def test_pronunciation_key_names_only_the_dictionaries_that_apply(provider, prov
 
 def test_static_node_keys_without_a_dictionary_are_unchanged():
     # Clips already on S3 were keyed before dictionaries existed; they must still be found.
-    identity = dict(provider="cartesia", voice="Sonic", voice_id="voice-id", model="sonic-3")
+    provider_config = {"voice": "Sonic", "voice_id": "voice-id", "model": "sonic-3"}
     legacy = get_md5_hash("cartesia|Sonic|voice-id|sonic-3|Hello")
-    assert static_node_audio_key("Hello", **identity) == legacy
-    assert static_node_audio_key("Hello", **identity, pronunciation="") == legacy
-    assert static_node_audio_key("Hello", **identity, pronunciation="pdict_1") != legacy
+    assert static_node_audio_key("Hello", tts_audio_identity("cartesia", provider_config)) == legacy
+    assert static_node_audio_key("Hello", tts_audio_identity("cartesia", provider_config), "") == legacy
+    assert static_node_audio_key("Hello", tts_audio_identity("cartesia", provider_config), "pdict_1") != legacy
+
+
+def _key_before_audio_identity(text, provider, voice, voice_id, model, render_settings="", pronunciation=None):
+    """static_node_audio_key as it was keyed before audio identities, for every clip already on S3."""
+    identity = "|".join(str(part or "") for part in (provider, voice, voice_id, model))
+    if render_settings:
+        identity = f"{identity}|{render_settings}"
+    if pronunciation:
+        identity = f"{identity}|{pronunciation}"
+    return get_md5_hash(f"{identity}|{text}")
+
+
+@pytest.mark.parametrize(
+    "provider, provider_config, render_settings, pronunciation",
+    [
+        ("cartesia", {"voice": "Sonic", "voice_id": "vid", "model": "sonic-3"}, "", ""),
+        (
+            "elevenlabs",
+            {"voice": "Anika", "voice_id": "vid", "model": "eleven_turbo_v2_5", "speed": 0.8},
+            "speed=0.8",
+            "",
+        ),
+        ("elevenlabs", {"voice": "Anika", "voice_id": "vid", "model": "eleven_turbo_v2_5"}, "", "dict-1:ver-1#ab12"),
+        (
+            "elevenlabs",
+            {"voice": "Anika", "voice_id": "vid", "model": "eleven_turbo_v2_5", "speed": 0.8},
+            "speed=0.8",
+            "ab12cd34",
+        ),
+    ],
+)
+def test_audio_identity_keys_match_the_keys_clips_were_stored_under(
+    provider, provider_config, render_settings, pronunciation
+):
+    stored = _key_before_audio_identity(
+        "Hello",
+        provider,
+        provider_config["voice"],
+        provider_config["voice_id"],
+        provider_config["model"],
+        render_settings=render_settings,
+        pronunciation=pronunciation,
+    )
+    assert static_node_audio_key("Hello", tts_audio_identity(provider, provider_config), pronunciation) == stored
 
 
 # ---------------------------------------------------------------------------
