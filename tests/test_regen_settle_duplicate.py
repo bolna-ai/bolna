@@ -391,6 +391,9 @@ class _NothingAckedYet:
     def get_heard_text_for_turn(self, _turn_id):
         return ""
 
+    def get_last_ack_ts_for_turn(self, _turn_id):
+        return None
+
 
 async def _reply_cut_then_regenerated(heard):
     tm = _live_manager()

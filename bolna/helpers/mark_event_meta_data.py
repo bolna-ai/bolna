@@ -248,7 +248,9 @@ class MarkEventMetaData:
         return summary.model_dump()
 
     def fetch_cleared_mark_event_data(self):
-        return self.previous_mark_event_meta_data
+        """Marks pending at the last clear, handed out once so a cleanup that skipped the clear gets none."""
+        cleared, self.previous_mark_event_meta_data = self.previous_mark_event_meta_data, {}
+        return cleared
 
     def get_last_ack_ts_for_turn(self, turn_id) -> Optional[float]:
         """Wall-clock of the turn's last ACKed chunk — the playback clock's last confirmed point.

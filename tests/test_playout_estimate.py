@@ -48,6 +48,11 @@ def test_more_elapsed_time_never_credits_less_text():
     assert lengths == sorted(lengths)
 
 
+def test_a_slice_keeps_the_word_boundary_before_it():
+    chunks = [{"text": "deal limited", "duration": 1.0}, {"text": " time ke liye hai", "duration": 2.0}]
+    assert _estimate(chunks, 2.0) == "deal limited time"
+
+
 def test_no_chunks_credits_nothing():
     assert _estimate([], 5.0) == ""
 
