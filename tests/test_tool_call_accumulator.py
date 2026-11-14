@@ -55,7 +55,7 @@ def test_arguments_split_across_chunks_are_rejoined_in_order():
 
 def test_parsed_arguments_land_on_the_payload():
     payload = _booking('{"date": "friday"}').build_api_payload({"model": "m"}, {"request_id": "q"}, "")
-    assert payload.date == "friday"
+    assert payload.arguments["date"] == "friday"
     assert payload.called_fun == "book"
     assert payload.tool_call_id == "call-1"
     assert payload.url == "https://example.test/book"
@@ -68,13 +68,13 @@ def test_method_is_lowercased_for_the_http_layer():
 def test_a_missing_required_argument_is_never_applied():
     """Running the tool with a half-filled payload is worse than not running it."""
     payload = _booking('{"note": "no date here"}').build_api_payload({}, {}, "")
-    assert not hasattr(payload, "date")
+    assert "date" not in payload.arguments
 
 
 def test_malformed_arguments_do_not_raise():
     payload = _booking('{"date": ').build_api_payload({}, {}, "")
     assert payload is not None
-    assert not hasattr(payload, "date")
+    assert "date" not in payload.arguments
 
 
 def test_a_function_outside_api_params_yields_no_payload():
