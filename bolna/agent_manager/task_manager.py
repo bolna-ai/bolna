@@ -8534,20 +8534,21 @@ class TaskManager(BaseManager):
             )
         return fires
 
-    def _silence_repeat_cap(self):
-        """[silence] re-prompts allowed in the current silence period. A period restarts when the user
-        speaks or the graph moves to another node, and the cap never drops below what the node's own
-        _silence_repeats exit edge needs, so that edge can still fire."""
+    def _silence_reprompt_allowed(self):
+        """Whether another [silence] re-prompt may go out. max_silence_repeats bounds them per silence
+        period, which restarts only when the user speaks: a silence turn that moves the graph to another
+        node grants no new ones. Past the cap, a node still gets the re-prompts its own _silence_repeats
+        exit edge needs, so that edge can fire."""
         if self.hang_conversation_after <= 0:
-            return math.inf  # no silence hangup to hand over to: a cap would leave the caller in dead air
-        llm_agent = self.tools.get("llm_agent")
+            return True  # no silence hangup to hand over to: a cap would leave the caller in dead air
         # time_since_last_spoken_human_word holds the user's last-speech timestamp, so a change means they spoke
-        period = (self.time_since_last_spoken_human_word, getattr(llm_agent, "current_node_id", None))
-        if period != self._silence_period:
-            self._silence_period = period
+        if self.time_since_last_spoken_human_word != self._silence_period:
+            self._silence_period = self.time_since_last_spoken_human_word
             self._silence_repeats_sent = 0
-        exit_at = llm_agent.silence_exit_threshold() if hasattr(llm_agent, "silence_exit_threshold") else 0
-        return max(self.max_silence_repeats, exit_at)
+        if self._silence_repeats_sent < self.max_silence_repeats:
+            return True
+        llm_agent = self.tools.get("llm_agent")
+        return hasattr(llm_agent, "silence_exit_pending") and llm_agent.silence_exit_pending()
 
     def _pipeline_busy(self, audio_playing):
         """True while the agent is speaking or about to: response_in_pipeline can read False in the gap between a response's synth push and its first audio chunk, so _synthesis_awaiting_first_audio covers it."""
@@ -8664,21 +8665,21 @@ class TaskManager(BaseManager):
             if self._pipeline_busy(self.tools["input"].is_audio_being_played_to_user()):
                 continue
 
-            silence_repeat_cap = self._silence_repeat_cap() if self.repeat_after_silence_seconds else 0
             if (
                 self.repeat_after_silence_seconds
                 # An opening node arms its re-prompt before its message has played.
                 and (self.opening_node is None or self.tools["input"].welcome_message_played())
-                and self._silence_repeats_sent < silence_repeat_cap
                 and time_since_last_spoken_ai_word > self.repeat_after_silence_seconds
                 and time_since_user_last_spoke > self.repeat_after_silence_seconds
                 and not self.response_in_pipeline
                 and not has_pending_generation
+                and self._silence_reprompt_allowed()
             ):
                 self._silence_repeats_sent += 1
-                if self._silence_repeats_sent == silence_repeat_cap:
+                if self._silence_repeats_sent == self.max_silence_repeats:
                     logger.info(
-                        f"Silence re-prompt cap reached ({silence_repeat_cap}), the silence hangup can now fire"
+                        f"Silence re-prompt cap reached ({self.max_silence_repeats}), the silence hangup can "
+                        f"fire once no node's silence exit edge needs more"
                     )
                 await self._inject_and_run_llm(
                     f"[silence] User was silent for {self.repeat_after_silence_seconds} seconds"

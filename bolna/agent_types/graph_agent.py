@@ -1108,6 +1108,10 @@ class GraphAgent(BaseAgent):
                     needed = max(needed, math.floor(value) + 1)
         return needed
 
+    def silence_exit_pending(self) -> bool:
+        """True while the current node has had fewer [silence] turns than its _silence_repeats exit edge needs."""
+        return self._silence_repeats < self.silence_exit_threshold()
+
     def mark_first_response_delivered(self) -> None:
         """Unblock routing once the active node's first customer-facing TTS turn is delivered."""
         self._active_node_first_response_delivered = True
