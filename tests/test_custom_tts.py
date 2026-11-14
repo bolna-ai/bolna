@@ -361,24 +361,23 @@ class TestPcmStreaming:
 class TestSentenceRequests:
     """The server renders each request as a finished sentence, so a request never ends mid-sentence."""
 
-    async def _requests(self, monkeypatch, pieces):
+    async def _requests(self, monkeypatch, pieces, packets):
         sent = []
         synth = _streaming_tts(monkeypatch, [_A], sent)
         for i, piece in enumerate(pieces):
             await _push(synth, piece, end=i == len(pieces) - 1)
-        packets = [p async for p in _take(synth.generate(), len(pieces) + 1)]
-        return sent, packets
+        return sent, [p async for p in _take(synth.generate(), packets)]
 
     async def test_the_end_of_a_piece_cut_mid_sentence_is_spoken_with_the_next_piece(self, monkeypatch):
-        sent, packets = await self._requests(
-            monkeypatch, ["We have two products: Shaving", "Cream and Razor Blade. Go."]
-        )
-        assert sent == ["We have two products:", "Shaving Cream and Razor Blade. Go."]
-        assert packets[0]["meta_info"]["text"] == "We have two products:"
+        pieces = ["Sure. We have two products: Shaving", "Cream and Razor Blade. Go."]
+        sent, packets = await self._requests(monkeypatch, pieces, 3)
+        assert sent == ["Sure.", "We have two products: Shaving Cream and Razor Blade. Go."]
+        assert packets[0]["meta_info"]["text"] == "Sure."
 
-    async def test_a_piece_with_no_sentence_or_clause_end_is_spoken_whole(self, monkeypatch):
-        sent, _ = await self._requests(monkeypatch, ["one two three", "four."])
-        assert sent == ["one two three", "four."]
+    async def test_a_piece_with_no_sentence_end_waits_and_sends_nothing(self, monkeypatch):
+        sent, packets = await self._requests(monkeypatch, ["one two three", "four."], 2)
+        assert sent == ["one two three four."]
+        assert packets[1]["meta_info"]["end_of_synthesizer_stream"] is True
 
     async def test_a_barge_in_drops_the_held_text(self, monkeypatch):
         synth = _streaming_tts(monkeypatch, [_A])
