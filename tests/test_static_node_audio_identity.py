@@ -9,7 +9,7 @@ import pytest
 import bolna.agent_manager.task_manager as tmmod
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.constants import WEBCALL_TTS_SAMPLE_RATE
-from bolna.helpers.utils import select_message_by_language, static_node_audio_key
+from bolna.helpers.utils import pronunciation_dictionary_key, select_message_by_language, static_node_audio_key
 from bolna.models import tts_audio_identity
 
 EN = {
@@ -125,6 +125,34 @@ async def test_a_stamped_audio_identity_wins_and_never_reaches_the_synthesizer(m
     assert await _looked_up_key(monkeypatch, pool, detected_language="en") == static_node_audio_key("Hello", "en-stamp")
     assert await _looked_up_key(monkeypatch, pool, detected_language="hi") == _key("Hello", HI)
     assert constructed and all("audio_identity" not in kwargs for kwargs in constructed)
+
+
+RULES = [{"word": "Bolna", "say_as": "bol-na"}]
+LOCATORS = [{"pronunciation_dictionary_id": "dict-1", "version_id": "ver-1"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_keys, on_platform_key", [({}, True), ({"elevenlabs": "customer-key"}, False)])
+async def test_each_language_keys_its_clip_with_its_own_pronunciation_dictionary(
+    monkeypatch, provider_keys, on_platform_key
+):
+    hi = {
+        **HI,
+        "provider_config": {**HI["provider_config"], "pronunciation_dictionary_locators": LOCATORS},
+        "pronunciation_rules": RULES,
+    }
+    tm = _task_manager(monkeypatch, {"provider": "elevenlabs", "multilingual": {"en": EN, "hi": hi}, "active": "en"})
+    tm.provider_api_keys = provider_keys
+    tm.static_audio_identities = {}
+    TaskManager._TaskManager__setup_synthesizer.__get__(tm, TaskManager)()
+
+    pronunciation = pronunciation_dictionary_key(
+        "elevenlabs", hi["provider_config"], RULES, on_platform_key=on_platform_key
+    )
+    expected = static_node_audio_key("Hello", tts_audio_identity("elevenlabs", hi["provider_config"], pronunciation))
+    assert pronunciation
+    assert await _looked_up_key(monkeypatch, tm, detected_language="hi") == expected
+    assert await _looked_up_key(monkeypatch, tm, detected_language="en") == _key("Hello", EN)
 
 
 @pytest.mark.asyncio
