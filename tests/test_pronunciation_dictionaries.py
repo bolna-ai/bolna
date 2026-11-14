@@ -340,8 +340,8 @@ def test_static_node_keys_without_a_dictionary_are_unchanged():
     provider_config = {"voice": "Sonic", "voice_id": "voice-id", "model": "sonic-3"}
     legacy = get_md5_hash("cartesia|Sonic|voice-id|sonic-3|Hello")
     assert static_node_audio_key("Hello", tts_audio_identity("cartesia", provider_config)) == legacy
-    assert static_node_audio_key("Hello", tts_audio_identity("cartesia", provider_config, "")) == legacy
-    assert static_node_audio_key("Hello", tts_audio_identity("cartesia", provider_config, "pdict_1")) != legacy
+    assert static_node_audio_key("Hello", tts_audio_identity("cartesia", provider_config), "") == legacy
+    assert static_node_audio_key("Hello", tts_audio_identity("cartesia", provider_config), "pdict_1") != legacy
 
 
 def _key_before_audio_identity(text, provider, voice, voice_id, model, render_settings="", pronunciation=None):
@@ -385,7 +385,7 @@ def test_audio_identity_keys_match_the_keys_clips_were_stored_under(
         render_settings=render_settings,
         pronunciation=pronunciation,
     )
-    assert static_node_audio_key("Hello", tts_audio_identity(provider, provider_config, pronunciation)) == stored
+    assert static_node_audio_key("Hello", tts_audio_identity(provider, provider_config), pronunciation) == stored
 
 
 # ---------------------------------------------------------------------------

@@ -424,7 +424,8 @@ class TaskManager(BaseManager):
 
         self.timezone = pytz.timezone(DEFAULT_TIMEZONE)
         self.language = DEFAULT_LANGUAGE_CODE
-        # Synth label -> audio identity its static-node clips are cached under; None keys a single synth.
+        # Synth label -> (audio identity, pronunciation key) its static-node clips are cached under; None keys a
+        # single synth.
         self.static_audio_identities = {}
         self.transfer_call_params = self.kwargs.get("transfer_call_params", None)
 
@@ -2082,9 +2083,8 @@ class TaskManager(BaseManager):
 
                     cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
                     leg_kwargs = self.__pool_leg_kwargs(synthesizer_kwargs, "synthesizer_key", provider_name)
-                    self.static_audio_identities[label] = audio_identity or tts_audio_identity(
-                        provider_name,
-                        provider_config,
+                    self.static_audio_identities[label] = (
+                        audio_identity or tts_audio_identity(provider_name, provider_config),
                         pronunciation_dictionary_key(
                             provider_name,
                             provider_config,
@@ -2133,9 +2133,9 @@ class TaskManager(BaseManager):
             synthesizer_class = SUPPORTED_SYNTHESIZER_MODELS.get(self.synthesizer_provider)
             provider_config = synth_config.pop("provider_config")
             self.synthesizer_voice = provider_config["voice"]
-            self.static_audio_identities[None] = synth_config.pop("audio_identity", None) or tts_audio_identity(
-                self.synthesizer_provider,
-                provider_config,
+            self.static_audio_identities[None] = (
+                synth_config.pop("audio_identity", None)
+                or tts_audio_identity(self.synthesizer_provider, provider_config),
                 pronunciation_dictionary_key(
                     self.synthesizer_provider,
                     provider_config,
@@ -8080,12 +8080,12 @@ class TaskManager(BaseManager):
         return mp3_bytes_to_pcm(mp3_audio, target_sample_rate=WEBCALL_TTS_SAMPLE_RATE)
 
     def __static_audio_identity(self, label):
-        """Audio identity of the synth that speaks `label` text, else of the active synth."""
+        """(audio identity, pronunciation key) of the synth that speaks `label` text, else of the active synth."""
         if label in self.static_audio_identities:
             return self.static_audio_identities[label]
         pool = self.tools.get("synthesizer")
         active_label = pool.active_label if isinstance(pool, SynthesizerPool) else None
-        return self.static_audio_identities.get(active_label, "")
+        return self.static_audio_identities.get(active_label, ("", ""))
 
     async def __send_preprocessed_audio(self, meta_info, text):
         meta_info = copy.deepcopy(meta_info)
@@ -8099,7 +8099,7 @@ class TaskManager(BaseManager):
                 # Keyed to the voice of the language the text was chosen for, so a changed voice
                 # misses and speaks live instead of replaying a stale clip.
                 text = static_node_audio_key(
-                    meta_info["text"], self.__static_audio_identity(meta_info.get("detected_language"))
+                    meta_info["text"], *self.__static_audio_identity(meta_info.get("detected_language"))
                 )
             if self.turn_based_conversation or self.task_config["tools_config"]["output"]["provider"] == "default":
                 # Static-node clips are pre-generated as mp3; fetch that format, not the output format (e.g. wav).

@@ -149,10 +149,27 @@ async def test_each_language_keys_its_clip_with_its_own_pronunciation_dictionary
     pronunciation = pronunciation_dictionary_key(
         "elevenlabs", hi["provider_config"], RULES, on_platform_key=on_platform_key
     )
-    expected = static_node_audio_key("Hello", tts_audio_identity("elevenlabs", hi["provider_config"], pronunciation))
+    expected = static_node_audio_key("Hello", tts_audio_identity("elevenlabs", hi["provider_config"]), pronunciation)
     assert pronunciation
     assert await _looked_up_key(monkeypatch, tm, detected_language="hi") == expected
     assert await _looked_up_key(monkeypatch, tm, detected_language="en") == _key("Hello", EN)
+
+
+@pytest.mark.asyncio
+async def test_a_stamped_audio_identity_still_takes_the_call_s_pronunciation_dictionary(monkeypatch):
+    # The stamp names the stored voice; the dictionary is attached later, at call time.
+    hi = {
+        **HI,
+        "provider_config": {**HI["provider_config"], "pronunciation_dictionary_locators": LOCATORS},
+        "pronunciation_rules": RULES,
+        "audio_identity": "hi-stored-voice",
+    }
+    tm = _pool(monkeypatch, en=EN, hi=hi)
+
+    pronunciation = pronunciation_dictionary_key("elevenlabs", hi["provider_config"], RULES, on_platform_key=True)
+    assert await _looked_up_key(monkeypatch, tm, detected_language="hi") == static_node_audio_key(
+        "Hello", "hi-stored-voice", pronunciation
+    )
 
 
 @pytest.mark.asyncio

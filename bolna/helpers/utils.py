@@ -396,8 +396,12 @@ def get_md5_hash(text):
     return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
-def static_node_audio_key(text, audio_identity):
-    """S3 filename stem for a static-node clip of `text` rendered in the voice `audio_identity` names."""
+def static_node_audio_key(text, audio_identity, pronunciation=""):
+    """S3 filename stem for a static-node clip of `text` rendered in the voice `audio_identity` names,
+    with the pronunciation dictionaries `pronunciation` names (see pronunciation_dictionary_key)."""
+    # Only joins the key when set, so clips rendered without a dictionary keep their keys.
+    if pronunciation:
+        audio_identity = f"{audio_identity}|{pronunciation}"
     return get_md5_hash(f"{audio_identity}|{text}")
 
 
