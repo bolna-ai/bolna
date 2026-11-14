@@ -481,7 +481,7 @@ TTS_AUDIO_SETTINGS = {
     SynthesizerProvider.OPENAI: frozenset({"speed"}),
     SynthesizerProvider.PIXA: frozenset({"top_p", "repetition_penalty"}),
     SynthesizerProvider.RIME: frozenset({"time_scale_factor"}),
-    SynthesizerProvider.SARVAM: frozenset({"speed", "loudness"}),
+    SynthesizerProvider.SARVAM: frozenset({"speed", "loudness", "enable_preprocessing"}),
     SynthesizerProvider.SMALLEST: frozenset({"speed"}),
     SynthesizerProvider.SONIOX: frozenset({"speed", "reduce_silence"}),
     SynthesizerProvider.CUSTOM: frozenset({"speed", "extra_body"}),

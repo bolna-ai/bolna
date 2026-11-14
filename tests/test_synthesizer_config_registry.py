@@ -57,6 +57,7 @@ EXPECTED_FIELDS = {
         "language": True,
         "speed": False,
         "loudness": False,
+        "enable_preprocessing": False,
     },
     "rime": {
         "voice": True,
