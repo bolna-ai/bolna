@@ -182,6 +182,7 @@ class GoogleTranscriber(BaseTranscriber):
 
         except Exception as e:
             logger.error(f"Error in transcription wrapper: {e}")
+            self.connection_error = str(e)
             await self.toggle_connection()
         finally:
             # Ensure cleanup
