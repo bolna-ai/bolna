@@ -96,6 +96,10 @@ DEFAULT_MAX_SILENCE_REPEATS = 2
 # no error, it just hangs - force it to fail after this many seconds and hang up, instead of
 # leaving the call stuck forever. BOLNA-2563.
 LLM_GENERATION_TIMEOUT_S = 60.0
+# A conversation turn on OpenAI or Azure that sends nothing for this long is re-issued once. Sits
+# above the healthy first-token tail of non-reasoning models; the LLM_FIRST_CHUNK_TIMEOUT_S env
+# overrides it and 0 turns it off.
+LLM_FIRST_CHUNK_TIMEOUT_S = 3.0
 
 # LLM-driven language-switch defaults, all overridable by the matching LANGUAGE_SWITCH_* env.
 # Read via os.getenv(..., CONSTANT) at call time, never frozen at import (load_dotenv runs later).

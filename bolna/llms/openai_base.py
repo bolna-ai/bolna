@@ -1,11 +1,12 @@
 import copy
 import json
+import os
 import re
 from typing import Optional
 
 from openai import BadRequestError, APIError
 
-from bolna.constants import IS_USER_ONLINE_MESSAGE, is_reasoning_model
+from bolna.constants import IS_USER_ONLINE_MESSAGE, LLM_FIRST_CHUNK_TIMEOUT_S, is_reasoning_model
 from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
 from bolna.helpers.utils import (
     convert_to_request_log,
@@ -13,6 +14,7 @@ from bolna.helpers.utils import (
     now_ms,
     SERVER_OWNED_CALL_IDENTIFIERS,
 )
+from .first_chunk_deadline import FirstChunkTimeout, read_first_chunk
 from .llm import BaseLLM
 from .message_models import MessageFormatAdapter, strip_internal_keys
 from .routing_stream import read_routing_stream
@@ -94,6 +96,9 @@ class OpenAICompatibleLLM(BaseLLM):
     # A reasoning summary streams ahead of the answer text, so it is opt-in: requesting one costs
     # time to first spoken token on a live call. Set from config by subclasses; None omits it.
     reasoning_summary = None
+
+    # Seconds a turn's stream may send nothing before it is re-issued; None waits indefinitely.
+    _first_chunk_timeout_s = None
 
     @property
     def request_log_model(self):
@@ -300,6 +305,29 @@ class OpenAICompatibleLLM(BaseLLM):
             api_call_payload.resp = None
 
         return LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
+
+    def _init_first_chunk_deadline(self):
+        """Arm the first-chunk deadline; reasoning models think before their first chunk, so they never get one."""
+        timeout_s = float(os.getenv("LLM_FIRST_CHUNK_TIMEOUT_S", str(LLM_FIRST_CHUNK_TIMEOUT_S)))
+        if timeout_s > 0 and not is_reasoning_model(self.model_family):
+            self._first_chunk_timeout_s = timeout_s
+
+    async def _open_stream_with_deadline(self, open_stream, reissue, meta_info):
+        """open_stream(), or reissue() once when it sends nothing within the first-chunk deadline."""
+        if not self._first_chunk_timeout_s:
+            return await open_stream()
+        try:
+            return await read_first_chunk(open_stream, self._first_chunk_timeout_s)
+        except FirstChunkTimeout as e:
+            logger.warning(
+                f"LLM sent nothing within {self._first_chunk_timeout_s}s, re-issuing the turn "
+                f"model={self.request_log_model} run_id={getattr(self, 'run_id', None)}"
+            )
+            if isinstance(meta_info, dict):
+                meta_info.setdefault("_non_fatal_errors", []).append(
+                    {"error_type": "first_chunk_timeout", "error": str(e), "model": self.model}
+                )
+        return await reissue()
 
     def _init_responses_api(self, use_responses_api: bool = False, compact_threshold: Optional[int] = None):
         self.use_responses_api = use_responses_api
@@ -613,8 +641,11 @@ class OpenAICompatibleLLM(BaseLLM):
         incomplete = False
         incomplete_reason = None
 
+        def open_stream():
+            return self._responses_client.responses.create(**create_kwargs)
+
         try:
-            stream = await self._responses_client.responses.create(**create_kwargs)
+            stream = await self._open_stream_with_deadline(open_stream, open_stream, meta_info)
         except Exception as e:
             if self.previous_response_id and self._is_stale_response_error(e):
                 logger.warning(f"Stale previous_response_id, retrying with full history: {e}")

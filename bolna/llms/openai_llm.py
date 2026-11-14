@@ -299,6 +299,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 self.tools = [i for i in my_assistant.tools if i.type == "function"]
             # logger.info(f'thread id : {self.thread_id}')
         self.run_id = kwargs.get("run_id", None)
+        # OpenAI-compatible endpoints have their own first-token tails, so only OpenAI's gets the deadline.
+        if not compatible_endpoint:
+            self._init_first_chunk_deadline()
 
         # Responses-API chaining is OpenAI-specific.
         use_responses_api = kwargs.get("use_responses_api", False) and not compatible_endpoint
@@ -380,8 +383,12 @@ class OpenAiLLM(OpenAICompatibleLLM):
         finish_reason = None
 
         forced = force_tools_by_schema(model_args) if self._forces_tools_by_schema else None
+
+        def open_stream():
+            return self.async_client.chat.completions.create(**model_args)
+
         try:
-            completion_stream = await self.async_client.chat.completions.create(**model_args)
+            completion_stream = await self._open_stream_with_deadline(open_stream, open_stream, meta_info)
         except AuthenticationError as e:
             logger.error(f"OpenAI authentication failed: Invalid or expired API key - {e}")
             raise
