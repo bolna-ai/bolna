@@ -6,7 +6,7 @@ from typing import AsyncIterable
 from google import genai
 from google.genai import types
 from bolna.constants import default_thinking_level
-from bolna.helpers.function_calling_helpers import resolve_tool_name
+from bolna.helpers.function_calling_helpers import record_unresolved_tool_call, resolve_tool_name
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import (
     now_ms,
@@ -304,6 +304,7 @@ class GeminiLLM(BaseLLM):
         answer, buffer = "", ""
         self.started_streaming = False
         gave_pre_call_msg = False
+        unresolved_call_ids = set()
         accumulated_thought_parts: list[str] = []
         # Gemini 3 streams thought_signature as a standalone Part before the functionCall Part.
         pending_thought_signature: bytes | None = None
@@ -383,6 +384,13 @@ class GeminiLLM(BaseLLM):
                             if synthesize and buffer.strip():
                                 yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
                                 buffer = ""
+
+                            # An unconfigured tool is dropped, so a filler would promise a reply that never comes.
+                            if tool_name not in self.api_params:
+                                if call_id not in unresolved_call_ids:
+                                    unresolved_call_ids.add(call_id)
+                                    record_unresolved_tool_call(tool_name, meta_info, self.model)
+                                continue
 
                             # Text spoken before the call already covers the wait; a filler after it would play over it.
                             if not gave_pre_call_msg and not answer.strip():

@@ -95,7 +95,7 @@ class TestGemini:
         )
 
     @staticmethod
-    async def _stream(llm, name="lookup_order", args=None, spoken_first=None):
+    async def _stream(llm, name="lookup_order", args=None, spoken_first=None, meta_info=None):
         call = types.FunctionCall(name=name, args={"order_id": "A-100"} if args is None else args, id="call_1")
         part = types.Part(function_call=call, thought_signature=b"signature")
         chunks = [_chunk(text=spoken_first)] if spoken_first else []
@@ -103,7 +103,12 @@ class TestGemini:
         llm.client = MagicMock()
         llm.client.aio.models.generate_content_stream = AsyncMock(return_value=_aiter(chunks))
         with patch("bolna.llms.gemini_llm.convert_to_request_log"):
-            return [c async for c in llm.generate_stream([{"role": "user", "content": "hi"}], meta_info={})]
+            return [
+                c
+                async for c in llm.generate_stream(
+                    [{"role": "user", "content": "hi"}], meta_info={} if meta_info is None else meta_info
+                )
+            ]
 
     @staticmethod
     def _payload(chunks):
@@ -126,6 +131,20 @@ class TestGemini:
 
         assert [c.data for c in chunks if not c.is_function_call] == ["Sure, sending the link now."]
         assert self._payload(chunks).called_fun == TOOL
+
+    async def test_an_unknown_tool_is_dropped_without_a_filler_and_recorded(self):
+        meta_info = {}
+        chunks = await self._stream(self._llm(), name="ghost", args={}, meta_info=meta_info)
+
+        assert chunks == []
+        assert meta_info["_non_fatal_errors"] == [
+            {"error_type": "unresolved_tool_call", "error": "ghost", "model": "gemini-2.5-flash"}
+        ]
+
+    async def test_text_spoken_before_an_unknown_tool_still_plays(self):
+        chunks = await self._stream(self._llm(), name="ghost", args={}, spoken_first="Let me check that.")
+
+        assert [c.data for c in chunks] == ["Let me check that."]
 
     async def test_the_required_fields_check_runs_against_the_configured_tool(self, caplog):
         with caplog.at_level(logging.WARNING, logger="bolna.llms.gemini_llm"):
