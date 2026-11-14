@@ -154,6 +154,8 @@ def test_config_error_rejects_exactly_what_the_config_model_rejects(provider, ke
         ("elevenlabs", {"similarity_boost": 0.75, "temperature": 0.5, "style": 0}, (), ""),
         ("elevenlabs", {"similarity_boost": 0.8}, (), "similarity_boost=0.8"),
         ("sarvam", {"model": "bulbul:v2", "loudness": 1.5}, (), "loudness=1.5"),
+        ("sarvam", {"model": "bulbul:v4-flash", "enable_preprocessing": True}, (), ""),
+        ("sarvam", {"model": "bulbul:v4-flash", "enable_preprocessing": False}, (), "enable_preprocessing=false"),
         ("rime", {"model": "coda", "time_scale_factor": 0.8}, (), "time_scale_factor=0.8"),
         ("soniox", {"speed": 1.0}, (), "speed=1"),
         ("soniox", {"reduce_silence": True}, (), "reduce_silence=true"),

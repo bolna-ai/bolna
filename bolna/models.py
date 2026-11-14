@@ -289,6 +289,8 @@ class SmallestConfig(StandardVoiceConfig):
 class SarvamConfig(StandardVoiceConfig):
     speed: Optional[float] = Field(default=1.0, ge=0.3, le=3.0)
     loudness: Optional[float] = Field(default=1.0, ge=SARVAM_LOUDNESS_MIN, le=SARVAM_LOUDNESS_MAX)
+    # Sarvam normalises text before speaking it; on Bulbul v4 that also translates English words in Hindi lines.
+    enable_preprocessing: bool = True
 
     @model_validator(mode="after")
     def validate_model_controls(self):

@@ -218,6 +218,21 @@ def test_out_of_range_controls_fail_at_setup(monkeypatch, factory, kwargs):
         factory(task_manager_instance=_task_manager(), **kwargs)
 
 
+@pytest.mark.parametrize(("provider_config", "expected"), [({}, True), ({"enable_preprocessing": False}, False)])
+def test_sarvam_preprocessing_is_on_http_and_websocket_payloads(provider_config, expected):
+    synth = SarvamSynthesizer(
+        voice_id="aparna_hi_customer",
+        model="bulbul:v4-flash",
+        language="hi-IN",
+        synthesizer_key="test-key",
+        task_manager_instance=_task_manager(),
+        **provider_config,
+    )
+
+    assert synth._http_payload("hello")["enable_preprocessing"] is expected
+    assert synth._config_message()["data"]["enable_preprocessing"] is expected
+
+
 @pytest.mark.parametrize("model", ["bulbul:v2", "bulbul:v3"])
 def test_sarvam_speed_is_on_http_and_websocket_payloads(model):
     # The HTTP payload is what pre-renders the cached welcome; without pace it plays at default speed.

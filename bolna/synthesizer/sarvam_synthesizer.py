@@ -44,6 +44,7 @@ class SarvamSynthesizer(StreamSynthesizer):
         buffer_size=400,
         speed=1.0,
         loudness=1.0,
+        enable_preprocessing=True,
         synthesizer_key=None,
         **kwargs,
     ):
@@ -78,7 +79,7 @@ class SarvamSynthesizer(StreamSynthesizer):
             raise ValueError(f"Sarvam loudness must be between {SARVAM_LOUDNESS_MIN} and {SARVAM_LOUDNESS_MAX}")
         self.pitch = 0.0
         self.pace = speed
-        self.enable_preprocessing = True
+        self.enable_preprocessing = enable_preprocessing
 
     def get_sleep_time(self):
         return 0.01
