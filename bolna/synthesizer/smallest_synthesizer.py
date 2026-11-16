@@ -56,6 +56,16 @@ class SmallestSynthesizer(StreamSynthesizer):
         self.api_url = "https://api.smallest.ai/waves/v1/tts"
         self.ws_url = "wss://api.smallest.ai/waves/v1/tts/live"
 
+        # Interruption handling: Smallest's WS has no in-band cancel and only ever
+        # processes one request per connection (a second request sent while one is still
+        # streaming is silently dropped, confirmed empirically — no error, no response).
+        # So handle_interruption() both marks the in-flight turn's audio to be dropped
+        # (ignored_sequence_ids) and closes the socket to free it up for the next turn;
+        # _interrupting tells receiver() that the resulting ConnectionClosed is expected,
+        # so it reconnects instead of ending the generator.
+        self.ignored_sequence_ids = set()
+        self._interrupting = False
+
     # ------------------------------------------------------------------
     # StreamSynthesizer hooks
     # ------------------------------------------------------------------
@@ -64,6 +74,10 @@ class SmallestSynthesizer(StreamSynthesizer):
         return "mulaw"
 
     def _process_audio_chunk(self, chunk):
+        # Drop trailing audio for a turn that handle_interruption() already cancelled —
+        # a few chunks can still arrive before the connection actually closes.
+        if self.meta_info.get("sequence_id") in self.ignored_sequence_ids:
+            return None
         # /waves/v1/tts/live ignores output_format (verified empirically — ulaw/pcm/wav/
         # omitted all return identical bytes) and always sends raw, headerless 16-bit PCM,
         # so convert to mulaw here rather than relying on a per-provider telephony fallback
@@ -80,6 +94,21 @@ class SmallestSynthesizer(StreamSynthesizer):
             "sample_rate": self.sampling_rate,
             "speed": self.speed,
         }
+
+    # ------------------------------------------------------------------
+    # Interruption
+    # ------------------------------------------------------------------
+
+    async def handle_interruption(self):
+        try:
+            # -1 (and None) mark canned/non-turn speech (handoff, welcome message) and can
+            # legitimately repeat across separate utterances — never treat it as stale.
+            if self.current_sequence_id not in (None, -1):
+                self.ignored_sequence_ids.add(self.current_sequence_id)
+            self._interrupting = True
+            await self.close_connection()
+        except Exception as e:
+            logger.error(f"Error in handle_interruption: {e}")
 
     # ------------------------------------------------------------------
     # sender / receiver
@@ -144,6 +173,11 @@ class SmallestSynthesizer(StreamSynthesizer):
                     yield b"\x00"
 
             except websockets.exceptions.ConnectionClosed:
+                if self._interrupting:
+                    # Expected: handle_interruption() closed this socket deliberately.
+                    # monitor_connection() reconnects; keep the loop (and generate()) alive.
+                    self._interrupting = False
+                    continue
                 break
             except Exception as e:
                 logger.error(f"Error occurred in receiver - {e}")
