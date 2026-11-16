@@ -80,8 +80,7 @@ class SmallestSynthesizer(StreamSynthesizer):
         return "mulaw"
 
     def _process_audio_chunk(self, chunk):
-        # Drop trailing audio for a turn that handle_interruption() already cancelled —
-        # a few chunks can still arrive before the connection actually closes.
+        # Drop trailing audio for a turn handle_interruption() already cancelled.
         if self.meta_info.get("sequence_id") in self.ignored_sequence_ids:
             return None
         # /waves/v1/tts/live ignores output_format (verified empirically — ulaw/pcm/wav/
@@ -129,10 +128,8 @@ class SmallestSynthesizer(StreamSynthesizer):
             if self.current_sequence_id not in (None, -1):
                 self.ignored_sequence_ids.add(self.current_sequence_id)
             if self.context_id and self._is_ws_connected():
-                # cancel_request discards whatever's still buffered for this context without
-                # speaking it (best-effort — audio already past "buffered" keeps playing out,
-                # same fundamental limit every provider here has against fast synthesis).
-                # context_close tears the context down immediately rather than its idle timeout.
+                # cancel_request discards buffered-but-unspoken text; context_close tears the
+                # context down immediately instead of waiting out its idle timeout.
                 await self._send_json({"context_id": self.context_id, "cancel_request": True})
                 await self._send_json({"context_id": self.context_id, "context_close": True})
             self.context_id = None
