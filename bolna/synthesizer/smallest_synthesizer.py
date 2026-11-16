@@ -19,12 +19,6 @@ class SmallestSynthesizer(StreamSynthesizer):
     # Attribution tag sent to Smallest AI so requests are tracked as bolna traffic.
     SOURCE = "bolna"
 
-    # `model` is passed straight through to Smallest's API with no backend-side allowlist —
-    # any checkpoint the account has access to works without a code change here. Known
-    # values as of this writing: "lightning_v3.1" (default, multilingual, cloning),
-    # "lightning_v3.1_pro" (English/Hindi premium pool), "lightning_v3.1_pro_10_26"
-    # (Pro checkpoint dated 2026-10-26). The platform.bolna.ai model dropdown is
-    # maintained in the frontend repo, not here.
     def __init__(
         self,
         voice_id,
@@ -52,10 +46,8 @@ class SmallestSynthesizer(StreamSynthesizer):
         self.speed = float(speed)
         if not SMALLEST_TTS_SPEED_MIN <= self.speed <= SMALLEST_TTS_SPEED_MAX:
             raise ValueError(f"Smallest speed must be between {SMALLEST_TTS_SPEED_MIN} and {SMALLEST_TTS_SPEED_MAX}")
-        # Smallest always streams, matching the other streaming-only synthesizers in this
-        # codebase: the buffered-HTTP loop (base_synthesizer._generate_http_loop) sends one
-        # container-framed clip per ~40-char buffer and the telephony handler mulaw-encodes
-        # it without stripping the header, producing an audible glitch at every chunk boundary.
+        # Buffered-HTTP mode sends one WAV-containerized clip per ~40-char buffer, and the
+        # telephony handler mulaw-encodes it without stripping the header — audible glitches.
         self.stream = True
 
         # Unified Waves endpoints (docs.smallest.ai -> /text-to-speech).
@@ -78,8 +70,7 @@ class SmallestSynthesizer(StreamSynthesizer):
             "language": self.language,
             "sample_rate": self.sampling_rate,
             "speed": self.speed,
-            # Raw mu-law, no container framing — matches what the telephony output
-            # handler expects and lets consecutive chunks concatenate cleanly.
+            # Raw mu-law, no container framing, so chunks concatenate cleanly.
             "output_format": "ulaw",
         }
 
@@ -184,8 +175,6 @@ class SmallestSynthesizer(StreamSynthesizer):
         return audio if audio else b"\x00"
 
     def _get_http_audio_format(self):
-        # One-shot HTTP path (synthesize()) always requests a full WAV container below —
-        # unrelated to _get_audio_format()'s "mulaw" tag, which describes the WS stream.
         return "wav"
 
     # ------------------------------------------------------------------
@@ -198,8 +187,8 @@ class SmallestSynthesizer(StreamSynthesizer):
             "voice_id": self.voice_id,
             "model": self.model,
             "sample_rate": self.sampling_rate,
-            # Hardcoded, not _get_audio_format() — that now returns "mulaw" for the WS
-            # stream tag below, which isn't a valid Smallest output_format value.
+            # Hardcoded: _get_audio_format() returns "mulaw" for the WS stream tag,
+            # not a valid Smallest output_format value.
             "output_format": "wav",
             "speed": self.speed,
         }
