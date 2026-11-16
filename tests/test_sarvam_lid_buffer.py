@@ -327,3 +327,4 @@ def test_detector_runs_unbiased_on_v4():
     url = SarvamLID(on_language=None, config={"sarvam_api_key": "k"})._build_url()
     assert "model=saaras:v4" in url
     assert "language-code=unknown" in url
+    assert "mode=" not in url  # v4 transcribes by default, same as sarvam_transcriber

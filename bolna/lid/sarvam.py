@@ -58,7 +58,6 @@ class SarvamLID(LIDBackend):
     def _build_url(self) -> str:
         params = {
             "model": "saaras:v4",
-            "mode": "transcribe",
             "language-code": "unknown",
             "high_vad_sensitivity": "true",
             # Matches the working sarvam_transcriber config. We read transcripts from
