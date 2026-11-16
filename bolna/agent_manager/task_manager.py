@@ -2630,16 +2630,19 @@ class TaskManager(BaseManager):
         }
 
     def raw_heard_text(self, response_uid, turn_id):
-        """The ACKed text accumulated for a reply, unstripped, in the same lookup order as sync_history."""
+        """The ACKed text accumulated for a reply, unstripped so a tail can be joined at the spoken boundary.
+        A None id falls back to that store's last heard id."""
         input_handler = self.tools["input"]
         sources = (
-            (getattr(input_handler, "response_heard_by_response", {}), response_uid),
-            (getattr(input_handler, "response_heard_by_turn", {}), turn_id),
-            (getattr(self.mark_event_meta_data, "heard_text_by_response", {}), response_uid),
-            (getattr(self.mark_event_meta_data, "heard_text_by_turn", {}), turn_id),
+            (input_handler, "response_heard_by_response", response_uid, "last_heard_response_uid"),
+            (input_handler, "response_heard_by_turn", turn_id, "last_heard_turn_id"),
+            (self.mark_event_meta_data, "heard_text_by_response", response_uid, "last_heard_response_uid"),
+            (self.mark_event_meta_data, "heard_text_by_turn", turn_id, "last_heard_turn_id"),
         )
-        for store, key in sources:
-            text = store.get(key) if key is not None else None
+        for owner, store_name, key, last_heard_name in sources:
+            if key is None:
+                key = getattr(owner, last_heard_name, None)
+            text = getattr(owner, store_name, {}).get(key) if key is not None else None
             if text and text.strip():
                 return text
         return ""
@@ -2700,21 +2703,16 @@ class TaskManager(BaseManager):
                 f"mark_ids={[mid for mid, _ in mark_events_data]}"
             )
             input_handler = self.tools["input"]
-            response_heard = input_handler.get_response_heard_for_response(target_response_uid)
-            if not response_heard:
-                response_heard = input_handler.get_response_heard_for_turn(target_turn_id)
-            if not response_heard:
-                response_heard = self.mark_event_meta_data.get_heard_text_for_response(target_response_uid)
-            if not response_heard:
-                response_heard = self.mark_event_meta_data.get_heard_text_for_turn(target_turn_id)
-            if not response_heard:
+            raw_heard = self.raw_heard_text(target_response_uid, target_turn_id)
+            if not raw_heard.strip():
                 # Only fall back to global accumulator when target_turn_id is unknown.
                 # With a known target turn, the global can hold stale text from a
                 # previous turn (e.g. acked post-tool audio before reset), which
                 # would corrupt the wrong message.
                 if target_turn_id is None:
-                    response_heard = input_handler.response_heard_by_user
+                    raw_heard = input_handler.response_heard_by_user or ""
                     target_turn_id = getattr(input_handler, "last_heard_turn_id", None)
+            response_heard = raw_heard.strip()
             logger.info(f"sync_history: response_heard len={len(response_heard) if response_heard else 0}")
             if response_heard:
                 logger.info(f"response_heard (last 10 chars): {response_heard[-10:]}")
@@ -2752,9 +2750,7 @@ class TaskManager(BaseManager):
                             f"sync_history: crediting unacked tail ({tail_play_time:.2f}s elapsed, {len(tail_text)} chars)"
                         )
                         # The unstripped heard text keeps the chunk boundary as spoken; a guessed space can split a word.
-                        raw_heard = self.raw_heard_text(target_response_uid, target_turn_id)
-                        base = raw_heard if raw_heard.strip() == response_heard else response_heard
-                        response_heard = (base + tail_text).strip()
+                        response_heard = (raw_heard + tail_text).strip()
 
             if not response_heard:
                 pending_marks = [{"mark_id": k, "mark_data": v} for k, v in mark_events_data]
