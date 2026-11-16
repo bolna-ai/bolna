@@ -99,3 +99,11 @@ async def test_cleanup_with_nothing_playing_does_not_flip_the_flag_again():
 
     assert tm.tools["input"].is_audio_being_played_to_user() is False
     assert tm.tools["input"].reasons == []
+
+
+async def test_cleanup_credits_the_chunk_that_was_mid_playback():
+    tm = _make_task_manager(playing=True)
+
+    await tm._TaskManager__cleanup_downstream_tasks()
+
+    assert tm.sync_history.await_args.kwargs.get("extend_with_playback_estimate") is True
