@@ -19,7 +19,7 @@ logger = configure_logger(__name__)
 
 class SarvamLID(LIDBackend):
     """
-    LID via Sarvam saaras:v3 with language_code=unknown.
+    LID via Sarvam saaras:v4 with language_code=unknown.
 
     Streams audio over a persistent WebSocket; Sarvam returns language_code
     inline per utterance. Zero added latency to the ASR path.
@@ -37,8 +37,6 @@ class SarvamLID(LIDBackend):
         super().__init__(on_language, config)
         self._api_key = config.get("sarvam_api_key") or os.getenv("SARVAM_API_KEY", "")
         self._host = config.get("sarvam_host") or os.getenv("SARVAM_HOST", "api.sarvam.ai")
-        # Per-agent override via the language_switch_saaras_v4_lid feature flag.
-        self._model = config.get("sarvam_model") or "saaras:v3"
         self._telephony = config.get("telephony_provider", "")
         # Target rate Saaras receives (it wants 16k). Per-provider INPUT rate/encoding
         # must mirror sarvam_transcriber._configure_audio_params — telephony providers
@@ -59,7 +57,7 @@ class SarvamLID(LIDBackend):
 
     def _build_url(self) -> str:
         params = {
-            "model": self._model,
+            "model": "saaras:v4",
             "mode": "transcribe",
             "language-code": "unknown",
             "high_vad_sensitivity": "true",
