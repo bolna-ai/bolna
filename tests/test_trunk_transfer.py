@@ -68,6 +68,7 @@ def _make_tm(mode, *, has_transfer, provider="trunk"):
     tm.response_in_pipeline = False
     tm._synthesis_awaiting_first_audio = False
     tm.repeat_after_silence_seconds = cfg["repeat"]
+    tm.opening_node = None
     tm.max_silence_repeats = DEFAULT_MAX_SILENCE_REPEATS
     tm._silence_repeats_sent = 0
     tm._silence_period = None
@@ -191,7 +192,7 @@ class _FakeSession:
     async def __aexit__(self, *exc):
         return False
 
-    def post(self, url, json=None):
+    def post(self, url, json=None, **kwargs):
         self.posted = json
         return _FakeResponse(self.status, self.body)
 
@@ -199,6 +200,7 @@ class _FakeSession:
 @pytest.fixture
 def transfer_webhook(fast_clock, monkeypatch):
     monkeypatch.setattr(task_manager_module, "convert_to_request_log", MagicMock())
+    monkeypatch.setenv("CALL_TRANSFER_WEBHOOK_URL", "http://backend/process_transfer")
 
     def _install(**kwargs):
         session = _FakeSession(**kwargs)
@@ -211,7 +213,7 @@ def transfer_webhook(fast_clock, monkeypatch):
 async def _call_transfer_tool(tm):
     """The LLM's transfer_call, down the same tool-call path a live turn takes."""
     await tm._TaskManager__execute_function_call(
-        "http://backend/process_transfer",
+        None,
         "POST",
         None,
         None,

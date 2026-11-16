@@ -186,3 +186,16 @@ async def test_mark_registration_carries_turn_mapping_fields():
     assert entry["response_uid"] == "r-uid"
     assert entry["response_group_uid"] == "g-uid"
     assert entry["text_synthesized"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_live_welcome_counts_as_played_only_on_its_end_of_stream_chunk():
+    # The streaming synthesizer reuses the welcome's meta, end_of_llm_stream included, for every chunk.
+    handler, ws, _ = _make_output()
+    meta = {"type": "audio", "sequence_id": -1, "message_category": "agent_welcome_message", "end_of_llm_stream": True}
+
+    await handler.handle({"data": PCM, "meta_info": {**meta, "mark_id": "m-1"}})
+    assert handler._final_mark_id is None
+
+    await handler.handle({"data": PCM, "meta_info": {**meta, "mark_id": "m-2", "end_of_synthesizer_stream": True}})
+    assert handler._final_mark_id == "m-2"

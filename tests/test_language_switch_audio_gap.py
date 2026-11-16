@@ -83,6 +83,48 @@ async def test_switch_abandoned_on_transfer_during_gap(language_switch_tm):
     assert "gated:hangup" in _outcomes(tm)
 
 
+async def test_switch_abandoned_when_cleanup_clears_history_during_settle(language_switch_tm, monkeypatch):
+    # Call cleanup sets conversation_history to None without the switch task being cancelled;
+    # reading it after the settle raised AttributeError at the end of the call.
+    tm = language_switch_tm()
+    monkeypatch.setenv("LANGUAGE_SWITCH_SETTLE_MS", "200")  # the fixture zeroes it
+    tm.tools["transcriber"].lid_buffer_age.return_value = 0.0
+
+    async def cleanup_midway():
+        await asyncio.sleep(0.05)
+        tm.conversation_history = None
+
+    asyncio.create_task(cleanup_midway())
+    assert await _run(tm) is None
+    tm.language_switcher.decide.assert_not_awaited()
+    tm.switch_language.assert_not_awaited()
+
+
+async def test_switch_abandoned_when_cleanup_clears_history_during_decide(language_switch_tm):
+    tm = language_switch_tm()
+
+    async def decide_then_cleanup(*args, **kwargs):
+        tm.conversation_history = None
+        return {"target_language": "mr", "target_confidence": 0.95, "reasoning": "clear Marathi"}
+
+    tm.language_switcher.decide = AsyncMock(side_effect=decide_then_cleanup)
+    assert await _run(tm) is None
+    tm.switch_language.assert_not_awaited()
+    assert "gated:hangup" in _outcomes(tm)
+
+
+async def test_no_followup_when_cleanup_clears_history_during_switch(language_switch_tm):
+    tm = language_switch_tm(gap=0)
+
+    async def switch_then_cleanup(*args, **kwargs):
+        tm.conversation_history = None
+
+    tm.switch_language = AsyncMock(side_effect=switch_then_cleanup)
+    assert await _run(tm) is None
+    tm._TaskManager__play_switch_handoff.assert_not_awaited()
+    assert "switched" in _outcomes(tm)
+
+
 async def test_detector_corroboration_admits_a_lower_llm_confidence(language_switch_tm):
     # Detector independently agrees on the target at high prob with substantive audio, so a 0.6
     # self-report switches where the bare 0.7 gate would have refused.

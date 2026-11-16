@@ -89,11 +89,11 @@ EXPECTED_FIELDS = {
         "model": False,
         "temperature": False,
         "acoustic_temperature": False,
-        "max_new_tokens": False,
         "audio_quality": False,
         "chunk_length_schedule": False,
     },
-    "custom": {"voice": True, "model": True, "speed": False},
+    "navana": {"voice": True, "voice_id": True, "model": True, "language": True},
+    "custom": {"voice": True, "model": True, "speed": False, "extra_body": False},
 }
 
 

@@ -201,9 +201,10 @@ async def test_watcher_skips_the_decide_when_buffer_is_all_active_language(monke
     pool.lid_buffer_language.return_value = "en"
     pool.lid_buffer_segments.return_value = [{"lang": "en"}, {"lang": "en"}]
     pool.lid_buffer_event.return_value = None
-    tm.tools = {"transcriber": pool}
+    tm.tools = {"transcriber": pool, "input": MagicMock(**{"welcome_message_played.return_value": True})}
     tm._should_ignore_transcriber_input = TaskManager._should_ignore_transcriber_input.__get__(tm, TaskManager)
     tm._TaskManager__buffered_language_evidence = TaskManager._TaskManager__buffered_language_evidence
+    tm._TaskManager__spoken_over_welcome = TaskManager._TaskManager__spoken_over_welcome.__get__(tm, TaskManager)
     watcher = TaskManager._TaskManager__lid_idle_watcher.__get__(tm, TaskManager)
 
     task = asyncio.create_task(watcher())
@@ -229,9 +230,10 @@ async def test_watcher_still_fires_when_a_foreign_tag_is_present(monkeypatch):
     pool.lid_buffer_language.return_value = "hi"  # latest is active…
     pool.lid_buffer_segments.return_value = [{"lang": "en"}, {"lang": "hi"}]  # …but 'en' earlier
     pool.lid_buffer_event.return_value = None
-    tm.tools = {"transcriber": pool}
+    tm.tools = {"transcriber": pool, "input": MagicMock(**{"welcome_message_played.return_value": True})}
     tm._should_ignore_transcriber_input = TaskManager._should_ignore_transcriber_input.__get__(tm, TaskManager)
     tm._TaskManager__buffered_language_evidence = TaskManager._TaskManager__buffered_language_evidence
+    tm._TaskManager__spoken_over_welcome = TaskManager._TaskManager__spoken_over_welcome.__get__(tm, TaskManager)
     watcher = TaskManager._TaskManager__lid_idle_watcher.__get__(tm, TaskManager)
 
     task = asyncio.create_task(watcher())

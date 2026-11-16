@@ -33,7 +33,7 @@ def _tm(*, has_transfer=False, end_call=False, hangup=False, buffer_age=5.0):
     pool.lid_buffer_age.return_value = buffer_age
     pool.lid_buffer_language.return_value = "hi"  # == active → mismatch False, threshold=idle_flush
     pool.lid_buffer_event.return_value = None
-    tm.tools = {"transcriber": pool}
+    tm.tools = {"transcriber": pool, "input": MagicMock(**{"welcome_message_played.return_value": True})}
 
     # Real methods under test / relied upon.
     tm._should_ignore_transcriber_input = TaskManager._should_ignore_transcriber_input.__get__(tm, TaskManager)
@@ -41,6 +41,7 @@ def _tm(*, has_transfer=False, end_call=False, hangup=False, buffer_age=5.0):
     # staticmethod: bind the real one, or unpacking a MagicMock raises inside the watcher and its
     # outer handler swallows it — the loop would exit and the test would pass for the wrong reason.
     tm._TaskManager__buffered_language_evidence = TaskManager._TaskManager__buffered_language_evidence
+    tm._TaskManager__spoken_over_welcome = TaskManager._TaskManager__spoken_over_welcome.__get__(tm, TaskManager)
     return tm
 
 

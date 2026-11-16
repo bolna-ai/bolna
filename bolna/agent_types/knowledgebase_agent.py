@@ -64,6 +64,7 @@ class KnowledgeBaseAgent(BaseAgent):
                 "temperature": self.config.get("temperature", 0.7),
                 "max_tokens": self.config.get("max_tokens", 150),
                 "provider": provider,
+                "run_id": self.config.get("execution_id"),
             }
 
             for key in [
@@ -81,6 +82,7 @@ class KnowledgeBaseAgent(BaseAgent):
                 "compact_threshold",
                 "overflow_llm",
                 "extra_body",
+                "openai_model_endpoints",
             ]:
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]

@@ -68,6 +68,7 @@ class SynthesizerProvider(str, Enum):
     KALPA = "kalpa"
     GEMINI = "gemini"
     SONIOX = "soniox"
+    NAVANA = "navana"
     # A customer's own TTS server, over the OpenAI speech API.
     CUSTOM = "custom"
 
@@ -123,6 +124,8 @@ class LLMProvider(str, Enum):
     AZURE = "azure"
     GOOGLE = "google"
     BOLNA = "bolna"
+    SARVAM = "sarvam"
+    BEDROCK = "bedrock"
 
     @classmethod
     def all_values(cls):
@@ -273,6 +276,7 @@ class AudioPlaybackReason(str, Enum):
 
     AUDIO_SENT = "audio_sent"
     BARGE_IN = "barge_in"
+    DOWNSTREAM_CLEANUP = "downstream_cleanup"
     FINAL_CHUNK_ACK = "final_chunk_ack"
     FREESWITCH_PLAYOUT_DONE_EVENT = "freeswitch_playout_done_event"
     FREESWITCH_PLAYOUT_TIMER = "freeswitch_playout_timer"
@@ -337,6 +341,13 @@ class NodeType(str, Enum):
     LLM = "llm"
     STATIC = "static"
     ROUTER = "router"
+
+
+class EdgeOrder(str, Enum):
+    """TIERED ranks edges by type, then priority; PRIORITY lets an intent edge outrank an expression."""
+
+    TIERED = "tiered"
+    PRIORITY = "priority"
 
 
 class S2SProvider(str, Enum):

@@ -22,7 +22,12 @@ from openai import (
 import websockets
 from websockets.protocol import State as WSState
 
-from bolna.constants import DEFAULT_LANGUAGE_CODE, default_reasoning_effort, is_reasoning_model
+from bolna.constants import (
+    DEFAULT_LANGUAGE_CODE,
+    LLM_VENDOR_ENDPOINTS,
+    default_reasoning_effort,
+    is_reasoning_model,
+)
 from bolna.enums import LLMProvider, ResponseStreamEvent, ResponseItemType, Verbosity
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
@@ -37,22 +42,36 @@ from bolna.helpers.logger_config import configure_logger
 logger = configure_logger(__name__)
 load_dotenv()
 
+# OpenAI hosts verified to serve Responses over WebSocket; any other endpoint streams over HTTP.
+RESPONSES_WS_HOSTS = frozenset({"api.openai.com", "eu.api.openai.com", "in.api.openai.com"})
+
+
+def responses_ws_url(base_url: Optional[str]) -> Optional[str]:
+    """The Responses WebSocket URL for this endpoint, or None when it only streams over HTTP."""
+    host = urlparse(base_url).hostname if base_url else "api.openai.com"
+    return f"wss://{host}/v1/responses" if host in RESPONSES_WS_HOSTS else None
+
+
+class WSConnectError(Exception):
+    """The Responses WebSocket could not be opened."""
+
 
 class OpenAIWSConnection:
-    """Persistent WebSocket connection to wss://api.openai.com/v1/responses.
+    """Persistent WebSocket connection to an OpenAI Responses endpoint.
 
     - Eager connect at init, ready before first LLM call
     - Auto-reconnect on connection drop or before 60-min server limit
     - Sequential: one in-flight response at a time (API constraint)
     """
 
-    WS_URL = "wss://api.openai.com/v1/responses"
     RECONNECT_BEFORE_SECS = 55 * 60
+    OPEN_TIMEOUT_SECS = 3
     TERMINAL_EVENTS = ResponseStreamEvent.terminal_events()
     RESPONSE_TERMINAL_EVENTS = ResponseStreamEvent.response_terminal_events()
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, url: str):
         self._api_key = api_key
+        self._url = url
         self._ws = None
         self._needs_reset = False
         self._connected_at: float = 0
@@ -94,11 +113,12 @@ class OpenAIWSConnection:
 
     async def _connect(self):
         self._ws = await websockets.connect(
-            self.WS_URL,
+            self._url,
             additional_headers={"Authorization": f"Bearer {self._api_key}"},
             max_size=None,
+            open_timeout=self.OPEN_TIMEOUT_SECS,
             close_timeout=5,
-            ssl=get_ssl_context(self.WS_URL),
+            ssl=get_ssl_context(self._url),
         )
         self._connected_at = time.monotonic()
         logger.info("WebSocket connected to OpenAI Responses API")
@@ -106,7 +126,10 @@ class OpenAIWSConnection:
     async def stream_response(self, create_params: dict):
         """Send response.create and yield raw event dicts until terminal event."""
         async with self._lock:
-            await self.ensure_connected()
+            try:
+                await self.ensure_connected()
+            except Exception as e:
+                raise WSConnectError(str(e)) from e
             # Before the send: a cancelled send may still have put the frame on the wire,
             # and leaves the connection inconsistent either way. The try covers it too.
             self._needs_reset = True
@@ -218,22 +241,41 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
         provider = kwargs.get("provider")
-        self_hosted = provider in (LLMProvider.CUSTOM.value, LLMProvider.BOLNA.value)
+        model_endpoint = (kwargs.get("openai_model_endpoints") or {}).get(model)
+        if model_endpoint and provider in (None, LLMProvider.OPENAI.value):
+            # A model with its own OpenAI endpoint runs there; every other model keeps the caller's.
+            kwargs = {**kwargs, **model_endpoint}
+        vendor_endpoint = LLM_VENDOR_ENDPOINTS.get(provider)
+        if vendor_endpoint:
+            vendor_url, key_env = vendor_endpoint
+            vendor_key = kwargs.get("llm_key") or os.getenv(key_env)
+            if not vendor_key:
+                raise ValueError(f"No API key for LLM provider {provider}: pass llm_key or set {key_env}")
+            kwargs = {**kwargs, "base_url": vendor_url, "llm_key": vendor_key}
+        compatible_endpoint = vendor_endpoint is not None or provider in (
+            LLMProvider.CUSTOM.value,
+            LLMProvider.BOLNA.value,
+        )
         self._forces_tools_by_schema = provider in SCHEMA_FORCED_TOOL_PROVIDERS
         is_custom = provider == LLMProvider.CUSTOM.value
-        if self_hosted:
+        if compatible_endpoint:
             if kwargs.get("extra_body"):
                 self.model_args["extra_body"] = kwargs["extra_body"]
         else:
             self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
         # http2=False: cancelled h2 requests leak streams until the connection pins at 100 (barge-in)
-        http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False)
+        http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False, guarded=is_custom)
 
-        if self_hosted:
+        if compatible_endpoint:
             base_url = kwargs.get("base_url")
             api_key = kwargs.get("llm_key", None)
-            self.async_client = AsyncOpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
+            run_id = kwargs.get("run_id")
+            # Bolna's inference gateway hashes on this to keep a call's turns on the replica holding its cache.
+            call_headers = {"X-Call-Id": run_id} if provider == LLMProvider.BOLNA.value and run_id else None
+            self.async_client = AsyncOpenAI(
+                base_url=base_url, api_key=api_key, http_client=http_client, default_headers=call_headers
+            )
         else:
             llm_key = kwargs.get("llm_key", os.getenv("OPENAI_API_KEY"))
             base_url = kwargs.get("base_url")
@@ -258,13 +300,14 @@ class OpenAiLLM(OpenAICompatibleLLM):
             # logger.info(f'thread id : {self.thread_id}')
         self.run_id = kwargs.get("run_id", None)
 
-        # Self-hosted endpoints speak chat completions only; Responses-API chaining is OpenAI-specific.
-        use_responses_api = kwargs.get("use_responses_api", False) and not self_hosted
+        # Responses-API chaining is OpenAI-specific.
+        use_responses_api = kwargs.get("use_responses_api", False) and not compatible_endpoint
         self._init_responses_api(use_responses_api, compact_threshold=kwargs.get("compact_threshold"))
 
         self._ws_transport = None
-        if self.use_responses_api and not self_hosted and not base_url:
-            self._ws_transport = OpenAIWSConnection(api_key=api_key)
+        ws_url = responses_ws_url(base_url)
+        if self.use_responses_api and not compatible_endpoint and ws_url:
+            self._ws_transport = OpenAIWSConnection(api_key=api_key, url=ws_url)
             self._ws_transport.start_connect()
 
     async def _ensure_base_url_allowed(self):
@@ -310,7 +353,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             "stream_options": {"include_usage": True},
         }
 
-        if not is_reasoning_model(self.model):
+        if not is_reasoning_model(self.model_family):
             model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
@@ -599,11 +642,6 @@ class OpenAiLLM(OpenAICompatibleLLM):
             messages, meta_info, request_json, tool_choice, store=True, tools=tools
         )
 
-        # WS endpoint silently closes on float temperature — coerce to int
-        temp = create_params.get("temperature")
-        if temp is not None:
-            create_params["temperature"] = int(round(temp))
-
         answer, buffer = "", ""
         func_call_args = {}
         func_call_names = {}
@@ -778,6 +816,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
         except Exception as e:
             logger.error(f"WS streaming error: {e}, falling back to HTTP SSE")
             self.invalidate_response_chain()
+            if isinstance(e, WSConnectError):
+                # A socket that cannot open now is not retried each turn; HTTP serves the rest of the call.
+                transport, self._ws_transport = self._ws_transport, None
+                asyncio.ensure_future(transport.disconnect())
             async for chunk in self._generate_stream_responses(
                 messages, synthesize, request_json, meta_info, tool_choice, tools
             ):

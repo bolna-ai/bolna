@@ -26,6 +26,7 @@ from .enums import (
     ExpressionOperator,
     ExpressionLogic,
     EdgeConditionType,
+    EdgeOrder,
     NodeType,
     VariableType,
 )
@@ -39,6 +40,7 @@ from .constants import (
     ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES,
     MODEL_REASONING_EFFORT_MAP,
     RESERVED_LLM_REQUEST_KEYS,
+    RESERVED_TTS_REQUEST_KEYS,
     OPENAI_TTS_SPEED_MAX,
     OPENAI_TTS_SPEED_MIN,
     PRONUNCIATION_RULE_SAY_AS_MAX_LENGTH,
@@ -228,6 +230,19 @@ class OpenAIConfig(BaseModel):
     speed: Optional[float] = Field(default=1.0, ge=OPENAI_TTS_SPEED_MIN, le=OPENAI_TTS_SPEED_MAX)
 
 
+def _no_reserved_tts_keys(extra_body):
+    reserved = sorted(RESERVED_TTS_REQUEST_KEYS.intersection(extra_body))
+    if reserved:
+        raise ValueError(f"extra_body cannot override request fields: {', '.join(reserved)}")
+    return extra_body
+
+
+class CustomTTSConfig(OpenAIConfig):
+    # Merged into every speech request to the customer's server. Checked on the field's own type, so the
+    # agent PATCH, which validates field by field, enforces it too.
+    extra_body: Optional[Annotated[Dict[str, Any], AfterValidator(_no_reserved_tts_keys)]] = None
+
+
 class DeepgramConfig(BaseModel):
     voice_id: str
     voice: str
@@ -301,10 +316,9 @@ class KalpaConfig(BaseModel):
     voice: str = "Arjun"
     voice_id: Optional[str] = None
     model: str = "kalpa-tts-1"
-    temperature: Optional[float] = None
-    acoustic_temperature: Optional[float] = None
-    max_new_tokens: Optional[int] = None
-    audio_quality: Optional[str] = None
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=1.5)
+    acoustic_temperature: Optional[float] = Field(default=None, ge=0.0, le=1.5)
+    audio_quality: Optional[Literal["low", "medium", "high"]] = None
     chunk_length_schedule: Optional[List[int]] = None
 
 
@@ -326,6 +340,12 @@ class SonioxConfig(StandardVoiceConfig):
     reduce_silence: Optional[bool] = None
 
 
+class NavanaConfig(StandardVoiceConfig):
+    # voice_id is the id Navana addresses ("default_female", or a cloned "cv_..."); every voice speaks
+    # every language. model is "navana-tts", or "navana-tts-fast" for the distilled model.
+    pass
+
+
 # The config class each provider's provider_config is validated against. Adding a provider means
 # one entry here.
 SYNTHESIZER_CONFIG_MODELS = {
@@ -343,7 +363,8 @@ SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.KALPA.value: KalpaConfig,
     SynthesizerProvider.GEMINI.value: GeminiConfig,
     SynthesizerProvider.SONIOX.value: SonioxConfig,
-    SynthesizerProvider.CUSTOM.value: OpenAIConfig,
+    SynthesizerProvider.NAVANA.value: NavanaConfig,
+    SynthesizerProvider.CUSTOM.value: CustomTTSConfig,
 }
 
 
@@ -390,6 +411,7 @@ class Transcriber(BaseModel):
     eager_eot_threshold: Optional[float] = None
     eot_timeout_ms: Optional[int] = None
     language_hints: Optional[List[str]] = None
+    hinglish_mode: Optional[bool] = False
     delay: Optional[str] = "medium"
     noise_reduction: Optional[bool] = False
     vad_threshold: Optional[float] = 0.5
@@ -681,7 +703,7 @@ class GraphEdge(BaseModel):
     # Optional parameters to collect during transition
     # Name -> type, e.g. {"city": "string"}, or name -> GraphEdgeParameter for a per-key definition.
     parameters: Optional[Dict[str, GraphEdgeParameterSpec]] = None
-    # lower = evaluated first within a tier (expression/intent/unconditional); does not rank across tiers.
+    # lower = evaluated first within a tier; across intent and expression only on an edge_order "priority" node.
     # Defaults: expression/unconditional=0, llm=100
     priority: Optional[int] = None
 
@@ -731,6 +753,8 @@ class GraphNode(BaseModel):
     routing_model: Optional[str] = None
     # Per-node routing effort; None inherits the agent's routing_reasoning_effort.
     routing_reasoning_effort: Optional[ReasoningEffort] = None
+    # None routes tiered.
+    edge_order: Optional[EdgeOrder] = None
     examples: Optional[Dict[str, str]] = None
     edges: List[GraphEdge] = Field(default_factory=list)
     function_call: Optional[str] = None
