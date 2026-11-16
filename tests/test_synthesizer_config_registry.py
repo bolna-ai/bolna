@@ -143,7 +143,7 @@ def test_elevenlabs_control_defaults_are_stable():
     assert config.similarity_boost == 0.75
     assert config.speed == 1.0
     assert config.style == 0.0
-    assert config.clone_strength == 0.0
+    assert config.clone_strength is None
 
 
 @pytest.mark.parametrize(

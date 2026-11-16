@@ -124,7 +124,7 @@ class ElevenlabsBase(StreamSynthesizer):
         self.use_mulaw = kwargs.get("use_mulaw", True)
         self.temperature = temperature
         self.similarity_boost = similarity_boost
-        # Only v4 takes it; left unset it stays off the wire and ElevenLabs applies its own default.
+        # Only v4 takes it; left unset it stays off the wire, so ElevenLabs uses the strength saved on the voice.
         takes_clone_strength = (model or "").startswith(ELEVENLABS_CLONE_STRENGTH_MODEL_PREFIXES)
         self.clone_strength = clone_strength if takes_clone_strength else None
         self.caching = caching
