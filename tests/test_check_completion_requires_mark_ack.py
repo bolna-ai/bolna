@@ -244,7 +244,6 @@ async def _run_silent_call(
     tm.repeat_after_silence_seconds = nodes[0]["repeat_after_silence_seconds"]
     tm.max_silence_repeats = max_silence_repeats
     tm._silence_repeats_sent = 0
-    tm._silence_period = None
     tm.check_if_user_online = False
     if not welcome_played:
         tm.opening_node = nodes[0]
@@ -274,7 +273,7 @@ async def _run_silent_call(
     async def clock_sleep(delay, *args, **kwargs):
         clock["now"] += delay
         if clock["now"] - started == user_speaks_at:
-            tm.time_since_last_spoken_human_word = clock["now"]
+            tm._note_caller_speech()
             events.append(("user", graph.current_node_id))
             agent_spoke()
         if clock["now"] - started > horizon_s:
