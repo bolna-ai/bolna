@@ -1,4 +1,5 @@
 import asyncio
+import audioop
 import base64
 import json
 import os
@@ -62,6 +63,14 @@ class SmallestSynthesizer(StreamSynthesizer):
     def _get_audio_format(self):
         return "mulaw"
 
+    def _process_audio_chunk(self, chunk):
+        # /waves/v1/tts/live ignores output_format (verified empirically — ulaw/pcm/wav/
+        # omitted all return identical bytes) and always sends raw, headerless 16-bit PCM,
+        # so convert to mulaw here rather than relying on a per-provider telephony fallback
+        # (Plivo/Vobiz don't convert — they trust the format tag and would ship these bytes
+        # as "audio/x-mulaw" untouched, which is static since they're still 16-bit PCM).
+        return audioop.lin2ulaw(chunk, 2)
+
     def form_payload(self, text):
         return {
             "voice_id": self.voice_id,
@@ -70,8 +79,6 @@ class SmallestSynthesizer(StreamSynthesizer):
             "language": self.language,
             "sample_rate": self.sampling_rate,
             "speed": self.speed,
-            # Raw mu-law, no container framing, so chunks concatenate cleanly.
-            "output_format": "ulaw",
         }
 
     # ------------------------------------------------------------------
@@ -187,8 +194,7 @@ class SmallestSynthesizer(StreamSynthesizer):
             "voice_id": self.voice_id,
             "model": self.model,
             "sample_rate": self.sampling_rate,
-            # Hardcoded: _get_audio_format() returns "mulaw" for the WS stream tag,
-            # not a valid Smallest output_format value.
+            # Unlike the WS route, the sync endpoint honors output_format — keep it "wav".
             "output_format": "wav",
             "speed": self.speed,
         }
