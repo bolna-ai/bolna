@@ -52,10 +52,10 @@ class SmallestSynthesizer(StreamSynthesizer):
         self.speed = float(speed)
         if not SMALLEST_TTS_SPEED_MIN <= self.speed <= SMALLEST_TTS_SPEED_MAX:
             raise ValueError(f"Smallest speed must be between {SMALLEST_TTS_SPEED_MIN} and {SMALLEST_TTS_SPEED_MAX}")
-        # Smallest always streams, like Cartesia/ElevenLabs/Pixa: the buffered-HTTP loop
-        # (base_synthesizer._generate_http_loop) sends one container-framed clip per
-        # ~40-char buffer and the telephony handler mulaw-encodes it without stripping
-        # the header, producing an audible glitch at every chunk boundary.
+        # Smallest always streams, matching the other streaming-only synthesizers in this
+        # codebase: the buffered-HTTP loop (base_synthesizer._generate_http_loop) sends one
+        # container-framed clip per ~40-char buffer and the telephony handler mulaw-encodes
+        # it without stripping the header, producing an audible glitch at every chunk boundary.
         self.stream = True
 
         # Unified Waves endpoints (docs.smallest.ai -> /text-to-speech).
