@@ -218,6 +218,7 @@ class ElevenLabsConfig(BaseModel):
     similarity_boost: Optional[float] = Field(default=0.75, ge=0.0, le=1.0)
     speed: Optional[float] = Field(default=1.0, ge=0.7, le=1.2)
     style: Optional[float] = Field(default=0.0, ge=0.0, le=1.0)
+    clone_strength: Optional[float] = Field(default=0.0, ge=0.0, le=1.0)
     # Applied in order. Phoneme rules only take effect on eleven_flash_v2, eleven_v3 and eleven_v4.
     pronunciation_dictionary_locators: Optional[List[PronunciationDictionaryLocator]] = Field(
         default=None, max_length=ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES

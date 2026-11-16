@@ -28,6 +28,7 @@ EXPECTED_FIELDS = {
         "similarity_boost": False,
         "speed": False,
         "style": False,
+        "clone_strength": False,
         "pronunciation_dictionary_locators": False,
     },
     "openai": {"voice": True, "model": True, "speed": False},
@@ -142,6 +143,7 @@ def test_elevenlabs_control_defaults_are_stable():
     assert config.similarity_boost == 0.75
     assert config.speed == 1.0
     assert config.style == 0.0
+    assert config.clone_strength == 0.0
 
 
 @pytest.mark.parametrize(
@@ -155,6 +157,8 @@ def test_elevenlabs_control_defaults_are_stable():
         ("speed", 1.21),
         ("style", -0.01),
         ("style", 1.01),
+        ("clone_strength", -0.01),
+        ("clone_strength", 1.01),
     ],
 )
 def test_elevenlabs_rejects_out_of_range_controls(field, value):
