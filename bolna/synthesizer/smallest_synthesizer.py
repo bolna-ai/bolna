@@ -1,8 +1,10 @@
 import asyncio
+import audioop
 import base64
 import json
 import os
 import time
+import uuid
 
 import aiohttp
 import websockets
@@ -46,28 +48,97 @@ class SmallestSynthesizer(StreamSynthesizer):
         self.speed = float(speed)
         if not SMALLEST_TTS_SPEED_MIN <= self.speed <= SMALLEST_TTS_SPEED_MAX:
             raise ValueError(f"Smallest speed must be between {SMALLEST_TTS_SPEED_MIN} and {SMALLEST_TTS_SPEED_MAX}")
+        # Buffered-HTTP mode sends one WAV-containerized clip per ~40-char buffer, and the
+        # telephony handler mulaw-encodes it without stripping the header — audible glitches.
+        self.stream = True
 
         # Unified Waves endpoints (docs.smallest.ai -> /text-to-speech).
         # HTTP: POST /waves/v1/tts, streaming: WSS /waves/v1/tts/live
         self.api_url = "https://api.smallest.ai/waves/v1/tts"
         self.ws_url = "wss://api.smallest.ai/waves/v1/tts/live"
 
+        # Context management (docs.smallest.ai -> text-to-speech-lightning/continuations):
+        # groups fragments of one turn under a context_id so interruption can send
+        # cancel_request/context_close instead of needing to touch the connection — a bare
+        # second request with no context_id is silently dropped if one is already streaming.
+        self.context_id = None
+        self._ctx_turn_id = None
+        self._ctx_sequence_id = None
+        self._ctx_finalized = True  # forces a fresh context_id on the very first push
+
+        # Responses don't echo context_id (per docs — only session_id, which doesn't
+        # correlate to our turns), so cancel_request/context_close are best-effort against
+        # whatever's still buffered server-side; a few already-in-flight chunks can still
+        # land after cancelling. Filtered here via bolna's own sequence_id bookkeeping.
+        self.ignored_sequence_ids = set()
+
     # ------------------------------------------------------------------
     # StreamSynthesizer hooks
     # ------------------------------------------------------------------
 
     def _get_audio_format(self):
-        return "wav"
+        return "mulaw"
 
-    def form_payload(self, text):
+    def _process_audio_chunk(self, chunk):
+        # Drop trailing audio for a turn handle_interruption() already cancelled.
+        if self.meta_info.get("sequence_id") in self.ignored_sequence_ids:
+            return None
+        # /waves/v1/tts/live ignores output_format (verified empirically — ulaw/pcm/wav/
+        # omitted all return identical bytes) and always sends raw, headerless 16-bit PCM,
+        # so convert to mulaw here rather than relying on a per-provider telephony fallback
+        # (Plivo/Vobiz don't convert — they trust the format tag and would ship these bytes
+        # as "audio/x-mulaw" untouched, which is static since they're still 16-bit PCM).
+        return audioop.lin2ulaw(chunk, 2)
+
+    def form_payload(self, text, continue_stream=True):
         return {
+            "context_id": self.context_id,
             "voice_id": self.voice_id,
             "text": text,
             "model": self.model,
             "language": self.language,
             "sample_rate": self.sampling_rate,
             "speed": self.speed,
+            "continue": continue_stream,
         }
+
+    def _on_push(self, meta_info, text):
+        """Fresh context_id on turn/sequence change or after the previous one finalized —
+        mirrors CartesiaSynthesizer's _on_push (same reason: this must run before the
+        shared _stamp_turn_start's bookkeeping gets reused for the next comparison)."""
+        if (
+            not self.context_id
+            or self._ctx_finalized
+            or self._ctx_turn_id != meta_info.get("turn_id")
+            or self._ctx_sequence_id != meta_info.get("sequence_id")
+        ):
+            self.context_id = str(uuid.uuid4())
+            self._ctx_turn_id = meta_info.get("turn_id")
+            self._ctx_sequence_id = meta_info.get("sequence_id")
+        self._ctx_finalized = meta_info.get("end_of_llm_stream", False)
+
+    # ------------------------------------------------------------------
+    # Interruption
+    # ------------------------------------------------------------------
+
+    async def handle_interruption(self):
+        try:
+            # -1 (and None) mark canned/non-turn speech (handoff, welcome message) and can
+            # legitimately repeat across separate utterances — never treat it as stale.
+            if self.current_sequence_id not in (None, -1):
+                self.ignored_sequence_ids.add(self.current_sequence_id)
+            if self.context_id and self._is_ws_connected():
+                # cancel_request discards buffered-but-unspoken text; context_close tears the
+                # context down immediately instead of waiting out its idle timeout.
+                await self._send_json({"context_id": self.context_id, "cancel_request": True})
+                await self._send_json({"context_id": self.context_id, "context_close": True})
+            self.context_id = None
+            self._ctx_finalized = True
+            # The interrupted context's end-of-stream is now dropped, so the
+            # next turn must be re-detected as new to clear stale queue entries.
+            self.current_turn_start_time = None
+        except Exception as e:
+            logger.error(f"Error in handle_interruption: {e}")
 
     # ------------------------------------------------------------------
     # sender / receiver
@@ -87,7 +158,7 @@ class SmallestSynthesizer(StreamSynthesizer):
                 try:
                     if self.ws_send_time is None:
                         self.ws_send_time = time.perf_counter()
-                    await self._send_json(self.form_payload(text))
+                    await self._send_json(self.form_payload(text, continue_stream=not end_of_llm_stream))
                 except Exception as e:
                     logger.error(f"Error sending chunk: {e}")
                     self.connection_error = str(e)
@@ -95,6 +166,14 @@ class SmallestSynthesizer(StreamSynthesizer):
 
             if end_of_llm_stream:
                 self.last_text_sent = True
+                if text == "":
+                    # No new text on this final call — still need to tell Smallest the
+                    # context is done rather than leaving it to its idle timeout.
+                    try:
+                        await self._send_json(self.form_payload("", continue_stream=False))
+                    except Exception as e:
+                        logger.error(f"Error sending end-of-stream signal: {e}")
+                        self.connection_error = str(e)
 
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
@@ -169,8 +248,11 @@ class SmallestSynthesizer(StreamSynthesizer):
         # Guard against null response from API
         return audio if audio else b"\x00"
 
+    def _get_http_audio_format(self):
+        return "wav"
+
     # ------------------------------------------------------------------
-    # HTTP
+    # HTTP (one-shot synthesize(), e.g. pre-warmed handoff clips — not the live call path)
     # ------------------------------------------------------------------
 
     def _http_payload(self, text):
@@ -179,7 +261,8 @@ class SmallestSynthesizer(StreamSynthesizer):
             "voice_id": self.voice_id,
             "model": self.model,
             "sample_rate": self.sampling_rate,
-            "output_format": self._get_audio_format(),
+            # Unlike the WS route, the sync endpoint honors output_format — keep it "wav".
+            "output_format": "wav",
             "speed": self.speed,
         }
 
