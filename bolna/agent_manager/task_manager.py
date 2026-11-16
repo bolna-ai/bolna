@@ -30,6 +30,7 @@ from bolna.constants import (
     DTMF_MESSAGE_PREFIX,
     DUPLICATE_RESPONSE_SIMILARITY,
     FILLER_DICT,
+    HEARD_TEXT_FULL_LENGTH_RATIO,
     DEFAULT_LANGUAGE_CODE,
     DEFAULT_MAX_SILENCE_REPEATS,
     DEFAULT_TIMEZONE,
@@ -2476,6 +2477,16 @@ class TaskManager(BaseManager):
         #     text_chunk = text_chunk[index+2:]
         return text_chunk
 
+    def sent_text_for_response(self, response_uid):
+        """The LLM text of a reply, staged or already in history; empty when unknown."""
+        for staged in self._pending_assistant_history.values():
+            if staged["response_uid"] == response_uid:
+                return str(staged["content"]).strip()
+        for msg in reversed(self.conversation_history.messages):
+            if msg.get("role") == "assistant" and msg.get("response_uid") == response_uid:
+                return (msg.get("content") or "").strip()
+        return ""
+
     def update_transcript_for_interruption(self, original_stream, heard_text):
         """Trim original response to match what was actually heard."""
         if original_stream is None:
@@ -2837,6 +2848,22 @@ class TaskManager(BaseManager):
                             else:
                                 response_heard = ""
                                 logger.info(f"turn_id={t_id}: nothing heard")
+
+            # TTS alignment drops characters, so its text only says how far playback got; the words come from the LLM text.
+            if target_response_uid is not None and response_heard:
+                sent_text = self.sent_text_for_response(target_response_uid)
+                if sent_text:
+                    heard_len = len(response_heard)
+                    if heard_len >= HEARD_TEXT_FULL_LENGTH_RATIO * len(sent_text):
+                        response_heard = sent_text
+                    else:
+                        cut = sent_text[:heard_len]
+                        if not (cut[-1:].isspace() or sent_text[heard_len : heard_len + 1].isspace()):
+                            cut = self._trim_partial_to_complete_words(cut) or cut
+                        response_heard = cut.strip()
+                    logger.info(
+                        f"sync_history: heard {heard_len}/{len(sent_text)} chars, using LLM text {response_heard[-20:]!r}"
+                    )
 
             # The duplicate check must compare a regenerated reply with what the caller heard, not what was sent.
             if self._last_spoken_assistant and self._last_spoken_assistant[0] == target_turn_id:
