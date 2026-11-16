@@ -19,6 +19,12 @@ class SmallestSynthesizer(StreamSynthesizer):
     # Attribution tag sent to Smallest AI so requests are tracked as bolna traffic.
     SOURCE = "bolna"
 
+    # `model` is passed straight through to Smallest's API with no backend-side allowlist —
+    # any checkpoint the account has access to works without a code change here. Known
+    # values as of this writing: "lightning_v3.1" (default, multilingual, cloning),
+    # "lightning_v3.1_pro" (English/Hindi premium pool), "lightning_v3.1_pro_10_26"
+    # (Pro checkpoint dated 2026-10-26). The platform.bolna.ai model dropdown is
+    # maintained in the frontend repo, not here.
     def __init__(
         self,
         voice_id,
@@ -46,6 +52,11 @@ class SmallestSynthesizer(StreamSynthesizer):
         self.speed = float(speed)
         if not SMALLEST_TTS_SPEED_MIN <= self.speed <= SMALLEST_TTS_SPEED_MAX:
             raise ValueError(f"Smallest speed must be between {SMALLEST_TTS_SPEED_MIN} and {SMALLEST_TTS_SPEED_MAX}")
+        # Smallest always streams, like Cartesia/ElevenLabs/Pixa: the buffered-HTTP loop
+        # (base_synthesizer._generate_http_loop) sends one container-framed clip per
+        # ~40-char buffer and the telephony handler mulaw-encodes it without stripping
+        # the header, producing an audible glitch at every chunk boundary.
+        self.stream = True
 
         # Unified Waves endpoints (docs.smallest.ai -> /text-to-speech).
         # HTTP: POST /waves/v1/tts, streaming: WSS /waves/v1/tts/live
@@ -57,7 +68,7 @@ class SmallestSynthesizer(StreamSynthesizer):
     # ------------------------------------------------------------------
 
     def _get_audio_format(self):
-        return "wav"
+        return "mulaw"
 
     def form_payload(self, text):
         return {
@@ -67,6 +78,9 @@ class SmallestSynthesizer(StreamSynthesizer):
             "language": self.language,
             "sample_rate": self.sampling_rate,
             "speed": self.speed,
+            # Raw mu-law, no container framing — matches what the telephony output
+            # handler expects and lets consecutive chunks concatenate cleanly.
+            "output_format": "ulaw",
         }
 
     # ------------------------------------------------------------------
@@ -169,8 +183,13 @@ class SmallestSynthesizer(StreamSynthesizer):
         # Guard against null response from API
         return audio if audio else b"\x00"
 
+    def _get_http_audio_format(self):
+        # One-shot HTTP path (synthesize()) always requests a full WAV container below —
+        # unrelated to _get_audio_format()'s "mulaw" tag, which describes the WS stream.
+        return "wav"
+
     # ------------------------------------------------------------------
-    # HTTP
+    # HTTP (one-shot synthesize(), e.g. pre-warmed handoff clips — not the live call path)
     # ------------------------------------------------------------------
 
     def _http_payload(self, text):
@@ -179,7 +198,9 @@ class SmallestSynthesizer(StreamSynthesizer):
             "voice_id": self.voice_id,
             "model": self.model,
             "sample_rate": self.sampling_rate,
-            "output_format": self._get_audio_format(),
+            # Hardcoded, not _get_audio_format() — that now returns "mulaw" for the WS
+            # stream tag below, which isn't a valid Smallest output_format value.
+            "output_format": "wav",
             "speed": self.speed,
         }
 
