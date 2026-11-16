@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import time
+import uuid
 
 import aiohttp
 import websockets
@@ -56,15 +57,20 @@ class SmallestSynthesizer(StreamSynthesizer):
         self.api_url = "https://api.smallest.ai/waves/v1/tts"
         self.ws_url = "wss://api.smallest.ai/waves/v1/tts/live"
 
-        # Interruption handling: Smallest's WS has no in-band cancel and only ever
-        # processes one request per connection (a second request sent while one is still
-        # streaming is silently dropped, confirmed empirically — no error, no response).
-        # So handle_interruption() both marks the in-flight turn's audio to be dropped
-        # (ignored_sequence_ids) and closes the socket to free it up for the next turn;
-        # _interrupting tells receiver() that the resulting ConnectionClosed is expected,
-        # so it reconnects instead of ending the generator.
+        # Context management (docs.smallest.ai -> text-to-speech-lightning/continuations):
+        # groups fragments of one turn under a context_id so interruption can send
+        # cancel_request/context_close instead of needing to touch the connection — a bare
+        # second request with no context_id is silently dropped if one is already streaming.
+        self.context_id = None
+        self._ctx_turn_id = None
+        self._ctx_sequence_id = None
+        self._ctx_finalized = True  # forces a fresh context_id on the very first push
+
+        # Responses don't echo context_id (per docs — only session_id, which doesn't
+        # correlate to our turns), so cancel_request/context_close are best-effort against
+        # whatever's still buffered server-side; a few already-in-flight chunks can still
+        # land after cancelling. Filtered here via bolna's own sequence_id bookkeeping.
         self.ignored_sequence_ids = set()
-        self._interrupting = False
 
     # ------------------------------------------------------------------
     # StreamSynthesizer hooks
@@ -85,15 +91,32 @@ class SmallestSynthesizer(StreamSynthesizer):
         # as "audio/x-mulaw" untouched, which is static since they're still 16-bit PCM).
         return audioop.lin2ulaw(chunk, 2)
 
-    def form_payload(self, text):
+    def form_payload(self, text, continue_stream=True):
         return {
+            "context_id": self.context_id,
             "voice_id": self.voice_id,
             "text": text,
             "model": self.model,
             "language": self.language,
             "sample_rate": self.sampling_rate,
             "speed": self.speed,
+            "continue": continue_stream,
         }
+
+    def _on_push(self, meta_info, text):
+        """Fresh context_id on turn/sequence change or after the previous one finalized —
+        mirrors CartesiaSynthesizer's _on_push (same reason: this must run before the
+        shared _stamp_turn_start's bookkeeping gets reused for the next comparison)."""
+        if (
+            not self.context_id
+            or self._ctx_finalized
+            or self._ctx_turn_id != meta_info.get("turn_id")
+            or self._ctx_sequence_id != meta_info.get("sequence_id")
+        ):
+            self.context_id = str(uuid.uuid4())
+            self._ctx_turn_id = meta_info.get("turn_id")
+            self._ctx_sequence_id = meta_info.get("sequence_id")
+        self._ctx_finalized = meta_info.get("end_of_llm_stream", False)
 
     # ------------------------------------------------------------------
     # Interruption
@@ -105,8 +128,18 @@ class SmallestSynthesizer(StreamSynthesizer):
             # legitimately repeat across separate utterances — never treat it as stale.
             if self.current_sequence_id not in (None, -1):
                 self.ignored_sequence_ids.add(self.current_sequence_id)
-            self._interrupting = True
-            await self.close_connection()
+            if self.context_id and self._is_ws_connected():
+                # cancel_request discards whatever's still buffered for this context without
+                # speaking it (best-effort — audio already past "buffered" keeps playing out,
+                # same fundamental limit every provider here has against fast synthesis).
+                # context_close tears the context down immediately rather than its idle timeout.
+                await self._send_json({"context_id": self.context_id, "cancel_request": True})
+                await self._send_json({"context_id": self.context_id, "context_close": True})
+            self.context_id = None
+            self._ctx_finalized = True
+            # The interrupted context's end-of-stream is now dropped, so the
+            # next turn must be re-detected as new to clear stale queue entries.
+            self.current_turn_start_time = None
         except Exception as e:
             logger.error(f"Error in handle_interruption: {e}")
 
@@ -128,7 +161,7 @@ class SmallestSynthesizer(StreamSynthesizer):
                 try:
                     if self.ws_send_time is None:
                         self.ws_send_time = time.perf_counter()
-                    await self._send_json(self.form_payload(text))
+                    await self._send_json(self.form_payload(text, continue_stream=not end_of_llm_stream))
                 except Exception as e:
                     logger.error(f"Error sending chunk: {e}")
                     self.connection_error = str(e)
@@ -136,6 +169,14 @@ class SmallestSynthesizer(StreamSynthesizer):
 
             if end_of_llm_stream:
                 self.last_text_sent = True
+                if text == "":
+                    # No new text on this final call — still need to tell Smallest the
+                    # context is done rather than leaving it to its idle timeout.
+                    try:
+                        await self._send_json(self.form_payload("", continue_stream=False))
+                    except Exception as e:
+                        logger.error(f"Error sending end-of-stream signal: {e}")
+                        self.connection_error = str(e)
 
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
@@ -173,11 +214,6 @@ class SmallestSynthesizer(StreamSynthesizer):
                     yield b"\x00"
 
             except websockets.exceptions.ConnectionClosed:
-                if self._interrupting:
-                    # Expected: handle_interruption() closed this socket deliberately.
-                    # monitor_connection() reconnects; keep the loop (and generate()) alive.
-                    self._interrupting = False
-                    continue
                 break
             except Exception as e:
                 logger.error(f"Error occurred in receiver - {e}")
