@@ -3,7 +3,7 @@ call; a turn that already produced output is never re-run."""
 
 import pytest
 
-from bolna.helpers.fallbacks import FallbackEntry, ProviderUnhealthy
+from bolna.helpers.fallbacks import FallbackEntry
 from bolna.llms.fallback_llm import FallbackLLM, fallback_llm_arguments
 
 
@@ -166,33 +166,45 @@ async def test_two_turns_failing_together_move_to_the_same_fallback_once():
 
 
 async def test_a_passing_fault_gets_one_more_try_on_the_same_model_before_the_call_moves_off_it():
-    primary = ScriptedLLM("primary", ConnectionError("reset"), ["Sure."], ConnectionError("reset"), TimeoutError())
+    primary = ScriptedLLM("primary", ConnectionError("reset"), ["Sure."], ConnectionError("reset"), ConnectionError())
     backup = ScriptedLLM("backup", ["Done."])
-    chain = FallbackLLM(primary, [entry(backup)])
+    retries = []
+    chain = FallbackLLM(primary, [entry(backup)], on_retry=retries.append)
 
     assert await turn(chain) == ["Sure."]
     assert chain.active is primary
+    # The failed attempt is reported, and its retry resends the whole conversation.
+    assert (len(retries), primary.invalidated) == (1, True)
 
     assert await turn(chain) == ["Done."]
     assert (primary.calls, chain.active) == (4, backup)
 
 
-async def test_a_call_told_its_model_is_unhealthy_starts_on_the_first_healthy_fallback():
-    primary = ScriptedLLM("primary", ["From the agent's own model."])
-    down = ScriptedLLM("down")
-    backup = ScriptedLLM("backup", ["Sure."], Refused("429"))
-    switches = []
-    chain = FallbackLLM(
-        primary, [entry(down), entry(backup)], on_switch=lambda error, e, meta: switches.append((type(error), e.model))
-    )
+async def test_a_fault_that_is_not_a_lost_connection_or_a_server_error_is_never_retried():
+    for fault in (ValueError("context length exceeded"), KeyError("choices"), Refused("429")):
+        primary = ScriptedLLM("primary", fault)
+        chain = FallbackLLM(primary, [entry(ScriptedLLM("backup", ["Done."]))])
+        assert await turn(chain) == ["Done."]
+        assert primary.calls == 1
 
-    chain.start_on_healthy(lambda e: e.model == "down", FallbackEntry("azure", "primary", lambda: primary))
+
+async def test_a_fault_that_took_long_to_come_back_moves_on_without_a_second_try(monkeypatch):
+    import bolna.llms.fallback_llm as module
+
+    monkeypatch.setattr(module, "RETRY_WITHIN_S", -1)
+    primary = ScriptedLLM("primary", ConnectionError("timed out"))
+    chain = FallbackLLM(primary, [entry(ScriptedLLM("backup", ["Done."]))])
+
+    assert await turn(chain) == ["Done."]
+    assert primary.calls == 1
+
+
+async def test_the_agents_own_model_passed_over_at_the_start_is_closed_with_the_rest():
+    own, serving = ScriptedLLM("own"), ScriptedLLM("serving", ["Sure."])
+    chain = FallbackLLM(serving, [FallbackEntry("azure", "own", lambda: own)], passed_over=own)
 
     assert await turn(chain) == ["Sure."]
-    assert (primary.calls, down.calls) == (0, 0)
-    assert switches == [(ProviderUnhealthy, "backup")]
-    # Everything else failed, so the agent's own model is tried last.
-    down.turns.append(Refused("429"))
-    assert await turn(chain) == ["From the agent's own model."]
     await chain.close()
-    assert primary.closed
+
+    assert own.closed and serving.closed
+    assert not own.fails_fast

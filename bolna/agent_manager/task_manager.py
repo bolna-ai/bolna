@@ -2393,14 +2393,43 @@ class TaskManager(BaseManager):
             build = partial(llm_class, language=self.language, **config, **kwargs)
             entries.append(FallbackEntry(entry["provider"], entry["model"], build))
         logger.info(f"LLM fallbacks: {[f'{e.provider}/{e.model}' for e in entries]}")
-        chain = FallbackLLM(llm, entries, on_switch=self.__on_llm_fallback)
+        llm, entries, passed_over = self.__start_llm_on_healthy(llm, entries)
+        return FallbackLLM(
+            llm, entries, on_switch=self.__on_llm_fallback, on_retry=self.__on_llm_retry, passed_over=passed_over
+        )
+
+    def __start_llm_on_healthy(self, llm, entries):
+        """(LLM to start on, fallbacks behind it, the agent's own LLM if it was passed over).
+
+        The agent's own model serves unless the caller marked it unhealthy; then the first fallback not marked so
+        does, and the agent's own becomes the last to try.
+        """
         unhealthy = self.unhealthy_providers.get("llm") or ()
         own = (self.llm_config.get("provider"), self.llm_config.get("model"))
-        if own in unhealthy:
-            chain.start_on_healthy(
-                lambda entry: (entry.provider, entry.model) in unhealthy, FallbackEntry(*own, lambda: llm)
-            )
-        return chain
+        if own not in unhealthy:
+            return llm, entries, None
+        for entry in entries:
+            if (entry.provider, entry.model) in unhealthy:
+                continue
+            try:
+                serving = entry.build()
+            except Exception as e:
+                logger.error(f"LLM fallback {entry.provider}/{entry.model} could not be built: {e}")
+                continue
+            # What comes back into force if the call ends up on the agent's own model after all.
+            own_settings = {
+                "llm_config": dict(self.llm_config),
+                "meters": (self.on_turn_usage, self.on_overflow),
+                "llm_key": self.kwargs.get("llm_key"),
+            }
+            last_resort = FallbackEntry(*own, lambda: llm, config=own_settings)
+            self.__on_llm_fallback(ProviderUnhealthy(), entry, None)
+            return serving, [*(other for other in entries if other is not entry), last_resort], llm
+        return llm, entries, None
+
+    def __on_llm_retry(self, error):
+        """A failed attempt counts against the model even when its second try answers the turn."""
+        self.__spawn_health_report("llm", self.llm_config.get("provider"), self.llm_config.get("model"))
 
     def __on_llm_fallback(self, error, entry, meta_info):
         failed = {"provider": self.llm_config.get("provider"), "model": self.llm_config.get("model")}
@@ -2416,6 +2445,13 @@ class TaskManager(BaseManager):
         )
         if not skipped:
             self.__spawn_health_report("llm", failed["provider"], failed["model"])
+        if entry.config:
+            # Back on the agent's own model: its settings, key and load meters apply again.
+            self.llm_config.update(entry.config["llm_config"])
+            self.on_turn_usage, self.on_overflow = entry.config["meters"]
+            if entry.config["llm_key"] is not None:
+                self.kwargs["llm_key"] = entry.config["llm_key"]
+            return
         # Logs, latency rows and error attribution follow the model now serving.
         for key in ("reasoning_effort", "verbosity", "reasoning_summary", "thinking_budget", "extra_body"):
             self.llm_config.pop(key, None)
@@ -2461,7 +2497,12 @@ class TaskManager(BaseManager):
                     usage[key] += turn.get(key) or 0
                 usage["turns"] += 1
             event["served_usage"] = usage
-        return list(self.fallback_events)
+        # A language that began on a fallback but never carried the call did not fall back.
+        return [
+            event
+            for event in self.fallback_events
+            if event["reason"] != PROVIDER_UNHEALTHY or any((event.get("served_usage") or {}).values())
+        ]
 
     def __spawn_health_report(self, service, provider, model):
         """A failure the call survived still counts against the provider that failed."""

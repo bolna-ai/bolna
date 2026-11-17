@@ -1,9 +1,17 @@
+import asyncio
+import random
+import time
 from typing import Callable, Optional
 
-from bolna.helpers.fallbacks import ProviderUnhealthy
+import httpx
+from openai import APIConnectionError
+
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
+
+# A failure slower than this has already cost the caller a pause, so the turn moves on instead of trying again.
+RETRY_WITHIN_S = 1.5
 
 # Bound to one model or backend, so a fallback never inherits them from the agent's own LLM.
 MODEL_BOUND_LLM_SETTINGS = frozenset(
@@ -35,9 +43,11 @@ def fallback_llm_arguments(llm_config, kwargs, entry, credentials):
 
 
 def is_transient(error):
-    """A fault the same model may not repeat: a dropped connection, a timeout or a server-side error."""
+    """A fault the same model may not repeat: no connection, or a server-side error."""
     status = getattr(error, "status_code", None)
-    return status is None or status >= 500
+    if status is not None:
+        return status >= 500
+    return isinstance(error, (APIConnectionError, httpx.TransportError, ConnectionError, asyncio.TimeoutError))
 
 
 class FallbackLLM:
@@ -49,11 +59,20 @@ class FallbackLLM:
     Everything else is answered by whichever LLM is serving.
     """
 
-    def __init__(self, primary, entries, on_switch: Optional[Callable] = None):
+    def __init__(
+        self,
+        primary,
+        entries,
+        on_switch: Optional[Callable] = None,
+        on_retry: Optional[Callable] = None,
+        passed_over=None,
+    ):
+        """passed_over is the agent's own LLM when the call starts past it; it is closed with the rest."""
         self._active = primary
         self._pending = list(entries)
-        self._retired = []
+        self._retired = [passed_over] if passed_over is not None else []
         self._on_switch = on_switch
+        self._on_retry = on_retry
         if self._pending:
             primary.fail_fast()
 
@@ -72,6 +91,7 @@ class FallbackLLM:
         while True:
             llm = self._active
             delivered = False
+            started = time.monotonic()
             try:
                 async for chunk in llm.generate_stream(messages, *args, **kwargs):
                     delivered = True
@@ -82,29 +102,21 @@ class FallbackLLM:
                     raise
                 # Another stream running alongside this one already moved the call on; re-run there.
                 if self._active is not llm:
+                    retried = False
                     continue
-                # A passing fault gets one more try on the same model before the call moves off it for good.
-                if self._pending and not retried and is_transient(error):
+                failed_fast = time.monotonic() - started <= RETRY_WITHIN_S
+                # A passing fault that came back at once gets one more try on the same model.
+                if self._pending and not retried and failed_fast and is_transient(error):
                     retried = True
                     logger.warning(f"LLM failed before any output, retrying once: {error!r}")
+                    self._notify(self._on_retry, error)
+                    # The failed request may have used up what a chained request relies on.
+                    llm.invalidate_response_chain()
+                    await asyncio.sleep(random.uniform(0.05, 0.15))
                     continue
                 if not self._switch(error, kwargs.get("meta_info")):
                     raise
                 retried = False
-
-    def start_on_healthy(self, is_unhealthy, primary_entry):
-        """Begin the call on the first entry not marked unhealthy; the agent's own model stays the last to try."""
-        for entry in self._pending:
-            if is_unhealthy(entry):
-                continue
-            try:
-                llm = entry.build()
-            except Exception as e:
-                logger.error(f"LLM fallback {entry.provider}/{entry.model} could not be built: {e}")
-                continue
-            self._pending = [*(e for e in self._pending if e is not entry), primary_entry]
-            self._move_to(entry, llm, ProviderUnhealthy(), None)
-            return
 
     def _switch(self, error, meta_info):
         """Move to the next entry that builds; False when none is left."""
@@ -125,11 +137,15 @@ class FallbackLLM:
             llm.fail_fast()
         self._retired.append(self._active)
         self._active = llm
-        if self._on_switch is not None:
-            try:
-                self._on_switch(error, entry, meta_info)
-            except Exception as e:
-                logger.error(f"LLM fallback switch callback failed: {e}")
+        self._notify(self._on_switch, error, entry, meta_info)
+
+    def _notify(self, callback, *args):
+        if callback is None:
+            return
+        try:
+            callback(*args)
+        except Exception as e:
+            logger.error(f"LLM fallback callback failed: {e}")
 
     async def close(self):
         # The agent's own model can be both retired and, as the last entry, active again.
