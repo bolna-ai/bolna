@@ -1012,7 +1012,7 @@ class TaskManager(BaseManager):
 
         # Language switching, gated per call by the LANGUAGE_SWITCH feature flag
         # (tools_config["llm_language_switch"], see __language_switch_enabled):
-        #   enabled  → dedicated Switch LLM driven by the unbiased Saaras v3
+        #   enabled  → dedicated Switch LLM driven by the unbiased Saaras v4
         #              detector (handle_language_switch); the main LLM carries
         #              no switch tool.
         #   disabled → legacy flow: switch_language tool on the main LLM + the
@@ -1950,10 +1950,6 @@ class TaskManager(BaseManager):
                         "language_switch_lid_provider"
                     ) or os.getenv("LID_PROVIDER", "sarvam")
                     lid_config = {"telephony_provider": provider}
-                    # Sarvam-only model override (language_switch_saaras_v4_lid flag).
-                    lid_model = self.task_config.get("tools_config", {}).get("language_switch_lid_model")
-                    if lid_model:
-                        lid_config["sarvam_model"] = lid_model
                     switch_enabled = self.__language_switch_enabled()
                     if switch_enabled:
                         # language_switch_llm (azure or jev flag) overrides the model; absent → default.
@@ -1982,7 +1978,7 @@ class TaskManager(BaseManager):
                     logger.info(
                         f"TranscriberPool created with labels={list(transcribers.keys())}, "
                         f"active='{active_label}', language_switch_enabled={switch_enabled}, "
-                        f"lid_provider={LID_PROVIDER!r}, lid_model={lid_model or 'default'}, "
+                        f"lid_provider={LID_PROVIDER!r}, "
                         f"legacy_lid_heuristic={not switch_enabled}, lazy_legs={self.tools['transcriber'].lazy_legs}"
                     )
                     if switch_enabled:
