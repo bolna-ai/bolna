@@ -46,6 +46,10 @@ load_dotenv()
 RESPONSES_WS_HOSTS = frozenset({"api.openai.com", "eu.api.openai.com", "in.api.openai.com"})
 
 
+# OpenAI cannot continue from the chained previous_response_id: the turn is re-run on full history
+STALE_CHAIN_ERROR_CODES = ("previous_response_not_found", "unsupported_native_response_reference")
+
+
 def responses_ws_url(base_url: Optional[str]) -> Optional[str]:
     """The Responses WebSocket URL for this endpoint, or None when it only streams over HTTP."""
     host = urlparse(base_url).hostname if base_url else "api.openai.com"
@@ -667,8 +671,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 if evt_type == ResponseStreamEvent.ERROR:
                     error_info = evt.get("error", {})
                     error_code = error_info.get("code", "")
-                    if error_code == "previous_response_not_found" and self.previous_response_id:
-                        logger.warning(f"WS previous_response_id not found, retrying with full history")
+                    if error_code in STALE_CHAIN_ERROR_CODES and self.previous_response_id:
+                        logger.warning(f"WS previous_response_id unusable ({error_code}), retrying with full history")
                         async for chunk in self._retry_full_history(
                             messages, synthesize, request_json, meta_info, tool_choice, tools
                         ):
