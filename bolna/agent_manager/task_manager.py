@@ -943,7 +943,6 @@ class TaskManager(BaseManager):
                 if self.max_silence_repeats is None:
                     self.max_silence_repeats = DEFAULT_MAX_SILENCE_REPEATS
                 self._silence_repeats_sent = 0
-                self._silence_period = None
 
                 # Handling accidental interruption
                 self.number_of_words_for_interruption = self.conversation_config.get(
@@ -5982,7 +5981,7 @@ class TaskManager(BaseManager):
                         isinstance(message.get("data"), dict)
                         and message["data"].get("type", "") == "interim_transcript_received"
                     ):
-                        self.time_since_last_spoken_human_word = time.time()
+                        self._note_caller_speech()
                         # Before every early exit below: a changed interim is proof the caller is
                         # still talking, so it must refresh liveness even when this turn ignores it.
                         self.interruption_manager.note_user_liveness(message["data"].get("content", ""))
@@ -8574,20 +8573,16 @@ class TaskManager(BaseManager):
             )
         return fires
 
-    def _silence_repeat_cap(self):
-        """[silence] re-prompts allowed in the current silence period. A period restarts when the user
-        speaks or the graph moves to another node, and the cap never drops below what the node's own
-        _silence_repeats exit edge needs, so that edge can still fire."""
+    def _note_caller_speech(self):
+        """Restart the silence clock and the [silence] re-prompt budget: the caller spoke."""
+        self.time_since_last_spoken_human_word = time.time()
+        self._silence_repeats_sent = 0
+
+    def _silence_reprompt_allowed(self):
+        """Whether another [silence] re-prompt may go out since the caller last spoke."""
         if self.hang_conversation_after <= 0:
-            return math.inf  # no silence hangup to hand over to: a cap would leave the caller in dead air
-        llm_agent = self.tools.get("llm_agent")
-        # time_since_last_spoken_human_word holds the user's last-speech timestamp, so a change means they spoke
-        period = (self.time_since_last_spoken_human_word, getattr(llm_agent, "current_node_id", None))
-        if period != self._silence_period:
-            self._silence_period = period
-            self._silence_repeats_sent = 0
-        exit_at = llm_agent.silence_exit_threshold() if hasattr(llm_agent, "silence_exit_threshold") else 0
-        return max(self.max_silence_repeats, exit_at)
+            return True  # no silence hangup to hand over to: a cap would leave the caller in dead air
+        return self._silence_repeats_sent < self.max_silence_repeats or self.tools["llm_agent"].silence_exit_pending()
 
     def _pipeline_busy(self, audio_playing):
         """True while the agent is speaking or about to: response_in_pipeline can read False in the gap between a response's synth push and its first audio chunk, so _synthesis_awaiting_first_audio covers it."""
@@ -8704,22 +8699,19 @@ class TaskManager(BaseManager):
             if self._pipeline_busy(self.tools["input"].is_audio_being_played_to_user()):
                 continue
 
-            silence_repeat_cap = self._silence_repeat_cap() if self.repeat_after_silence_seconds else 0
             if (
                 self.repeat_after_silence_seconds
                 # An opening node arms its re-prompt before its message has played.
                 and (self.opening_node is None or self.tools["input"].welcome_message_played())
-                and self._silence_repeats_sent < silence_repeat_cap
                 and time_since_last_spoken_ai_word > self.repeat_after_silence_seconds
                 and time_since_user_last_spoke > self.repeat_after_silence_seconds
                 and not self.response_in_pipeline
                 and not has_pending_generation
+                and self._silence_reprompt_allowed()
             ):
                 self._silence_repeats_sent += 1
-                if self._silence_repeats_sent == silence_repeat_cap:
-                    logger.info(
-                        f"Silence re-prompt cap reached ({silence_repeat_cap}), the silence hangup can now fire"
-                    )
+                if self._silence_repeats_sent == self.max_silence_repeats:
+                    logger.info(f"Silence re-prompt cap reached ({self.max_silence_repeats})")
                 await self._inject_and_run_llm(
                     f"[silence] User was silent for {self.repeat_after_silence_seconds} seconds"
                 )
@@ -9253,7 +9245,7 @@ class TaskManager(BaseManager):
                     logger.info(f"S2S caller: {event.content[:200]}")
                     self.user_spoke = True
                     self.conversation_history.append_user(event.content)
-                    self.time_since_last_spoken_human_word = time.time()
+                    self._note_caller_speech()
                     # Cleared here rather than in the output loop: the prompt's audio is not
                     # distinguishable from any other turn, but the caller answering is.
                     self.asked_if_user_is_still_there = False
@@ -9271,7 +9263,7 @@ class TaskManager(BaseManager):
                 # can give the agent the floor back. Barge-in sensitivity is tuned provider-side.
                 self.interruption_manager.on_user_speech_started()
                 # A speech start refreshes liveness, barge-in or not.
-                self.time_since_last_spoken_human_word = time.time()
+                self._note_caller_speech()
                 if self._s2s_agent_has_floor():
                     logger.info("S2S: caller barged in, dropping queued audio")
                     self.interruption_manager.on_interruption_triggered()
