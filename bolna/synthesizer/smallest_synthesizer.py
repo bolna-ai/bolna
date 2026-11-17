@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import time
 
 import aiohttp
@@ -13,6 +14,40 @@ from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 
 logger = configure_logger(__name__)
+
+# Smallest voices each request on its own, so a request that ends mid-sentence is heard as a break.
+MAX_CHARS_PER_REQUEST = 250
+HELD_TEXT_MAX_WAIT_S = 2.0
+SENTENCE_END = re.compile(r"(\S*)[.!?।](?=\s|$)")
+CLAUSE_END = re.compile(r"[,;:](?=\s|$)")
+ABBREVIATIONS = {"mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "rs"}
+
+
+def sentence_ends(text):
+    return [m.end() for m in SENTENCE_END.finditer(text) if m.group(1).lower() not in ABBREVIATIONS]
+
+
+def _last_cut(text, limit):
+    for ends in (sentence_ends(text), [m.end() for m in CLAUSE_END.finditer(text)]):
+        fitting = [end for end in ends if end <= limit]
+        if fitting:
+            return fitting[-1]
+    space = text.rfind(" ", 0, limit + 1)
+    # No space to cut at (e.g. CJK text): send it whole rather than split a word.
+    return space if space > 0 else len(text)
+
+
+def split_into_requests(text, limit=MAX_CHARS_PER_REQUEST):
+    """Cut text into requests of at most `limit` chars at sentence ends, else clause ends, else spaces."""
+    requests = []
+    text = text.strip()
+    while len(text) > limit:
+        cut = _last_cut(text, limit)
+        requests.append(text[:cut].strip())
+        text = text[cut:].strip()
+    if text:
+        requests.append(text)
+    return requests
 
 
 class SmallestSynthesizer(StreamSynthesizer):
@@ -52,6 +87,12 @@ class SmallestSynthesizer(StreamSynthesizer):
         self.api_url = "https://api.smallest.ai/waves/v1/tts"
         self.ws_url = "wss://api.smallest.ai/waves/v1/tts/live"
 
+        self._held_text = ""
+        self._held_sequence_id = None
+        self._held_flush_task = None
+        # Every push runs its own sender task; the lock keeps their requests in push order.
+        self._send_lock = asyncio.Lock()
+
     # ------------------------------------------------------------------
     # StreamSynthesizer hooks
     # ------------------------------------------------------------------
@@ -84,17 +125,8 @@ class SmallestSynthesizer(StreamSynthesizer):
                 logger.info(f"Not synthesizing: sequence_id {sequence_id} not current")
                 return
 
-            await self._wait_for_ws()
-
-            if text != "":
-                try:
-                    if self.ws_send_time is None:
-                        self.ws_send_time = time.perf_counter()
-                    await self._send_json(self.form_payload(text))
-                except Exception as e:
-                    logger.error(f"Error sending chunk: {e}")
-                    self.connection_error = str(e)
-                    return
+            if not await self._send_requests(self._take_whole_sentences(text, sequence_id, end_of_llm_stream)):
+                return
 
             if end_of_llm_stream:
                 self.last_text_sent = True
@@ -103,6 +135,47 @@ class SmallestSynthesizer(StreamSynthesizer):
             logger.info("Sender task was cancelled.")
         except Exception as e:
             logger.error(f"Unexpected error in sender: {e}")
+
+    def _take_whole_sentences(self, text, sequence_id, flush):
+        """Hold back an unfinished last sentence until the rest of it arrives, so no request ends mid-sentence."""
+        if sequence_id != self._held_sequence_id:
+            self._held_text, self._held_sequence_id = "", sequence_id
+        text = f"{self._held_text} {text or ''}".strip()
+        self._held_text = ""
+        if not flush:
+            ends = sentence_ends(text)
+            if ends and ends[-1] < len(text):
+                text, self._held_text = text[: ends[-1]], text[ends[-1] :].strip()
+                logger.info(f"smallest: holding {len(self._held_text)} chars until their sentence ends")
+        if self._held_flush_task:
+            self._held_flush_task.cancel()
+        self._held_flush_task = asyncio.create_task(self._flush_held_text(sequence_id)) if self._held_text else None
+        return split_into_requests(text)
+
+    async def _flush_held_text(self, sequence_id):
+        await asyncio.sleep(HELD_TEXT_MAX_WAIT_S)
+        self._held_flush_task = None
+        if (
+            self.conversation_ended
+            or sequence_id != self._held_sequence_id
+            or not self.should_synthesize_response(sequence_id)
+        ):
+            return
+        await self._send_requests(self._take_whole_sentences("", sequence_id, flush=True))
+
+    async def _send_requests(self, texts):
+        async with self._send_lock:
+            await self._wait_for_ws()
+            for text in texts:
+                try:
+                    if self.ws_send_time is None:
+                        self.ws_send_time = time.perf_counter()
+                    await self._send_json(self.form_payload(text))
+                except Exception as e:
+                    logger.error(f"Error sending chunk: {e}")
+                    self.connection_error = str(e)
+                    return False
+        return True
 
     async def receiver(self):
         not_connected_since = None
