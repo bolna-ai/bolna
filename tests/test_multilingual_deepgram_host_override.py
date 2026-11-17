@@ -25,6 +25,8 @@ def _run_setup(monkeypatch, transcriber_config):
     tm.kwargs = {}
     tm._TaskManager__language_switch_enabled = MagicMock(return_value=False)
     tm._TaskManager__setup_transcriber = TaskManager._TaskManager__setup_transcriber.__get__(tm, TaskManager)
+    tm.unhealthy_providers = {}
+    tm._TaskManager__start_on_healthy = TaskManager._TaskManager__start_on_healthy.__get__(tm, TaskManager)
     tm._TaskManager__build_transcriber_leg = TaskManager._TaskManager__build_transcriber_leg.__get__(tm, TaskManager)
     tm._TaskManager__transcriber_fallback_entries = TaskManager._TaskManager__transcriber_fallback_entries.__get__(
         tm, TaskManager

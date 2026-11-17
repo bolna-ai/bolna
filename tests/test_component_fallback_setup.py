@@ -34,6 +34,8 @@ def setup_tm(task_config, kwargs=None, provider_api_keys=None):
     tm.kwargs = kwargs or {}
     tm.provider_api_keys = provider_api_keys or {}
     tm.fallback_events = []
+    tm.unhealthy_providers = {}
+    tm._fallback_replacements = []
     tm._llm_fallback_turns = []
     tm.llm_latencies = MagicMock(turn_latencies=[])
     tm.conversation_start_init_ts = 0
@@ -41,6 +43,7 @@ def setup_tm(task_config, kwargs=None, provider_api_keys=None):
         tm,
         "_TaskManager__pool_leg_kwargs",
         "_TaskManager__setup_transcriber_with_fallbacks",
+        "_TaskManager__start_on_healthy",
         "_TaskManager__build_transcriber_leg",
         "_TaskManager__transcriber_fallback_entries",
         "_TaskManager__add_synthesizer_fallbacks",
@@ -343,3 +346,103 @@ def test_validating_a_voice_and_its_fallbacks_leaves_the_config_it_was_given_unt
 
     assert config == given
     json.dumps(config)
+
+
+def test_a_transcriber_marked_unhealthy_is_passed_over_and_kept_as_the_last_to_try(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tmmod,
+        "SUPPORTED_TRANSCRIBER_PROVIDERS",
+        {"deepgram": recorder(calls, "deepgram"), "sarvam": recorder(calls, "sarvam")},
+    )
+    pool = MagicMock()
+    monkeypatch.setattr(tmmod, "TranscriberPool", pool)
+    transcriber = {
+        "provider": "deepgram",
+        "model": "nova-3",
+        "language": "hi",
+        "fallbacks": [{"provider": "sarvam", "model": "saaras:v3", "language": None}],
+    }
+    tm = setup_tm({"tools_config": {"input": {"provider": "plivo"}, "transcriber": transcriber}})
+    tm.unhealthy_providers = {"transcriber": {("deepgram", "nova-3")}}
+
+    TaskManager._TaskManager__setup_transcriber.__get__(tm, TaskManager)()
+
+    pool_kwargs = pool.call_args.kwargs
+    assert [provider for provider, _ in calls] == ["deepgram", "sarvam"]
+    assert pool_kwargs["transcribers"]["hi"].model == "saaras:v3"
+    assert pool_kwargs["multilingual_config"]["hi"]["provider"] == "sarvam"
+    assert tm.transcriber_provider == "sarvam"
+    (last_resort,) = pool_kwargs["fallbacks"]["hi"]
+    assert (last_resort.provider, last_resort.build().model) == ("deepgram", "nova-3")
+    (event,) = tm.fallback_events
+    assert (event["from"]["provider"], event["to"]["provider"], event["reason"]) == (
+        "deepgram",
+        "sarvam",
+        "provider_unhealthy",
+    )
+
+
+def test_a_voice_marked_unhealthy_is_passed_over_and_the_call_speaks_as_its_fallback(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tmmod,
+        "SUPPORTED_SYNTHESIZER_MODELS",
+        {"cartesia": recorder(calls, "cartesia"), "sarvam": recorder(calls, "sarvam")},
+    )
+    pool = MagicMock()
+    monkeypatch.setattr(tmmod, "SynthesizerPool", pool)
+    sarvam = {
+        "provider": "sarvam",
+        "provider_config": {"voice": "Anushka", "voice_id": "anushka", "model": "bulbul:v3", "language": "hi"},
+    }
+    tm = setup_tm(
+        {
+            "tools_config": {
+                "transcriber": {"language": "hi"},
+                "synthesizer": {
+                    "provider": "cartesia",
+                    "provider_config": {"voice": "Riya", "voice_id": "riya-id", "model": "sonic-3", "language": "hi"},
+                    "stream": True,
+                    "fallbacks": [sarvam],
+                },
+                "output": {"provider": "plivo"},
+                "llm_agent": None,
+            }
+        }
+    )
+    tm.language = "hi"
+    tm.unhealthy_providers = {"synthesizer": {("cartesia", "sonic-3")}}
+
+    TaskManager._TaskManager__setup_synthesizer.__get__(tm, TaskManager)()
+
+    pool_kwargs = pool.call_args.kwargs
+    assert pool_kwargs["synthesizers"]["hi"].model == "bulbul:v3"
+    assert pool_kwargs["multilingual_config"]["hi"]["provider"] == "sarvam"
+    assert (tm.synthesizer_provider, tm.synthesizer_voice_id) == ("sarvam", "anushka")
+    (last_resort,) = pool_kwargs["fallbacks"]["hi"]
+    assert last_resort.provider == "cartesia"
+    assert [event["reason"] for event in tm.fallback_events] == ["provider_unhealthy"]
+
+
+async def test_an_llm_marked_unhealthy_is_passed_over_without_counting_against_it(monkeypatch):
+    tm = setup_tm({})
+    tm.llm_agent_config = {"fallbacks": [{"provider": "openai", "model": "gpt-4.1-mini", "reasoning_effort": None}]}
+    tm.llm_config = {"provider": "azure", "model": "azure/gpt-4.1-mini", "max_tokens": 200, "temperature": 0.1}
+    tm.kwargs = {"llm_key": "azure-key"}
+    tm.unhealthy_providers = {"llm": {("azure", "azure/gpt-4.1-mini")}}
+    tm._report_provider_health = AsyncMock()
+    tm._cb_tasks = set()
+    bind(tm, "_TaskManager__on_llm_fallback", "_TaskManager__spawn_health_report")
+    backup = MagicMock()
+    monkeypatch.setitem(tmmod.SUPPORTED_LLM_PROVIDERS, "openai", lambda **kwargs: backup)
+    own = MagicMock()
+
+    chain = TaskManager._TaskManager__with_llm_fallbacks.__get__(tm, TaskManager)(own)
+    await asyncio.sleep(0)
+
+    assert chain.active is backup
+    (event,) = tm.fallback_events
+    assert (event["to"]["model"], event["reason"], event["error"]) == ("gpt-4.1-mini", "provider_unhealthy", None)
+    tm._report_provider_health.assert_not_awaited()
+    assert (tm.llm_config["provider"], tm.llm_config["model"]) == ("openai", "gpt-4.1-mini")

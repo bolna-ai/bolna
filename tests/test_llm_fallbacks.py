@@ -3,8 +3,14 @@ call; a turn that already produced output is never re-run."""
 
 import pytest
 
-from bolna.helpers.fallbacks import FallbackEntry
+from bolna.helpers.fallbacks import FallbackEntry, ProviderUnhealthy
 from bolna.llms.fallback_llm import FallbackLLM, fallback_llm_arguments
+
+
+class Refused(Exception):
+    """A capacity or config rejection, which no retry on the same model fixes."""
+
+    status_code = 429
 
 
 class ScriptedLLM:
@@ -55,7 +61,7 @@ async def turn(chain):
 
 
 async def test_failure_before_output_reruns_the_turn_on_the_next_entry_and_stays_there():
-    primary = ScriptedLLM("primary", RuntimeError("429 no capacity"))
+    primary = ScriptedLLM("primary", Refused("429 no capacity"))
     backup = ScriptedLLM("backup", ["Sure."], ["Done."])
     switches = []
     chain = FallbackLLM(primary, [entry(backup)], on_switch=lambda error, e, meta: switches.append(e.model))
@@ -79,19 +85,19 @@ async def test_failure_after_output_is_raised_rather_than_repeating_the_reply():
 
 
 async def test_a_failing_backup_walks_on_and_the_last_error_ends_the_chain():
-    primary = ScriptedLLM("primary", RuntimeError("429"))
-    second = ScriptedLLM("second", RuntimeError("503"))
-    third = ScriptedLLM("third", RuntimeError("timeout"))
+    primary = ScriptedLLM("primary", Refused("429"))
+    second = ScriptedLLM("second", Refused("503"))
+    third = ScriptedLLM("third", Refused("timeout"))
     chain = FallbackLLM(primary, [entry(second), entry(third)])
 
-    with pytest.raises(RuntimeError, match="timeout"):
+    with pytest.raises(Refused, match="timeout"):
         await turn(chain)
     assert (primary.calls, second.calls, third.calls) == (1, 1, 1)
 
 
 async def test_backups_are_built_only_when_needed_and_one_that_cannot_build_is_skipped():
     builds = []
-    primary = ScriptedLLM("primary", ["Hello."], RuntimeError("429"))
+    primary = ScriptedLLM("primary", ["Hello."], Refused("429"))
     backup = ScriptedLLM("backup", ["Hi again."])
     chain = FallbackLLM(primary, [entry(ValueError("no such deployment"), builds), entry(backup, builds)])
 
@@ -103,8 +109,8 @@ async def test_backups_are_built_only_when_needed_and_one_that_cannot_build_is_s
 
 
 async def test_only_the_last_model_retries_a_failed_request_in_place():
-    primary = ScriptedLLM("primary", RuntimeError("429"))
-    second = ScriptedLLM("second", RuntimeError("429"))
+    primary = ScriptedLLM("primary", Refused("429"))
+    second = ScriptedLLM("second", Refused("429"))
     last = ScriptedLLM("last", ["ok"])
     chain = FallbackLLM(primary, [entry(second), entry(last)])
     await turn(chain)
@@ -113,7 +119,7 @@ async def test_only_the_last_model_retries_a_failed_request_in_place():
 
 
 async def test_close_releases_every_llm_the_call_used():
-    primary = ScriptedLLM("primary", RuntimeError("429"))
+    primary = ScriptedLLM("primary", Refused("429"))
     backup = ScriptedLLM("backup", ["ok"])
     chain = FallbackLLM(primary, [entry(backup)])
     await turn(chain)
@@ -146,7 +152,7 @@ async def test_two_turns_failing_together_move_to_the_same_fallback_once():
         async def generate_stream(self, messages, synthesize=True, meta_info=None):
             self.calls += 1
             await asyncio.sleep(0)
-            raise RuntimeError("429 no capacity")
+            raise Refused("429 no capacity")
             yield
 
     primary = SlowToFail("primary")
@@ -157,3 +163,36 @@ async def test_two_turns_failing_together_move_to_the_same_fallback_once():
     assert sorted(await asyncio.gather(turn(chain), turn(chain))) == [["Done."], ["Sure."]]
     assert chain.active is backup
     assert unused.calls == 0
+
+
+async def test_a_passing_fault_gets_one_more_try_on_the_same_model_before_the_call_moves_off_it():
+    primary = ScriptedLLM("primary", ConnectionError("reset"), ["Sure."], ConnectionError("reset"), TimeoutError())
+    backup = ScriptedLLM("backup", ["Done."])
+    chain = FallbackLLM(primary, [entry(backup)])
+
+    assert await turn(chain) == ["Sure."]
+    assert chain.active is primary
+
+    assert await turn(chain) == ["Done."]
+    assert (primary.calls, chain.active) == (4, backup)
+
+
+async def test_a_call_told_its_model_is_unhealthy_starts_on_the_first_healthy_fallback():
+    primary = ScriptedLLM("primary", ["From the agent's own model."])
+    down = ScriptedLLM("down")
+    backup = ScriptedLLM("backup", ["Sure."], Refused("429"))
+    switches = []
+    chain = FallbackLLM(
+        primary, [entry(down), entry(backup)], on_switch=lambda error, e, meta: switches.append((type(error), e.model))
+    )
+
+    chain.start_on_healthy(lambda e: e.model == "down", FallbackEntry("azure", "primary", lambda: primary))
+
+    assert await turn(chain) == ["Sure."]
+    assert (primary.calls, down.calls) == (0, 0)
+    assert switches == [(ProviderUnhealthy, "backup")]
+    # Everything else failed, so the agent's own model is tried last.
+    down.turns.append(Refused("429"))
+    assert await turn(chain) == ["From the agent's own model."]
+    await chain.close()
+    assert primary.closed

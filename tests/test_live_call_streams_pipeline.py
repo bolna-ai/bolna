@@ -37,6 +37,8 @@ def _live_call_synth_kwargs(monkeypatch, synthesizer):
     tm.kwargs = {}
     tm.provider_api_keys = {}
     tm._TaskManager__pool_leg_kwargs = TaskManager._TaskManager__pool_leg_kwargs.__get__(tm, TaskManager)
+    tm.unhealthy_providers = {}
+    tm._TaskManager__start_on_healthy = TaskManager._TaskManager__start_on_healthy.__get__(tm, TaskManager)
     tm._TaskManager__build_synthesizer_leg = TaskManager._TaskManager__build_synthesizer_leg.__get__(tm, TaskManager)
     tm._TaskManager__synthesizer_fallback_entries = TaskManager._TaskManager__synthesizer_fallback_entries.__get__(
         tm, TaskManager
