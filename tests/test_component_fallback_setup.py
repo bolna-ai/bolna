@@ -264,12 +264,15 @@ def test_each_llm_fallback_is_credited_with_the_turns_logged_after_it_took_over(
     tm.record_fallback("llm", {}, {"model": "second"}, "http_429", "", meta_info={"sequence_id": -1})
     answer(2)
     answer(3)
+    # This turn's row was opened before it failed; the model taking over finishes it.
+    turns.append({"sequence_id": 4})
     tm.record_fallback("llm", {}, {"model": "third"}, "http_503", "", meta_info={"sequence_id": 4})
-    answer(4)
+    turns[-1] = {"sequence_id": 4, "input_tokens": 100, "output_tokens": 1, "cached_tokens": 0}
+    answer(5)
 
     second, third = tm.fallback_events_with_usage()
     assert second["served_usage"] == {"input_tokens": 200, "output_tokens": 2, "cached_tokens": 0, "turns": 2}
-    assert third["served_usage"] == {"input_tokens": 100, "output_tokens": 1, "cached_tokens": 0, "turns": 1}
+    assert third["served_usage"] == {"input_tokens": 200, "output_tokens": 2, "cached_tokens": 0, "turns": 2}
 
 
 async def test_a_tts_switch_names_both_voices_as_request_logs_do_and_the_call_speaks_as_the_new_one():

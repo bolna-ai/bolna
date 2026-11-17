@@ -26,6 +26,7 @@ class FakeSynth:
 
     async def push(self, message):
         self.pushed.append(message["data"])
+        self.characters += len(message["data"])
         await self.audio.put(message)
 
     def fail(self, error):
@@ -127,7 +128,7 @@ async def test_the_failed_voices_characters_still_count_toward_usage():
     await pool.push(text("Ji."))
     await next_audio(pool, stream)
 
-    assert pool.get_synthesized_characters() == 65
+    assert pool.get_synthesized_characters() == 40 + 25 + len("Ji.")
     await pool.cleanup()
 
 
@@ -163,4 +164,19 @@ async def test_the_pool_names_the_voice_now_serving_a_language():
     assert await pool.fail_over("hi", RuntimeError("HTTP 429")) is True
 
     assert pool.get_active_synthesizer_info() == {"provider": "sarvam", "voice": "Priya"}
+    await pool.cleanup()
+
+
+async def test_a_turn_sent_again_to_the_fallback_counts_once_toward_usage():
+    primary, backup = FakeSynth("sonic-3"), FakeSynth("bulbul:v3")
+    pool, _ = await started_pool(primary, backup)
+    stream = pool.generate()
+    await pool.push(text("Namaste,"))
+    await next_audio(pool, stream)
+    primary.fail(RuntimeError("HTTP 429"))
+    await pool.push(text(" kaise madad karun?"))
+    await next_audio(pool, stream)
+
+    assert backup.get_synthesized_characters() == len("Namaste, kaise madad karun?")
+    assert pool.get_synthesized_characters() == len("Namaste, kaise madad karun?")
     await pool.cleanup()

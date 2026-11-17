@@ -89,6 +89,8 @@ class SynthesizerPool:
         self.retire_tasks = set()
         # What the current turn has pushed, resent to a fallback that takes over mid-turn.
         self.open_turn = []
+        # Text sent a second time, to a fallback; the call's usage counts it once.
+        self.resent_characters = 0
 
     # ------------------------------------------------------------------
     # Properties
@@ -145,7 +147,7 @@ class SynthesizerPool:
         total = 0
         for s in (*self.retired, *self.synthesizers.values()):
             total += s.get_synthesized_characters()
-        return total
+        return total - self.resent_characters
 
     # ------------------------------------------------------------------
     # Connection management
@@ -227,6 +229,7 @@ class SynthesizerPool:
                     except Exception as e:
                         logger.error(f"SynthesizerPool: fallback callback failed: {e}")
                 for message in self.open_turn:
+                    self.resent_characters += len(message.get("data") or "")
                     await replacement.push({**message, "meta_info": dict(message["meta_info"])})
                 return True
             return False
