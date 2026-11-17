@@ -826,6 +826,30 @@ class TestFirstDeliveryHold:
         assert mock_llm.call_args.kwargs["default_edge"] is None
         assert agent.current_node_id == "B"
 
+    async def test_split_reply_is_one_node_turn(self):
+        # One reply the transcriber split in two, with no agent speech between the parts, is one attempt.
+        nodes = self._nodes()
+        nodes[1]["edges"].append(
+            {"to_node_id": "C", "condition_type": "expression", "expression": _expr("_node_turns", "gte", 2)}
+        )
+        agent = _make_agent(_base_config(nodes, "A"))
+        agent._advance_to_node("B", entry_index=1)
+        agent.mark_first_response_delivered()
+
+        history = [
+            {"role": "user", "content": "tech mahindra"},
+            {"role": "assistant", "content": "Ask Q1."},
+            {"role": "user", "content": "bookings on"},
+            {"role": "user", "content": "book is on the table"},
+        ]
+        stay = (None, {}, 1.0, [], [], "unclear", 0.9, None)
+        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=stay) as mock_llm:
+            await _collect(agent.generate(history))
+
+        assert agent.context_data["_node_turns"] == 1
+        assert mock_llm.call_args.kwargs["default_edge"] is None
+        assert agent.current_node_id == "B"
+
     async def test_answer_to_partly_heard_question_is_a_node_turn(self):
         nodes = self._nodes()
         cap = {"to_node_id": "C", "condition_type": "expression", "expression": _expr("_node_turns", "gte", 2)}

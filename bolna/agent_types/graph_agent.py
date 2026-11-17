@@ -856,12 +856,17 @@ class GraphAgent(BaseAgent):
         return {"matched": False, "event": event_name}
 
     def _compute_turn_counts(self, history: list) -> tuple:
-        """Count (node_turns, total_turns) from history. A node just entered this turn (entry_index ==
-        len(history), as during a router hop) has 0 node turns, and input the caller gave before hearing
-        any of the node's speech is not one of its turns."""
+        """Count (node_turns, total_turns) from history. A node turn is one caller reply: consecutive user
+        messages (one utterance the transcriber split) count once, input the caller gave before hearing any
+        of the node's speech does not count, and a node just entered this turn (entry_index == len(history),
+        as during a router hop) has none."""
         total_turns = sum(1 for msg in history if msg.get("role") == "user")
         node_history = history[max(self.current_node_entry_index, self._held_until_index) :]
-        node_turns = sum(1 for msg in node_history if msg.get("role") == "user")
+        node_turns = sum(
+            1
+            for i, msg in enumerate(node_history)
+            if msg.get("role") == "user" and (i == 0 or node_history[i - 1].get("role") != "user")
+        )
         return node_turns, total_turns
 
     def _enrich_routing_context(self, history: list) -> None:
