@@ -215,6 +215,8 @@ class SynthesizerPool:
                     continue
                 failed = self.synthesizers[label]
                 self.synthesizers[label] = replacement
+                if entry.config is not None:
+                    self._multilingual_config = {**self._multilingual_config, label: entry.config}
                 self.retire(failed, self._monitor_tasks.pop(label, None))
                 self._monitor_tasks[label] = asyncio.create_task(replacement.monitor_connection())
                 self._gen_task = asyncio.create_task(self._run_generate(label))
@@ -430,8 +432,10 @@ class SynthesizerPool:
     async def cleanup(self):
         """Clean up all synthesizers and cancel all tasks."""
         self.cleaning_up = True
-        for task in [*self.leg_close_tasks, *self.retire_tasks]:
+        for task in list(self.leg_close_tasks):
             await process_task_cancellation(task, "SynthesizerPool leg close")
+        # A synth the call moved off still has its connection to close.
+        await asyncio.gather(*self.retire_tasks, return_exceptions=True)
 
         # Cancel generate task
         if self._gen_task and not self._gen_task.done():
