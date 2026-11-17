@@ -2358,7 +2358,10 @@ class TaskManager(BaseManager):
         if replacement is not None:
             self._fallback_replacements.append((event, replacement))
         elif component == "llm":
-            self._llm_fallback_turns.append((event, len(self.llm_latencies.turn_latencies)))
+            turns = self.llm_latencies.turn_latencies
+            # A row opened for the turn that failed is finished by the model taking over, so it counts as its own.
+            reruns_open_row = bool(turns) and turns[-1].get("sequence_id") == event["sequence_id"]
+            self._llm_fallback_turns.append((event, len(turns) - reruns_open_row))
 
     def fallback_events_with_usage(self):
         """Each fallback event with what the provider it moved to served for the rest of the call."""
