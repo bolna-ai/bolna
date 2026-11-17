@@ -70,13 +70,11 @@ async def test_held_text_is_sent_when_no_more_text_follows(monkeypatch):
     assert synth.websocket.texts == ["Sure.", "Let me check"]
 
 
-async def test_no_request_exceeds_smallest_limit():
+async def test_request_size_follows_the_agent_buffer_not_a_fixed_limit():
     synth = make_synth()
-    sentence = "This sentence is about sixty characters long, give or take. "
-    sent = await push_reply(synth, [sentence * 7])
-    assert len(sent) > 1
-    assert all(len(text) <= 250 and text.endswith(".") for text in sent)
-    assert " ".join(sent) == (sentence * 7).strip()
+    reply = "This sentence is about sixty characters long, give or take. " * 7
+    sent = await push_reply(synth, [reply])
+    assert sent == [reply.strip()]
 
 
 async def test_interrupted_reply_never_speaks_its_held_text(monkeypatch):

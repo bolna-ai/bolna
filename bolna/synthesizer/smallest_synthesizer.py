@@ -16,38 +16,13 @@ from bolna.helpers.ssl_context import get_ssl_context
 logger = configure_logger(__name__)
 
 # Smallest voices each request on its own, so a request that ends mid-sentence is heard as a break.
-MAX_CHARS_PER_REQUEST = 250
 HELD_TEXT_MAX_WAIT_S = 2.0
 SENTENCE_END = re.compile(r"(\S*)[.!?।](?=\s|$)")
-CLAUSE_END = re.compile(r"[,;:](?=\s|$)")
 ABBREVIATIONS = {"mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "rs"}
 
 
 def sentence_ends(text):
     return [m.end() for m in SENTENCE_END.finditer(text) if m.group(1).lower() not in ABBREVIATIONS]
-
-
-def _last_cut(text, limit):
-    for ends in (sentence_ends(text), [m.end() for m in CLAUSE_END.finditer(text)]):
-        fitting = [end for end in ends if end <= limit]
-        if fitting:
-            return fitting[-1]
-    space = text.rfind(" ", 0, limit + 1)
-    # No space to cut at (e.g. CJK text): send it whole rather than split a word.
-    return space if space > 0 else len(text)
-
-
-def split_into_requests(text, limit=MAX_CHARS_PER_REQUEST):
-    """Cut text into requests of at most `limit` chars at sentence ends, else clause ends, else spaces."""
-    requests = []
-    text = text.strip()
-    while len(text) > limit:
-        cut = _last_cut(text, limit)
-        requests.append(text[:cut].strip())
-        text = text[cut:].strip()
-    if text:
-        requests.append(text)
-    return requests
 
 
 class SmallestSynthesizer(StreamSynthesizer):
@@ -150,7 +125,7 @@ class SmallestSynthesizer(StreamSynthesizer):
         if self._held_flush_task:
             self._held_flush_task.cancel()
         self._held_flush_task = asyncio.create_task(self._flush_held_text(sequence_id)) if self._held_text else None
-        return split_into_requests(text)
+        return [text] if text else []
 
     async def _flush_held_text(self, sequence_id):
         await asyncio.sleep(HELD_TEXT_MAX_WAIT_S)
