@@ -33,9 +33,13 @@ from bolna.constants import (
 
 logger = configure_logger(__name__)
 
-# Sarvam closes the socket after these (idle too long, a sentence it cannot speak); the close
-# settles any open turn and monitor_connection redials.
-SARVAM_RECOVERABLE_ERRORS = (400, 408, 422)
+SARVAM_IDLE_TIMEOUT = 408
+SARVAM_EMPTY_TEXT_ERROR = "Text must contain at least one character"
+
+
+def is_recoverable_sarvam_error(error: dict) -> bool:
+    """Sarvam closes the socket after an idle notice or a sentence with no speakable text; the close settles any open turn and monitor_connection redials."""
+    return error.get("code") == SARVAM_IDLE_TIMEOUT or SARVAM_EMPTY_TEXT_ERROR in str(error.get("message", ""))
 
 
 class SarvamSynthesizer(StreamSynthesizer):
@@ -257,7 +261,7 @@ class SarvamSynthesizer(StreamSynthesizer):
 
                 if data.get("type") == "error":
                     logger.error(f"Sarvam TTS error response: {data}")
-                    if data.get("data", {}).get("code") in SARVAM_RECOVERABLE_ERRORS:
+                    if is_recoverable_sarvam_error(data.get("data") or {}):
                         continue
                     self.connection_error = json.dumps(data)
                     return

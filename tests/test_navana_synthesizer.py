@@ -10,6 +10,7 @@ import websockets.protocol
 from websockets.exceptions import ConnectionClosed
 
 import bolna.synthesizer.navana_synthesizer as navana
+from bolna.exceptions import SynthesizerError
 from bolna.providers import SUPPORTED_SYNTHESIZER_MODELS
 from bolna.synthesizer.navana_synthesizer import NavanaSynthesizer
 
@@ -617,3 +618,46 @@ async def test_the_http_loop_renders_in_the_wire_format():
     synth._render = AsyncMock(return_value=b"\x00\x01" * 400)
     assert await synth._generate_http("hello") == b"\x00\x01" * 400
     synth._render.assert_awaited_with("hello", "16000:pcm16")
+
+
+class _Response:
+    headers = {}
+
+    def __init__(self, status, body):
+        self.status, self.body = status, body
+
+    async def text(self):
+        return self.body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _Session:
+    def __init__(self, response):
+        self.response = response
+
+    def post(self, *args, **kwargs):
+        return self.response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+@pytest.mark.parametrize("status", [401, 402, 403, 404])
+async def test_a_rejected_render_ends_the_call(monkeypatch, status):
+    monkeypatch.setattr(navana.aiohttp, "ClientSession", lambda: _Session(_Response(status, "invalid key")))
+    with pytest.raises(SynthesizerError, match=f"Navana rejected the request \\({status}\\): invalid key"):
+        await _synth()._render("hello", "8000:pcm16")
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+async def test_a_render_that_may_pass_next_turn_keeps_the_call(monkeypatch, status):
+    monkeypatch.setattr(navana.aiohttp, "ClientSession", lambda: _Session(_Response(status, "busy")))
+    assert await _synth()._render("hello", "8000:pcm16") is None

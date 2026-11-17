@@ -550,9 +550,11 @@ async def test_cartesia_drops_a_rejected_dictionary_for_the_rest_of_the_call():
     assert record.call_args.args[0]["dictionaries"] == ["pdict_1"]
 
 
-async def test_other_cartesia_errors_still_end_the_turn():
+async def test_other_cartesia_rejections_end_the_call():
     synth, record = _cartesia_turn([{**CARTESIA_REJECTION, "error": "Invalid voice"}])
-    assert await asyncio.wait_for(anext(synth.receiver()), 1) == b"\x00"
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(synth.receiver()), 1)
+    assert synth.connection_error == "Cartesia rejected the request (404): Invalid voice"
     assert synth.pronunciation_dict_id == "pdict_1"
     record.assert_not_called()
 

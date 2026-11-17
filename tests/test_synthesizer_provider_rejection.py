@@ -183,14 +183,21 @@ async def test_sarvam_idle_or_unspeakable_text_keeps_the_call(code, message):
     assert synth.connection_error is None
 
 
-async def test_sarvam_out_of_credits_ends_the_call():
+@pytest.mark.parametrize(
+    "code, message",
+    [
+        (402, "Credits exhausted."),
+        (422, "400: Speaker 'anushka' is not compatible with model bulbul:v3"),
+    ],
+)
+async def test_sarvam_rejections_end_the_call(code, message):
     synth = sarvam()
     audio_after = {"type": "audio", "data": {"audio": "AAAA"}}
 
-    chunks = await received(synth, [sarvam_error(402, "Credits exhausted."), audio_after])
+    chunks = await received(synth, [sarvam_error(code, message), audio_after])
 
     assert chunks == []
-    assert "Credits exhausted." in synth.connection_error
+    assert message in synth.connection_error
 
 
 async def test_soniox_rejecting_the_key_ends_the_call():

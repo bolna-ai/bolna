@@ -20,6 +20,7 @@ import aiohttp
 import websockets
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
+from .base_synthesizer import raise_if_rejected
 from .elevenlabs_synthesizer import split_flushable
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
@@ -549,10 +550,12 @@ class NavanaSynthesizer(StreamSynthesizer):
                 ) as response:
                     if response.status == 200:
                         return await response.read()
+                    detail = (await response.text())[:300]
                     logger.error(
                         f"Navana TTS HTTP error: {response.status} request_id={response.headers.get('X-Request-Id')}"
-                        f" - {(await response.text())[:300]}"
+                        f" - {detail}"
                     )
+                    raise_if_rejected("Navana", response.status, detail)
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"Navana TTS HTTP request failed: {e!r}")
         return None
