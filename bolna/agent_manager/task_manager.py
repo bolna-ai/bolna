@@ -78,7 +78,7 @@ from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
 from bolna.providers import *
 from bolna.s2s import events as s2s_events
-from bolna.helpers.fallbacks import FallbackEntry
+from bolna.helpers.fallbacks import PROVIDER_UNHEALTHY, FallbackEntry, ProviderUnhealthy
 from bolna.llms.fallback_llm import FallbackLLM, fallback_llm_arguments
 from bolna.llms.routing_stream import CONFIDENCE_KEY, REASONING_KEY
 from bolna.enums import (
@@ -386,6 +386,12 @@ class TaskManager(BaseManager):
         self.kwargs = kwargs
         self.kwargs["task_manager_instance"] = self
         self.provider_api_keys = self.kwargs.pop("provider_api_keys", None) or {}
+        # Per component, the (provider, model) pairs the caller has seen failing; a call with a fallback for one
+        # starts on the fallback.
+        self.unhealthy_providers = {
+            component: {tuple(pair) for pair in pairs}
+            for component, pairs in (self.kwargs.pop("unhealthy_providers", None) or {}).items()
+        }
         # Optional load-signal callback (set by the caller only for PTU-served calls).
         self.on_turn_usage = kwargs.get("on_turn_usage")
         # Fired instead of on_turn_usage when another backend served the turn.
@@ -1927,12 +1933,17 @@ class TaskManager(BaseManager):
 
                     transcribers = {}
                     fallbacks = {}
+                    serving = {}
                     for label, cfg in multilingual.items():
-                        transcribers[label] = self.__build_transcriber_leg(cfg, provider, transcriber_config)
-                        fallbacks[label] = self.__transcriber_fallback_entries(cfg, provider, transcriber_config)
-
+                        transcribers[label], fallbacks[label], serving[label] = self.__start_on_healthy(
+                            "transcriber",
+                            cfg,
+                            self.__build_transcriber_leg(cfg, provider, transcriber_config),
+                            self.__transcriber_fallback_entries(cfg, provider, transcriber_config),
+                        )
                         if label == active_label:
-                            self.transcriber_provider = cfg.get("provider", cfg.get("model"))
+                            self.transcriber_provider = serving[label].get("provider", serving[label].get("model"))
+                    multilingual = serving
 
                     # Detector tap: enabled → per-turn buffer feeds the Switch LLM; disabled → legacy heuristic.
                     LID_PROVIDER = self.task_config.get("tools_config", {}).get(
@@ -2026,18 +2037,21 @@ class TaskManager(BaseManager):
     def __setup_transcriber_with_fallbacks(self, transcriber_config, telephony_provider):
         """A single-language transcriber with fallbacks runs as a one-language pool, which moves it between providers."""
         label = self.language or DEFAULT_LANGUAGE_CODE
+        transcriber, fallbacks, serving = self.__start_on_healthy(
+            "transcriber",
+            transcriber_config,
+            self.__build_transcriber_leg(transcriber_config, telephony_provider, transcriber_config),
+            self.__transcriber_fallback_entries(transcriber_config, telephony_provider, transcriber_config),
+        )
+        self.transcriber_provider = serving.get("provider", serving.get("model"))
         self.tools["transcriber"] = TranscriberPool(
-            transcribers={
-                label: self.__build_transcriber_leg(transcriber_config, telephony_provider, transcriber_config)
-            },
+            transcribers={label: transcriber},
             shared_input_queue=self.audio_queue,
             output_queue=self.transcriber_output_queue,
             active_label=label,
-            multilingual_config={label: transcriber_config},
+            multilingual_config={label: serving},
             lazy_legs=True,
-            fallbacks={
-                label: self.__transcriber_fallback_entries(transcriber_config, telephony_provider, transcriber_config)
-            },
+            fallbacks={label: fallbacks},
             on_fallback=self.__on_transcriber_fallback,
         )
         logger.info(f"Transcriber {self.transcriber_provider} with fallbacks for '{label}'")
@@ -2069,6 +2083,42 @@ class TaskManager(BaseManager):
         leg_kwargs = self.__pool_leg_kwargs(self.kwargs, "transcriber_key", cfg.get("provider"), fallback=fallback)
         # Runtime kwargs win over the saved config, which may carry the same key.
         return cls(telephony_provider, **{**cfg, **leg_kwargs})
+
+    def __start_on_healthy(self, component, config, primary, entries):
+        """(provider instance, fallbacks behind it, config now serving) for one language of a transcriber or voice.
+
+        The agent's own provider serves unless the caller marked it unhealthy; then the first fallback not marked
+        so does, and the agent's own becomes the last to try.
+        """
+        unhealthy = self.unhealthy_providers.get(component) or ()
+        provider = config.get("provider") or config.get("model")
+        model = (config.get("provider_config") or config).get("model")
+        if (provider, model) not in unhealthy:
+            return primary, entries, config
+        for entry in entries:
+            if (entry.provider, entry.model) in unhealthy:
+                continue
+            try:
+                replacement = entry.build()
+            except Exception as e:
+                logger.error(f"{component} fallback {entry.provider} could not be built: {e}")
+                continue
+            if component == "synthesizer":
+                # Engines, as request logs name each voice.
+                failed_model, served_model = primary.get_engine(), replacement.get_engine()
+            else:
+                failed_model, served_model = getattr(primary, "model", None), entry.model
+            self.record_fallback(
+                component,
+                {"provider": provider, "model": failed_model},
+                {"provider": entry.provider, "model": served_model},
+                reason=PROVIDER_UNHEALTHY,
+                error=None,
+                replacement=replacement,
+            )
+            last_resort = FallbackEntry(provider, model, lambda: primary, config=config)
+            return replacement, [*(other for other in entries if other is not entry), last_resort], entry.config
+        return primary, entries, config
 
     def __transcriber_fallback_entries(self, leg_config, telephony_provider, agent_config):
         """The leg's fallback providers, each serving the leg's own language."""
@@ -2126,9 +2176,15 @@ class TaskManager(BaseManager):
 
                 synthesizers = {}
                 fallbacks = {}
+                serving = {}
                 for label, cfg in multilingual.items():
-                    synthesizers[label] = self.__build_synthesizer_leg(cfg, synthesizer_kwargs)
-                    fallbacks[label] = self.__synthesizer_fallback_entries(cfg.get("fallbacks"), synthesizer_kwargs)
+                    synthesizers[label], fallbacks[label], serving[label] = self.__start_on_healthy(
+                        "synthesizer",
+                        cfg,
+                        self.__build_synthesizer_leg(cfg, synthesizer_kwargs),
+                        self.__synthesizer_fallback_entries(cfg.get("fallbacks"), synthesizer_kwargs),
+                    )
+                multilingual = serving
 
                 # Use active synth's provider/voice for logging metadata, and buffer_size
                 # Note that in the current state, buffer_size of other synth configs is ignored
@@ -2198,7 +2254,12 @@ class TaskManager(BaseManager):
                 **synth_config, **provider_config, **synthesizer_kwargs, caching=caching
             )
             if fallbacks:
-                self.__add_synthesizer_fallbacks(fallbacks, synthesizer_kwargs)
+                primary_config = {
+                    "provider": provider_name,
+                    "provider_config": provider_config,
+                    "pronunciation_rules": synth_config.get("pronunciation_rules"),
+                }
+                self.__add_synthesizer_fallbacks(primary_config, fallbacks, synthesizer_kwargs)
             # if not self.turn_based_conversation:
             #     self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
             if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
@@ -2215,17 +2276,28 @@ class TaskManager(BaseManager):
             provider, provider_config, pronunciation_rules, on_platform_key=on_platform_key
         )
 
-    def __add_synthesizer_fallbacks(self, fallbacks, synthesizer_kwargs):
+    def __add_synthesizer_fallbacks(self, primary_config, fallbacks, synthesizer_kwargs):
         """A single voice with fallbacks runs as a one-voice pool, which moves it between providers."""
         label = self.language or DEFAULT_LANGUAGE_CODE
+        synthesizer, entries, serving = self.__start_on_healthy(
+            "synthesizer",
+            primary_config,
+            self.tools["synthesizer"],
+            self.__synthesizer_fallback_entries(fallbacks, synthesizer_kwargs),
+        )
+        if serving is not primary_config:
+            self.__set_synthesizer_identity(
+                serving["provider"],
+                serving["provider_config"],
+                serving.get("pronunciation_rules"),
+                on_platform_key=not self.provider_api_keys.get(serving["provider"]),
+            )
         self.tools["synthesizer"] = SynthesizerPool(
-            synthesizers={label: self.tools["synthesizer"]},
+            synthesizers={label: synthesizer},
             active_label=label,
-            multilingual_config={
-                label: {"provider": self.synthesizer_provider, "provider_config": {"voice": self.synthesizer_voice}}
-            },
+            multilingual_config={label: serving},
             lazy_legs=True,
-            fallbacks={label: self.__synthesizer_fallback_entries(fallbacks, synthesizer_kwargs)},
+            fallbacks={label: entries},
             on_fallback=self.__on_synthesizer_fallback,
         )
         logger.info(f"Synthesizer {self.synthesizer_provider} with fallbacks for '{label}'")
@@ -2273,7 +2345,8 @@ class TaskManager(BaseManager):
             error=str(error) if error else None,
             replacement=replacement,
         )
-        self.__spawn_health_report("synthesizer", failed_info["provider"], failed_info["model"])
+        # Health is kept under the model the voice's own turns report, which is not always its engine.
+        self.__spawn_health_report("synthesizer", failed_info["provider"], getattr(failed, "model", None))
         self.__set_synthesizer_identity(
             entry.provider,
             entry.config["provider_config"],
@@ -2320,20 +2393,29 @@ class TaskManager(BaseManager):
             build = partial(llm_class, language=self.language, **config, **kwargs)
             entries.append(FallbackEntry(entry["provider"], entry["model"], build))
         logger.info(f"LLM fallbacks: {[f'{e.provider}/{e.model}' for e in entries]}")
-        return FallbackLLM(llm, entries, on_switch=self.__on_llm_fallback)
+        chain = FallbackLLM(llm, entries, on_switch=self.__on_llm_fallback)
+        unhealthy = self.unhealthy_providers.get("llm") or ()
+        own = (self.llm_config.get("provider"), self.llm_config.get("model"))
+        if own in unhealthy:
+            chain.start_on_healthy(
+                lambda entry: (entry.provider, entry.model) in unhealthy, FallbackEntry(*own, lambda: llm)
+            )
+        return chain
 
     def __on_llm_fallback(self, error, entry, meta_info):
         failed = {"provider": self.llm_config.get("provider"), "model": self.llm_config.get("model")}
         status = getattr(error, "status_code", None)
+        skipped = isinstance(error, ProviderUnhealthy)
         self.record_fallback(
             "llm",
             failed,
             {"provider": entry.provider, "model": entry.model},
-            reason=f"http_{status}" if status else type(error).__name__,
-            error=str(error),
+            reason=PROVIDER_UNHEALTHY if skipped else f"http_{status}" if status else type(error).__name__,
+            error=None if skipped else str(error),
             meta_info=meta_info,
         )
-        self.__spawn_health_report("llm", failed["provider"], failed["model"])
+        if not skipped:
+            self.__spawn_health_report("llm", failed["provider"], failed["model"])
         # Logs, latency rows and error attribution follow the model now serving.
         for key in ("reasoning_effort", "verbosity", "reasoning_summary", "thinking_budget", "extra_body"):
             self.llm_config.pop(key, None)

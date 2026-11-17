@@ -181,6 +181,8 @@ def test_every_multilingual_call_builds_lazy_pools(monkeypatch):
     tm.kwargs = {}
     tm.provider_api_keys = {}
     tm._TaskManager__pool_leg_kwargs = TaskManager._TaskManager__pool_leg_kwargs.__get__(tm, TaskManager)
+    tm.unhealthy_providers = {}
+    tm._TaskManager__start_on_healthy = TaskManager._TaskManager__start_on_healthy.__get__(tm, TaskManager)
     tm._TaskManager__build_transcriber_leg = TaskManager._TaskManager__build_transcriber_leg.__get__(tm, TaskManager)
     tm._TaskManager__transcriber_fallback_entries = TaskManager._TaskManager__transcriber_fallback_entries.__get__(
         tm, TaskManager
