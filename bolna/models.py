@@ -489,7 +489,8 @@ class Synthesizer(BaseModel):
 
         config_model = SYNTHESIZER_CONFIG_MODELS.get(provider)
         if config_model:
-            values["provider_config"] = config_model(**config)
+            # A copy, so the dict being validated is left as its caller holds it.
+            values = {**values, "provider_config": config_model(**config)}
 
         return values
 
