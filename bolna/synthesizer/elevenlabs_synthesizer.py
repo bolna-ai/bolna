@@ -13,7 +13,7 @@ import aiohttp
 import websockets
 
 from .stream_synthesizer import StreamSynthesizer
-from bolna.constants import ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES
+from bolna.constants import ELEVENLABS_CLONE_STRENGTH_MODEL_PREFIXES, ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, resample
@@ -100,6 +100,7 @@ class ElevenlabsBase(StreamSynthesizer):
         similarity_boost=0.75,
         speed=1.0,
         style=0,
+        clone_strength=None,
         synthesizer_key=None,
         caching=True,
         pronunciation_dictionary_locators=None,
@@ -123,6 +124,9 @@ class ElevenlabsBase(StreamSynthesizer):
         self.use_mulaw = kwargs.get("use_mulaw", True)
         self.temperature = temperature
         self.similarity_boost = similarity_boost
+        # Only v4 takes it; left unset it stays off the wire, so ElevenLabs uses the strength saved on the voice.
+        takes_clone_strength = (model or "").startswith(ELEVENLABS_CLONE_STRENGTH_MODEL_PREFIXES)
+        self.clone_strength = clone_strength if takes_clone_strength else None
         self.caching = caching
         if self.caching:
             self.cache = InmemoryScalarCache()
@@ -231,6 +235,8 @@ class ElevenlabsBase(StreamSynthesizer):
             "model_id": self.model,
             "voice_settings": {**self._voice_settings(), "optimize_streaming_latency": 3},
         }
+        if self.clone_strength is not None:
+            payload["voice_settings"]["clone_strength"] = self.clone_strength
         if self.pronunciation_dictionary_locators:
             payload["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
         headers = {"xi-api-key": self.api_key}
@@ -659,11 +665,14 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
                 self.ws_trace_id = websocket.response.headers.get("x-trace-id")
                 logger.info(f"Elevenlabs v3 WebSocket connected trace_id={self.ws_trace_id}")
-            # First message only. stability is the sole setting v3 honours; dictionaries apply to the whole socket.
+            # First message only. The socket takes stability and, on v4, clone_strength; dictionaries apply to the
+            # whole socket.
             first_message = {
                 "voices": [self.voice],
                 "voice_settings": {"stability": self.temperature},
             }
+            if self.clone_strength is not None:
+                first_message["voice_settings"]["clone_strength"] = self.clone_strength
             if self.pronunciation_dictionary_locators:
                 first_message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
             await websocket.send(json.dumps(first_message))
