@@ -9,6 +9,7 @@ import base64
 import websockets
 from websockets.exceptions import InvalidHandshake
 
+from .base_synthesizer import REJECTED_STATUSES, raise_if_rejected
 from .stream_synthesizer import StreamSynthesizer
 from bolna.constants import CARTESIA_VOLUME_MAX, CARTESIA_VOLUME_MIN, CARTESIA_VOLUME_MODELS
 from bolna.helpers.logger_config import configure_logger
@@ -205,6 +206,22 @@ class CartesiaSynthesizer(StreamSynthesizer):
         except Exception as e:
             logger.error(f"Unexpected error in sender: {e}")
 
+    def _drop_rejected_dictionary(self, error) -> bool:
+        """True when Cartesia rejected the pronunciation dictionary, e.g. deleted after the save; later requests go without it."""
+        if not (self.pronunciation_dict_id and "pronunciation" in str(error).lower()):
+            return False
+        logger.error(f"Cartesia rejected pronunciation dictionary {self.pronunciation_dict_id}: {error}")
+        if self.task_manager_instance is not None:
+            self.task_manager_instance.record_non_fatal_synthesizer_error(
+                {
+                    "error_type": "pronunciation_dictionary_rejected",
+                    "error": error,
+                    "dictionaries": [self.pronunciation_dict_id],
+                }
+            )
+        self.pronunciation_dict_id = None
+        return True
+
     async def receiver(self):
         not_connected_since = None
         while True:
@@ -230,22 +247,17 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 response = await self.websocket.recv()
                 data = json.loads(response)
 
-                error = data.get("error")
-                if data.get("type") == "error" and self.pronunciation_dict_id and "pronunciation" in str(error).lower():
-                    # e.g. deleted after the save: later messages go without it, and this turn ends on the frame's done.
-                    logger.error(f"Cartesia rejected pronunciation dictionary {self.pronunciation_dict_id}: {error}")
-                    if self.task_manager_instance is not None:
-                        self.task_manager_instance.record_non_fatal_synthesizer_error(
-                            {
-                                "error_type": "pronunciation_dictionary_rejected",
-                                "error": error,
-                                "dictionaries": [self.pronunciation_dict_id],
-                            }
-                        )
-                    self.pronunciation_dict_id = None
+                is_error = data.get("type") == "error"
+                dictionary_rejected = is_error and self._drop_rejected_dictionary(data.get("error"))
                 if data.get("context_id") in self.context_ids_to_ignore:
                     continue
 
+                if is_error and not dictionary_rejected and data.get("status_code") in REJECTED_STATUSES:
+                    logger.error(f"Cartesia rejected the stream: {data}")
+                    self.connection_error = (
+                        f"Cartesia rejected the request ({data['status_code']}): {data.get('error')}"
+                    )
+                    return
                 if "data" in data and data["data"]:
                     yield base64.b64decode(data["data"])
                 elif "done" in data and data["done"]:
@@ -331,5 +343,8 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 if response.status == 200:
                     return await response.read()
                 else:
-                    logger.error(f"Error: {response.status} - {await response.text()}")
+                    detail = await response.text()
+                    logger.error(f"Error: {response.status} - {detail}")
+                    if not self._drop_rejected_dictionary(detail):
+                        raise_if_rejected("Cartesia", response.status, detail)
                     return None

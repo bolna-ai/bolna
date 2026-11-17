@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import websockets as _ws
 
+from bolna.exceptions import SynthesizerError
 from bolna.helpers.utils import StreamingPcmResampler, audio_to_mulaw8k, resample
 from bolna.models import KalpaConfig, Synthesizer
 from bolna.providers import SUPPORTED_SYNTHESIZER_MODELS
@@ -1590,9 +1591,10 @@ def test_capacity_and_rate_limit_failures_are_retried(monkeypatch):
     assert asyncio.run(_synth().synthesize("hi")) is None
     assert len(session.posts) == 3  # bounded
 
-    session = _script_http(monkeypatch, [(401, overloaded, {})])
-    assert asyncio.run(_synth().synthesize("hi")) is None
-    assert len(session.posts) == 1  # a bad key is not retried
+    session = _script_http(monkeypatch, [(401, {"error": {"message": "invalid key"}}, {})])
+    with pytest.raises(SynthesizerError, match="Kalpa rejected the request \\(401\\)"):
+        asyncio.run(_synth().synthesize("hi"))
+    assert len(session.posts) == 1  # a bad key is not retried; it ends the call
 
 
 def test_the_one_shot_render_truncates_at_the_cap_too(monkeypatch):

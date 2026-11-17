@@ -12,6 +12,7 @@ import base64
 import aiohttp
 import websockets
 
+from .base_synthesizer import raise_if_rejected
 from .stream_synthesizer import StreamSynthesizer
 from bolna.constants import ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES
 from bolna.helpers.logger_config import configure_logger
@@ -241,7 +242,9 @@ class ElevenlabsBase(StreamSynthesizer):
                 if response.status == 200:
                     return await response.read()
                 else:
-                    logger.error(f"Error: {response.status} - {await response.text()}")
+                    detail = await response.text()
+                    logger.error(f"Error: {response.status} - {detail}")
+                    raise_if_rejected("ElevenLabs", response.status, detail)
                     return None
 
 
