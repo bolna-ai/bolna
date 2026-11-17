@@ -177,9 +177,13 @@ class SynthesizerPool:
         """
         synth = self.synthesizers[label]
         try:
-            async for message in synth.generate():
-                self.settle_open_turn(message)
-                self._output_queue.put_nowait(message)
+            # generate() returns when the provider's socket drops: entered again, it resumes once the synth has
+            # reconnected and raises if it could not.
+            while not self.cleaning_up and self.synthesizers.get(label) is synth:
+                async for message in synth.generate():
+                    self.settle_open_turn(message)
+                    self._output_queue.put_nowait(message)
+                await asyncio.sleep(0)
         except asyncio.CancelledError:
             logger.info(f"SynthesizerPool: _run_generate cancelled for '{label}'")
         except Exception as e:

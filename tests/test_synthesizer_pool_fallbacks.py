@@ -35,6 +35,8 @@ class FakeSynth:
     async def generate(self):
         while True:
             message = await self.audio.get()
+            if isinstance(message, StopAsyncIteration):
+                return
             if isinstance(message, Exception):
                 raise message
             yield {"data": f"{self.model}:{message['data']}".encode(), "meta_info": message["meta_info"]}
@@ -179,4 +181,58 @@ async def test_a_turn_sent_again_to_the_fallback_counts_once_toward_usage():
 
     assert backup.get_synthesized_characters() == len("Namaste, kaise madad karun?")
     assert pool.get_synthesized_characters() == len("Namaste, kaise madad karun?")
+    await pool.cleanup()
+
+
+class DroppingSynth(FakeSynth):
+    """Its socket drops once: generate() returns, and what happens when it is entered again is up to `reconnects`."""
+
+    def __init__(self, model, reconnects):
+        super().__init__(model)
+        self.reconnects = reconnects
+        self.dropped = False
+
+    async def generate(self):
+        if self.dropped and not self.reconnects:
+            raise RuntimeError("Max connection failures reached")
+        async for packet in super().generate():
+            yield packet
+
+    def drop(self):
+        self.dropped = True
+        self.audio.put_nowait(StopAsyncIteration())
+
+    async def push(self, message):
+        if self.dropped and not self.reconnects:
+            return
+        await super().push(message)
+
+
+async def test_a_voice_whose_socket_dropped_between_turns_and_reconnected_keeps_speaking():
+    primary = DroppingSynth("sonic-3", reconnects=True)
+    pool, switches = await started_pool(primary, FakeSynth("bulbul:v3"))
+    stream = pool.generate()
+    await asyncio.sleep(0.01)
+    primary.drop()
+    await asyncio.sleep(0.01)
+
+    await pool.push(text("Ji."))
+
+    assert await next_audio(pool, stream) == b"sonic-3:Ji."
+    assert switches == []
+    await pool.cleanup()
+
+
+async def test_a_voice_whose_socket_dropped_between_turns_for_good_moves_to_its_fallback():
+    primary, backup = DroppingSynth("sonic-3", reconnects=False), FakeSynth("bulbul:v3")
+    pool, switches = await started_pool(primary, backup)
+    stream = pool.generate()
+    await asyncio.sleep(0.01)
+    primary.drop()
+    await asyncio.sleep(0.01)
+
+    await pool.push(text("Ji."))
+
+    assert await next_audio(pool, stream) == b"bulbul:v3:Ji."
+    assert switches == [("sonic-3", "bulbul:v3", "Max connection failures reached")]
     await pool.cleanup()
