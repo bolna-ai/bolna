@@ -122,6 +122,8 @@ class GraphAgent(BaseAgent):
 
         self.node_history = [self.current_node_id]
         self.current_node_entry_index = 0
+        # History index past the input the caller gave before hearing any of the active node's speech.
+        self._held_until_index = 0
         self._silence_repeats = 0
         self._event_triggered_generation = False
         self._active_node_first_response_delivered = True
@@ -827,6 +829,7 @@ class GraphAgent(BaseAgent):
                 previous_node = self.current_node_id
                 self.current_node_id = edge["to_node_id"]
                 self.current_node_entry_index = 0  # caller should set to len(history)
+                self._held_until_index = 0
                 self._silence_repeats = 0
                 self._active_node_first_response_delivered = False
                 self._end_node_closed = False
@@ -853,11 +856,17 @@ class GraphAgent(BaseAgent):
         return {"matched": False, "event": event_name}
 
     def _compute_turn_counts(self, history: list) -> tuple:
-        """Count (node_turns, total_turns) from history. A node just entered this
-        turn (entry_index == len(history), as during a router hop) has 0 node turns."""
+        """Count (node_turns, total_turns) from history. A node turn is one caller reply: consecutive user
+        messages (one utterance the transcriber split) count once, input the caller gave before hearing any
+        of the node's speech does not count, and a node just entered this turn (entry_index == len(history),
+        as during a router hop) has none."""
         total_turns = sum(1 for msg in history if msg.get("role") == "user")
-        node_history = history[self.current_node_entry_index :]
-        node_turns = sum(1 for msg in node_history if msg.get("role") == "user")
+        node_history = history[max(self.current_node_entry_index, self._held_until_index) :]
+        node_turns = sum(
+            1
+            for i, msg in enumerate(node_history)
+            if msg.get("role") == "user" and (i == 0 or node_history[i - 1].get("role") != "user")
+        )
         return node_turns, total_turns
 
     def _enrich_routing_context(self, history: list) -> None:
@@ -1080,6 +1089,7 @@ class GraphAgent(BaseAgent):
     def _advance_to_node(self, node_id: str, entry_index: int) -> None:
         self.current_node_id = node_id
         self.current_node_entry_index = entry_index
+        self._held_until_index = 0
         self._silence_repeats = 0
         self._active_node_first_response_delivered = False
         self._end_node_closed = False
@@ -1123,6 +1133,12 @@ class GraphAgent(BaseAgent):
             and node is not None
             and self._node_type_of(node) in (NodeType.LLM, NodeType.STATIC)
             and not self._active_node_first_response_delivered
+        )
+
+    def _node_speech_heard(self, history: list) -> bool:
+        """True once the active node's speech, or the part of it the caller heard, is in history."""
+        return any(
+            msg.get("role") == "assistant" and msg.get("content") for msg in history[self.current_node_entry_index :]
         )
 
     def _hold_routing_info(self, is_silence_trigger: bool) -> dict:
@@ -1798,6 +1814,8 @@ class GraphAgent(BaseAgent):
                     f"Holding on node '{self.current_node_id}' until its first response is delivered; "
                     f"user input registered as context, not a routing trigger"
                 )
+                if not self._node_speech_heard(message):
+                    self._held_until_index = len(message)
                 yield {"routing_info": self._hold_routing_info(is_silence_trigger)}
             else:
                 previous_node = self.current_node_id
