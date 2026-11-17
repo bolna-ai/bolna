@@ -34,6 +34,8 @@ def setup_tm(task_config, kwargs=None, provider_api_keys=None):
     tm.kwargs = kwargs or {}
     tm.provider_api_keys = provider_api_keys or {}
     tm.fallback_events = []
+    tm._llm_fallback_turns = []
+    tm.llm_latencies = MagicMock(turn_latencies=[])
     tm.conversation_start_init_ts = 0
     bind(
         tm,
@@ -137,6 +139,46 @@ def test_a_single_voice_with_fallbacks_runs_as_a_one_voice_pool(monkeypatch):
     assert "synthesizer_key" not in built
 
 
+def test_a_fallback_voice_on_a_web_call_plays_at_the_web_rate(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tmmod,
+        "SUPPORTED_SYNTHESIZER_MODELS",
+        {"cartesia": recorder(calls, "cartesia"), "sarvam": recorder(calls, "sarvam")},
+    )
+    pool = MagicMock()
+    monkeypatch.setattr(tmmod, "SynthesizerPool", pool)
+    sarvam = {
+        "provider": "sarvam",
+        "provider_config": {"voice": "Anushka", "voice_id": "anushka", "model": "bulbul:v3", "language": "hi"},
+    }
+    cartesia_voice = {"voice": "Riya", "voice_id": "riya-id", "model": "sonic-3", "language": "hi"}
+    tm = setup_tm(
+        {
+            "tools_config": {
+                "transcriber": {"language": "hi"},
+                "synthesizer": {
+                    "provider": "cartesia",
+                    "provider_config": {**cartesia_voice, "sampling_rate": tmmod.WEBCALL_TTS_SAMPLE_RATE},
+                    "stream": True,
+                    "fallbacks": [sarvam],
+                },
+                "output": {"provider": "default"},
+                "llm_agent": None,
+            }
+        }
+    )
+    tm.is_web_based_call = True
+    tm.language = "hi"
+
+    TaskManager._TaskManager__setup_synthesizer.__get__(tm, TaskManager)()
+
+    (entry,) = pool.call_args.kwargs["fallbacks"]["hi"]
+    entry.build()
+    _, built = calls[1]
+    assert (built["sampling_rate"], built["use_mulaw"]) == (tmmod.WEBCALL_TTS_SAMPLE_RATE, False)
+
+
 def test_a_fallback_takes_its_own_providers_key_when_the_call_has_one():
     tm = setup_tm({}, kwargs={"transcriber_key": "deepgram-key"}, provider_api_keys={"sarvam": "sarvam-key"})
     leg_kwargs = TaskManager._TaskManager__pool_leg_kwargs.__get__(tm, TaskManager)
@@ -174,6 +216,9 @@ async def test_an_llm_switch_is_recorded_and_the_call_follows_the_model_now_serv
     tm._report_provider_health.assert_awaited_once_with("llm", "azure", "azure/gpt-4.1-mini", False)
     assert (tm.llm_config["provider"], tm.llm_config["model"]) == ("openai", "gpt-4.1-mini")
     assert tm.on_turn_usage is None and tm.on_overflow is None
+    # The agent's Azure key is never offered as the key of the OpenAI model now serving.
+    tm.s2s_provider_name = None
+    assert TaskManager._web_search_openai_fallback_key.__get__(tm, TaskManager)() is None
 
 
 async def test_an_asr_switch_is_recorded_with_what_the_new_provider_served_and_the_call_follows_it():
@@ -203,22 +248,28 @@ async def test_an_asr_switch_is_recorded_with_what_the_new_provider_served_and_t
     tm._report_provider_health.assert_awaited_once_with("transcriber", "deepgram", "nova-3", False)
 
 
-def test_each_llm_fallback_is_credited_with_the_turns_it_answered():
+def test_each_llm_fallback_is_credited_with_the_turns_logged_after_it_took_over():
     tm = setup_tm({})
     tm._fallback_replacements = []
-    tm.llm_latencies = MagicMock(
-        turn_latencies=[
-            {"sequence_id": seq, "input_tokens": 100 * seq, "output_tokens": seq, "cached_tokens": 0}
-            for seq in (1, 2, 3, 4)
-        ]
-    )
+    tm._llm_fallback_turns = []
+    turns = []
+    tm.llm_latencies = MagicMock(turn_latencies=turns)
     bind(tm, "fallback_events_with_usage")
-    tm.record_fallback("llm", {}, {"model": "second"}, "http_429", "", meta_info={"sequence_id": 2})
+
+    def answer(sequence_id):
+        turns.append({"sequence_id": sequence_id, "input_tokens": 100, "output_tokens": 1, "cached_tokens": 0})
+
+    answer(1)
+    # A switch made outside a caller turn carries no turn of its own.
+    tm.record_fallback("llm", {}, {"model": "second"}, "http_429", "", meta_info={"sequence_id": -1})
+    answer(2)
+    answer(3)
     tm.record_fallback("llm", {}, {"model": "third"}, "http_503", "", meta_info={"sequence_id": 4})
+    answer(4)
 
     second, third = tm.fallback_events_with_usage()
-    assert second["served_usage"] == {"input_tokens": 500, "output_tokens": 5, "cached_tokens": 0, "turns": 2}
-    assert third["served_usage"] == {"input_tokens": 400, "output_tokens": 4, "cached_tokens": 0, "turns": 1}
+    assert second["served_usage"] == {"input_tokens": 200, "output_tokens": 2, "cached_tokens": 0, "turns": 2}
+    assert third["served_usage"] == {"input_tokens": 100, "output_tokens": 1, "cached_tokens": 0, "turns": 1}
 
 
 async def test_a_tts_switch_names_both_voices_as_request_logs_do_and_the_call_speaks_as_the_new_one():
@@ -246,3 +297,27 @@ async def test_a_tts_switch_names_both_voices_as_request_logs_do_and_the_call_sp
     )
     assert event["served_usage"] == {"characters": 310}
     assert (tm.synthesizer_provider, tm.synthesizer_voice_id) == ("sarvam", "priya")
+
+
+async def test_a_one_language_pool_is_left_alone_when_the_other_side_switches_language():
+    from bolna.synthesizer.synthesizer_pool import SynthesizerPool
+    from bolna.transcriber.transcriber_pool import TranscriberPool
+
+    transcriber = TranscriberPool.__new__(TranscriberPool)
+    transcriber.transcribers = {"hi": MagicMock()}
+    transcriber.switch = AsyncMock(side_effect=ValueError("no such label"))
+    synthesizer = SynthesizerPool.__new__(SynthesizerPool)
+    synthesizer.synthesizers = {"hi": MagicMock(), "ta": MagicMock()}
+    synthesizer.switch = AsyncMock()
+    tm = MagicMock()
+    tm.tools = {"transcriber": transcriber, "synthesizer": synthesizer}
+    tm.language_switch_events = []
+
+    try:
+        await TaskManager.switch_language.__get__(tm, TaskManager)("ta")
+    except Exception:
+        # Everything after the pools flip reads call state this harness does not build.
+        pass
+
+    transcriber.switch.assert_not_awaited()
+    synthesizer.switch.assert_awaited_once_with("ta")

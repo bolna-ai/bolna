@@ -146,3 +146,21 @@ async def test_a_fallback_that_cannot_take_over_still_ends_the_call_rather_than_
     with pytest.raises(RuntimeError, match="429"):
         await asyncio.wait_for(stream.__anext__(), timeout=1)
     await pool.cleanup()
+
+
+async def test_the_pool_names_the_voice_now_serving_a_language():
+    backup = FakeSynth("bulbul:v3")
+    config = {"provider": "sarvam", "provider_config": {"voice": "Priya"}}
+    pool = SynthesizerPool(
+        {"hi": FakeSynth("sonic-3")},
+        "hi",
+        {"hi": {"provider": "cartesia", "provider_config": {"voice": "Riya"}}},
+        lazy_legs=True,
+        fallbacks={"hi": [FallbackEntry("sarvam", "bulbul:v3", lambda: backup, config=config)]},
+    )
+    await pool.monitor_connection()
+
+    assert await pool.fail_over("hi", RuntimeError("HTTP 429")) is True
+
+    assert pool.get_active_synthesizer_info() == {"provider": "sarvam", "voice": "Priya"}
+    await pool.cleanup()
