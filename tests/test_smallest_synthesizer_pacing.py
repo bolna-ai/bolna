@@ -1,10 +1,4 @@
-"""
-Web calls with Smallest TTS sounded choppy after the welcome message.
-
-__listen_synthesizer sleeps synthesizer.get_sleep_time() after every streamed chunk.
-Smallest inherited BaseSynthesizer's 0.2s while each of its chunks holds 160ms of 24kHz
-audio, so playout ran dry for ~40ms on every chunk. The cached welcome clip skips that loop.
-"""
+"""Smallest streamed audio must be forwarded faster than it plays, or playback stutters."""
 
 import base64
 import json
@@ -14,7 +8,7 @@ import websockets
 from bolna.constants import WEBCALL_TTS_SAMPLE_RATE
 from bolna.synthesizer.smallest_synthesizer import SmallestSynthesizer
 
-CHUNK_BYTES = 7680  # size seen on prod web calls: 160ms of 16-bit PCM at 24kHz
+CHUNK_BYTES = 7680  # 160ms of 16-bit PCM at 24kHz
 
 
 class FakeSmallestSocket:
@@ -43,7 +37,7 @@ async def test_streamed_audio_reaches_output_faster_than_it_plays():
     async for packet in synth.generate():
         if packet["data"] != b"\x00":
             audio_bytes += len(packet["data"])
-        listener_sleep_s += synth.get_sleep_time()  # what __listen_synthesizer awaits per packet
+        listener_sleep_s += synth.get_sleep_time()  # slept after every packet
 
     audio_s = audio_bytes / 2 / WEBCALL_TTS_SAMPLE_RATE
     assert audio_s == 1.6
