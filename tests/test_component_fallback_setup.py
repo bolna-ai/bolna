@@ -321,3 +321,22 @@ async def test_a_one_language_pool_is_left_alone_when_the_other_side_switches_la
 
     transcriber.switch.assert_not_awaited()
     synthesizer.switch.assert_awaited_once_with("ta")
+
+
+def test_validating_a_voice_and_its_fallbacks_leaves_the_config_it_was_given_untouched():
+    import copy
+    import json
+
+    from bolna.models import Synthesizer
+
+    def voice(provider, voice_id, model):
+        provider_config = {"voice": voice_id, "voice_id": voice_id, "model": model, "language": "hi"}
+        return {"provider": provider, "provider_config": provider_config}
+
+    config = {**voice("cartesia", "riya", "sonic-3"), "fallbacks": [voice("elevenlabs", "anika", "eleven_turbo_v2_5")]}
+    given = copy.deepcopy(config)
+
+    Synthesizer(**config)
+
+    assert config == given
+    json.dumps(config)
