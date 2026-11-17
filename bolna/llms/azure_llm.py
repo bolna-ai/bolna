@@ -137,6 +137,7 @@ class AzureLLM(OpenAICompatibleLLM):
                 http_client=get_shared_http_client(base_url=overflow["base_url"], http2=False),
             )
             logger.info(f"Azure LLM overflow target ready: {self._overflow_model} @ {overflow['base_url']}")
+        self._init_first_chunk_deadline()
 
         # Responses API: uses v1 endpoint with regular AsyncOpenAI client
         self._init_responses_api(
@@ -180,6 +181,25 @@ class AzureLLM(OpenAICompatibleLLM):
                 raise
             logger.warning(f"Azure OpenAI saturated, overflowing turn to {self._overflow_model} run_id={self.run_id}")
             return await self._overflow_completion(model_args), True
+
+    async def _open_turn_stream(self, model_args, meta_info):
+        """(stream, overflowed); a turn that sends nothing in time is re-issued, on the overflow target if there is one."""
+        overflowed = False
+
+        async def first_attempt():
+            nonlocal overflowed
+            stream, overflowed = await self._create_completion(model_args)
+            return stream
+
+        async def reissue():
+            nonlocal overflowed
+            if self._overflow_client is not None and not overflowed:
+                overflowed = True
+                return await self._overflow_completion(model_args)
+            return await first_attempt()
+
+        stream = await self._open_stream_with_deadline(first_attempt, reissue, meta_info)
+        return stream, overflowed
 
     async def _overflow_completion(self, model_args):
         overflow_args = {
@@ -255,7 +275,7 @@ class AzureLLM(OpenAICompatibleLLM):
         finish_reason = None
 
         try:
-            completion_stream, turn_overflowed = await self._create_completion(model_args)
+            completion_stream, turn_overflowed = await self._open_turn_stream(model_args, meta_info)
         except BadRequestError as e:
             logger.error(f"Azure OpenAI bad request: {e}")
             raise
