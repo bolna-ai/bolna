@@ -61,14 +61,18 @@ class FallbackLLM:
 
     async def generate_stream(self, messages, *args, **kwargs):
         while True:
+            llm = self._active
             delivered = False
             try:
-                async for chunk in self._active.generate_stream(messages, *args, **kwargs):
+                async for chunk in llm.generate_stream(messages, *args, **kwargs):
                     delivered = True
                     yield chunk
                 return
             except Exception as error:
-                if delivered or not self._switch(error, kwargs.get("meta_info")):
+                if delivered:
+                    raise
+                # Another stream running alongside this one already moved the call on; re-run there.
+                if self._active is llm and not self._switch(error, kwargs.get("meta_info")):
                     raise
 
     def _switch(self, error, meta_info):

@@ -137,3 +137,23 @@ def test_an_entry_keeps_the_agents_settings_but_never_the_primarys_backend_or_mo
 
     assert config == {"provider": "openai", "model": "gpt-4.1-mini", "max_tokens": 300, "temperature": 0.2}
     assert entry_kwargs == {"run_id": "r", "llm_key": "openai-key"}
+
+
+async def test_two_turns_failing_together_move_to_the_same_fallback_once():
+    import asyncio
+
+    class SlowToFail(ScriptedLLM):
+        async def generate_stream(self, messages, synthesize=True, meta_info=None):
+            self.calls += 1
+            await asyncio.sleep(0)
+            raise RuntimeError("429 no capacity")
+            yield
+
+    primary = SlowToFail("primary")
+    backup = ScriptedLLM("backup", ["Sure."], ["Done."])
+    unused = ScriptedLLM("unused")
+    chain = FallbackLLM(primary, [entry(backup), entry(unused)])
+
+    assert sorted(await asyncio.gather(turn(chain), turn(chain))) == [["Done."], ["Sure."]]
+    assert chain.active is backup
+    assert unused.calls == 0
