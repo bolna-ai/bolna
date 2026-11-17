@@ -179,3 +179,55 @@ async def test_without_fallbacks_recovery_reconnects_the_same_provider():
     assert await pool.recover_active("socket dropped") is True
     primary.run.assert_awaited_once()
     assert pool.active_reconnect_count == 1
+
+
+async def test_what_the_caller_said_while_the_provider_was_down_reaches_the_fallback():
+    primary = FakeTranscriber("nova-3")
+    backup = FakeTranscriber("saaras:v3")
+    pool, _, _ = await started_pool(primary, entry(backup))
+    primary.input_queue.put_nowait("audio-1")
+    primary.input_queue.put_nowait("audio-2")
+
+    await pool.recover_active("HTTP 429")
+
+    assert [backup.input_queue.get_nowait() for _ in range(2)] == ["audio-1", "audio-2"]
+    await pool.cleanup()
+
+
+async def test_a_late_close_from_the_provider_already_replaced_spends_no_fallback():
+    primary = FakeTranscriber("nova-3")
+    backup = FakeTranscriber("saaras:v3")
+    spare = FakeTranscriber("universal")
+    pool, call_queue, switches = await started_pool(primary, entry(backup), entry(spare))
+    await primary.emit("transcriber_connection_closed")
+    await primary.emit("transcriber_connection_closed")
+    await settle()
+
+    for _ in range(2):
+        close = call_queue.get_nowait()
+        assert await pool.recover_active("HTTP 429", close["transcriber"]) is True
+    await settle()
+
+    assert pool.transcribers["hi"] is backup
+    assert [served for _, served, _ in switches] == ["saaras:v3"]
+    await pool.cleanup()
+
+
+async def test_the_pool_names_the_provider_now_serving_a_language():
+    backup = FakeTranscriber("saaras:v3")
+    fallback = FallbackEntry("sarvam", "saaras:v3", lambda: backup, config={"provider": "sarvam", "language": "hi"})
+    pool = TranscriberPool(
+        transcribers={"hi": FakeTranscriber("nova-3")},
+        shared_input_queue=asyncio.Queue(),
+        output_queue=asyncio.Queue(),
+        active_label="hi",
+        multilingual_config={"hi": {"provider": "deepgram", "language": "hi"}},
+        lazy_legs=True,
+        fallbacks={"hi": [fallback]},
+    )
+    await pool.run()
+
+    await pool.recover_active("HTTP 429")
+
+    assert pool.get_active_transcriber_info() == {"provider": "sarvam"}
+    await pool.cleanup()

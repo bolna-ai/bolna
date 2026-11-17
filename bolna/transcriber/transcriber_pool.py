@@ -316,6 +316,9 @@ class TranscriberPool:
                     # A provider the label moved off: whatever it still says, its close above all, is stale.
                     return
                 if label == self.active_label:
+                    if isinstance(packet, dict) and packet.get("data") == "transcriber_connection_closed":
+                        # Names the provider that closed: the label may be served by another by the time it is read.
+                        packet = {**packet, "transcriber": transcriber}
                     self.output_queue.put_nowait(packet)
                     continue
                 data = packet.get("data") if isinstance(packet, dict) else None
@@ -618,14 +621,17 @@ class TranscriberPool:
             )
             return True
 
-    async def recover_active(self, error=None) -> bool:
+    async def recover_active(self, error=None, closed=None) -> bool:
         """Bring the active language back after its connection died; False when the call should end.
 
         Without a fallback the provider is reconnected as before. With one, a connection that had been working gets
         a single reconnect, and a provider that never connected or failed again moves to the next fallback rather
-        than being retried: a capacity rejection would only repeat.
+        than being retried: a capacity rejection would only repeat. `closed` is the provider that closed; a close
+        from one that no longer serves the active language needs no recovery.
         """
         label = self.active_label
+        if closed is not None and closed is not self.transcribers[label]:
+            return True
         if not self.fallbacks.get(label):
             return await self.reconnect_active()
         active = self.transcribers[label]
@@ -657,7 +663,12 @@ class TranscriberPool:
                     replacement.turn_counter = getattr(failed, "turn_counter", 0)
                 if self.agent_context_source is not None:
                     replacement.set_agent_context_source(self.agent_context_source)
+                # What the caller said while the failed provider was down is heard by the one taking over.
+                while not failed.input_queue.empty():
+                    replacement.input_queue.put_nowait(failed.input_queue.get_nowait())
                 self.transcribers[label] = replacement
+                if entry.config is not None:
+                    self._multilingual_config = {**self._multilingual_config, label: entry.config}
                 self.reconnected_labels.discard(label)
                 self.retire(failed)
                 self.start_forwarder(label, replacement)
@@ -918,8 +929,10 @@ class TranscriberPool:
         # The listener has exited by now, so nothing reads what a forwarder would still pass on.
         for task in self.output_forwarder_tasks:
             await process_task_cancellation(task, "transcriber output forwarder")
-        for task in [*self.leg_start_tasks.values(), *self.leg_close_tasks.values(), *self.retire_tasks]:
+        for task in [*self.leg_start_tasks.values(), *self.leg_close_tasks.values()]:
             await process_task_cancellation(task, "transcriber leg start/close")
+        # A provider the call moved off still has its connection to close.
+        await asyncio.gather(*self.retire_tasks, return_exceptions=True)
 
         # Stop LID tap
         if self._lid is not None:
