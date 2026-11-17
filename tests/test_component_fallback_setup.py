@@ -196,7 +196,13 @@ async def test_an_llm_switch_is_recorded_and_the_call_follows_the_model_now_serv
     tm.on_turn_usage = tm.on_overflow = AsyncMock()
     tm._report_provider_health = AsyncMock()
     tm._cb_tasks = set()
-    bind(tm, "_TaskManager__on_llm_fallback", "_TaskManager__spawn_health_report")
+    bind(
+        tm,
+        "_TaskManager__on_llm_fallback",
+        "_TaskManager__on_llm_retry",
+        "_TaskManager__start_llm_on_healthy",
+        "_TaskManager__spawn_health_report",
+    )
     built = []
     monkeypatch.setitem(tmmod.SUPPORTED_LLM_PROVIDERS, "openai", lambda **kwargs: built.append(kwargs) or MagicMock())
 
@@ -433,7 +439,14 @@ async def test_an_llm_marked_unhealthy_is_passed_over_without_counting_against_i
     tm.unhealthy_providers = {"llm": {("azure", "azure/gpt-4.1-mini")}}
     tm._report_provider_health = AsyncMock()
     tm._cb_tasks = set()
-    bind(tm, "_TaskManager__on_llm_fallback", "_TaskManager__spawn_health_report")
+    meter = tm.on_turn_usage = tm.on_overflow = AsyncMock()
+    bind(
+        tm,
+        "_TaskManager__on_llm_fallback",
+        "_TaskManager__on_llm_retry",
+        "_TaskManager__start_llm_on_healthy",
+        "_TaskManager__spawn_health_report",
+    )
     backup = MagicMock()
     monkeypatch.setitem(tmmod.SUPPORTED_LLM_PROVIDERS, "openai", lambda **kwargs: backup)
     own = MagicMock()
@@ -442,7 +455,31 @@ async def test_an_llm_marked_unhealthy_is_passed_over_without_counting_against_i
     await asyncio.sleep(0)
 
     assert chain.active is backup
+    own.fail_fast.assert_not_called()
     (event,) = tm.fallback_events
     assert (event["to"]["model"], event["reason"], event["error"]) == ("gpt-4.1-mini", "provider_unhealthy", None)
     tm._report_provider_health.assert_not_awaited()
     assert (tm.llm_config["provider"], tm.llm_config["model"]) == ("openai", "gpt-4.1-mini")
+    assert tm.on_turn_usage is None
+
+    # The fallback fails too, so the call lands on the agent's own model with its settings back in force.
+    (last_resort,) = chain._pending
+    assert last_resort.build() is own
+    tm._TaskManager__on_llm_fallback(RuntimeError("down"), last_resort, {"sequence_id": 2})
+    assert (tm.llm_config["provider"], tm.llm_config["model"]) == ("azure", "azure/gpt-4.1-mini")
+    assert (tm.on_turn_usage, tm.kwargs["llm_key"]) == (meter, "azure-key")
+
+
+def test_a_language_that_began_on_a_fallback_but_never_carried_the_call_is_not_reported():
+    tm = setup_tm({})
+    bind(tm, "fallback_events_with_usage")
+    spoken, silent = MagicMock(), MagicMock()
+    spoken.get_synthesized_characters.return_value = 120
+    silent.get_synthesized_characters.return_value = 0
+    for replacement in (spoken, silent):
+        tm.record_fallback(
+            "synthesizer", {}, {"provider": "sarvam"}, "provider_unhealthy", None, replacement=replacement
+        )
+
+    (event,) = tm.fallback_events_with_usage()
+    assert event["served_usage"] == {"characters": 120}
