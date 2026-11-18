@@ -49,6 +49,7 @@ def _telephony_task_manager(last_transmitted_timestamp, *, hang_conversation_aft
     tm.repeat_after_silence_seconds = 0
     tm.trigger_user_online_message_after = 6
     tm.asked_if_user_is_still_there = False
+    tm.fixed_line_categories = set()
     tm.tools = {"input": SimpleNamespace(is_audio_being_played_to_user=lambda: False)}
     tm.opening_node = None
     tm.hangup_detail = None
