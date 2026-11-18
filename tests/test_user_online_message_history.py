@@ -67,6 +67,17 @@ async def test_the_llm_is_told_why_it_asked(monkeypatch):
     ]
 
 
+async def test_the_clear_goes_out_before_the_nudge(monkeypatch):
+    """A clear sent after the nudge would cut a nudge whose audio is already queued."""
+    tm = silent_caller(in_llm_history=False)
+    order = []
+    tm.tools["output"].handle_interruption = AsyncMock(side_effect=lambda: order.append("clear"))
+    tm._synthesize = AsyncMock(side_effect=lambda packet: order.append("nudge"))
+    await _drive(tm, monkeypatch)
+
+    assert order[:2] == ["clear", "nudge"]
+
+
 async def test_the_silence_note_stays_out_of_the_transcript(monkeypatch):
     tm = silent_caller(in_llm_history=True)
     await _drive(tm, monkeypatch)
