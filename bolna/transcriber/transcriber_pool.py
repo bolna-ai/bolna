@@ -3,7 +3,7 @@ import os
 import time
 from typing import Awaitable, Callable, Optional
 
-from bolna.helpers.fallbacks import FallbackEntry
+from bolna.helpers.fallbacks import FallbackEntry, next_built
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet, process_task_cancellation
 from bolna.lid import LIDProvider
@@ -647,40 +647,35 @@ class TranscriberPool:
             if self.call_ended:
                 return False
             label = self.active_label
-            pending = self.fallbacks.get(label) or []
-            while pending:
-                entry = pending.pop(0)
+            built = next_built(self.fallbacks.get(label) or [])
+            if built is None:
+                return False
+            entry, replacement = built
+            failed = self.transcribers[label]
+            starting = self.leg_start_tasks.pop(label, None)
+            if starting is not None and not starting.done():
+                starting.cancel()
+            if hasattr(replacement, "turn_counter"):
+                replacement.turn_counter = getattr(failed, "turn_counter", 0)
+            if self.agent_context_source is not None:
+                replacement.set_agent_context_source(self.agent_context_source)
+            # What the caller said while the failed provider was down is heard by the one taking over.
+            while not failed.input_queue.empty():
+                replacement.input_queue.put_nowait(failed.input_queue.get_nowait())
+            self.transcribers[label] = replacement
+            if entry.config is not None:
+                self._multilingual_config = {**self._multilingual_config, label: entry.config}
+            self.reconnected_labels.discard(label)
+            self.retire(failed)
+            self.start_forwarder(label, replacement)
+            await self.open_leg(label, reason="fallback")
+            logger.warning(f"TranscriberPool: '{label}' moved to its next provider after: {error}")
+            if self.on_fallback is not None:
                 try:
-                    replacement = entry.build()
+                    self.on_fallback(label, failed, replacement, entry, error)
                 except Exception as e:
-                    logger.error(f"TranscriberPool: fallback for '{label}' could not be built: {e}")
-                    continue
-                failed = self.transcribers[label]
-                starting = self.leg_start_tasks.pop(label, None)
-                if starting is not None and not starting.done():
-                    starting.cancel()
-                if hasattr(replacement, "turn_counter"):
-                    replacement.turn_counter = getattr(failed, "turn_counter", 0)
-                if self.agent_context_source is not None:
-                    replacement.set_agent_context_source(self.agent_context_source)
-                # What the caller said while the failed provider was down is heard by the one taking over.
-                while not failed.input_queue.empty():
-                    replacement.input_queue.put_nowait(failed.input_queue.get_nowait())
-                self.transcribers[label] = replacement
-                if entry.config is not None:
-                    self._multilingual_config = {**self._multilingual_config, label: entry.config}
-                self.reconnected_labels.discard(label)
-                self.retire(failed)
-                self.start_forwarder(label, replacement)
-                await self.open_leg(label, reason="fallback")
-                logger.warning(f"TranscriberPool: '{label}' moved to its next provider after: {error}")
-                if self.on_fallback is not None:
-                    try:
-                        self.on_fallback(label, failed, replacement, entry, error)
-                    except Exception as e:
-                        logger.error(f"TranscriberPool: fallback callback failed: {e}")
-                return True
-            return False
+                    logger.error(f"TranscriberPool: fallback callback failed: {e}")
+            return True
 
     def retire(self, transcriber):
         self.retired.append(transcriber)

@@ -77,11 +77,19 @@ from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
 from bolna.providers import *
 from bolna.s2s import events as s2s_events
-from bolna.helpers.fallbacks import PROVIDER_UNHEALTHY, FallbackEntry, ProviderUnhealthy
-from bolna.llms.fallback_llm import FallbackLLM, fallback_llm_arguments
+from bolna.helpers.fallbacks import FallbackEntry, FallbackRecorder, ProviderUnhealthy, start_on_healthy
+from bolna.llms.fallback_llm import (
+    REASONING_SETTINGS,
+    FallbackLLM,
+    fallback_llm_arguments,
+    is_provider_fault,
+    status_of,
+)
 from bolna.llms.routing_stream import CONFIDENCE_KEY, REASONING_KEY
 from bolna.enums import (
     AudioPlaybackReason,
+    FallbackComponent,
+    FallbackReason,
     TelephonyProvider,
     LogComponent,
     LogDirection,
@@ -415,11 +423,9 @@ class TaskManager(BaseManager):
         self.welcome_message_duration_ms = None
         self.transcriber_error_events: list[dict] = []
         # Each time a component moved to its next configured fallback.
-        self.fallback_events: list[dict] = []
-        # The transcriber or synthesizer each event moved to, read for what it served at the end of the call.
-        self._fallback_replacements: list[tuple[dict, object]] = []
-        # How many LLM turns the call had logged when each LLM event moved on.
-        self._llm_fallback_turns: list[tuple[dict, int]] = []
+        self.fallback_recorder = FallbackRecorder(
+            self.conversation_start_init_ts, lambda: self.llm_latencies.turn_latencies
+        )
         self.blocked_audio_events: list[dict] = []
         self._blocked_sequences: set = set()  # dedup: only record first block per sequence
         self._sent_audio_sequences: set = set()
@@ -728,7 +734,7 @@ class TaskManager(BaseManager):
                         "temperature": self.llm_agent_config["temperature"],
                     }
 
-                for key in ("reasoning_effort", "verbosity", "reasoning_summary", "thinking_budget", "extra_body"):
+                for key in REASONING_SETTINGS:
                     if key in self.llm_agent_config:
                         self.llm_config[key] = self.llm_agent_config[key]
 
@@ -1928,19 +1934,21 @@ class TaskManager(BaseManager):
                     else:
                         provider = self.task_config["tools_config"]["input"]["provider"]
 
-                    transcribers = {}
-                    fallbacks = {}
-                    serving = {}
-                    for label, cfg in multilingual.items():
-                        transcribers[label], fallbacks[label], serving[label] = self.__start_on_healthy(
-                            "transcriber",
+                    starts = {
+                        label: self.__start_on_healthy(
+                            FallbackComponent.TRANSCRIBER,
                             cfg,
                             self.__build_transcriber_leg(cfg, provider, transcriber_config),
                             self.__transcriber_fallback_entries(cfg, provider, transcriber_config),
                         )
-                        if label == active_label:
-                            self.transcriber_provider = serving[label].get("provider", serving[label].get("model"))
-                    multilingual = serving
+                        for label, cfg in multilingual.items()
+                    }
+                    transcribers = {label: start.instance for label, start in starts.items()}
+                    fallbacks = {label: start.fallbacks for label, start in starts.items()}
+                    multilingual = {label: start.entry.config for label, start in starts.items()}
+                    if active_label in multilingual:
+                        serving = multilingual[active_label]
+                        self.transcriber_provider = serving.get("provider", serving.get("model"))
 
                     # Detector tap: enabled → per-turn buffer feeds the Switch LLM; disabled → legacy heuristic.
                     LID_PROVIDER = self.task_config.get("tools_config", {}).get(
@@ -2034,21 +2042,22 @@ class TaskManager(BaseManager):
     def __setup_transcriber_with_fallbacks(self, transcriber_config, telephony_provider):
         """A single-language transcriber with fallbacks runs as a one-language pool, which moves it between providers."""
         label = self.language or DEFAULT_LANGUAGE_CODE
-        transcriber, fallbacks, serving = self.__start_on_healthy(
-            "transcriber",
+        start = self.__start_on_healthy(
+            FallbackComponent.TRANSCRIBER,
             transcriber_config,
             self.__build_transcriber_leg(transcriber_config, telephony_provider, transcriber_config),
             self.__transcriber_fallback_entries(transcriber_config, telephony_provider, transcriber_config),
         )
+        serving = start.entry.config
         self.transcriber_provider = serving.get("provider", serving.get("model"))
         self.tools["transcriber"] = TranscriberPool(
-            transcribers={label: transcriber},
+            transcribers={label: start.instance},
             shared_input_queue=self.audio_queue,
             output_queue=self.transcriber_output_queue,
             active_label=label,
             multilingual_config={label: serving},
             lazy_legs=True,
-            fallbacks={label: fallbacks},
+            fallbacks={label: start.fallbacks},
             on_fallback=self.__on_transcriber_fallback,
         )
         logger.info(f"Transcriber {self.transcriber_provider} with fallbacks for '{label}'")
@@ -2082,40 +2091,26 @@ class TaskManager(BaseManager):
         return cls(telephony_provider, **{**cfg, **leg_kwargs})
 
     def __start_on_healthy(self, component, config, primary, entries):
-        """(provider instance, fallbacks behind it, config now serving) for one language of a transcriber or voice.
-
-        The agent's own provider serves unless the caller marked it unhealthy; then the first fallback not marked
-        so does, and the agent's own becomes the last to try.
-        """
-        unhealthy = self.unhealthy_providers.get(component) or ()
+        """Where one language of a transcriber or voice starts; a provider passed over is recorded as a fallback."""
         provider = config.get("provider") or config.get("model")
         model = (config.get("provider_config") or config).get("model")
-        if (provider, model) not in unhealthy:
-            return primary, entries, config
-        for entry in entries:
-            if (entry.provider, entry.model) in unhealthy:
-                continue
-            try:
-                replacement = entry.build()
-            except Exception as e:
-                logger.error(f"{component} fallback {entry.provider} could not be built: {e}")
-                continue
-            if component == "synthesizer":
+        own = FallbackEntry(provider, model, lambda: primary, config=config)
+        start = start_on_healthy(own, entries, self.unhealthy_providers.get(component) or ())
+        if start.entry is not own:
+            if component == FallbackComponent.SYNTHESIZER:
                 # Engines, as request logs name each voice.
-                failed_model, served_model = primary.get_engine(), replacement.get_engine()
+                failed_model, served_model = primary.get_engine(), start.instance.get_engine()
             else:
-                failed_model, served_model = getattr(primary, "model", None), entry.model
-            self.record_fallback(
+                failed_model, served_model = getattr(primary, "model", None), start.entry.model
+            self.fallback_recorder.record(
                 component,
                 {"provider": provider, "model": failed_model},
-                {"provider": entry.provider, "model": served_model},
-                reason=PROVIDER_UNHEALTHY,
+                {"provider": start.entry.provider, "model": served_model},
+                reason=FallbackReason.PROVIDER_UNHEALTHY,
                 error=None,
-                replacement=replacement,
+                replacement=start.instance,
             )
-            last_resort = FallbackEntry(provider, model, lambda: primary, config=config)
-            return replacement, [*(other for other in entries if other is not entry), last_resort], entry.config
-        return primary, entries, config
+        return start
 
     def __transcriber_fallback_entries(self, leg_config, telephony_provider, agent_config):
         """The leg's fallback providers, each serving the leg's own language."""
@@ -2131,15 +2126,15 @@ class TaskManager(BaseManager):
 
     def __on_transcriber_fallback(self, label, failed, replacement, entry, error):
         failed_info = {"provider": self.transcriber_provider, "model": getattr(failed, "model", None)}
-        self.record_fallback(
-            "transcriber",
+        self.fallback_recorder.record(
+            FallbackComponent.TRANSCRIBER,
             failed_info,
             {"provider": entry.provider, "model": entry.model},
-            reason="connection_error",
+            reason=FallbackReason.CONNECTION_ERROR,
             error=str(error) if error else None,
             replacement=replacement,
         )
-        self.__spawn_health_report("transcriber", failed_info["provider"], failed_info["model"])
+        self.__spawn_health_report(FallbackComponent.TRANSCRIBER, failed_info["provider"], failed_info["model"])
         self.transcriber_provider = entry.provider
         self._cb_transcriber_connect_reported = False
 
@@ -2171,17 +2166,18 @@ class TaskManager(BaseManager):
                     # mulaw@8k (telephony) which garbles when labeled 24k — force it off.
                     synthesizer_kwargs["use_mulaw"] = False
 
-                synthesizers = {}
-                fallbacks = {}
-                serving = {}
-                for label, cfg in multilingual.items():
-                    synthesizers[label], fallbacks[label], serving[label] = self.__start_on_healthy(
-                        "synthesizer",
+                starts = {
+                    label: self.__start_on_healthy(
+                        FallbackComponent.SYNTHESIZER,
                         cfg,
                         self.__build_synthesizer_leg(cfg, synthesizer_kwargs),
                         self.__synthesizer_fallback_entries(cfg.get("fallbacks"), synthesizer_kwargs),
                     )
-                multilingual = serving
+                    for label, cfg in multilingual.items()
+                }
+                synthesizers = {label: start.instance for label, start in starts.items()}
+                fallbacks = {label: start.fallbacks for label, start in starts.items()}
+                multilingual = {label: start.entry.config for label, start in starts.items()}
 
                 # Use active synth's provider/voice for logging metadata, and buffer_size
                 # Note that in the current state, buffer_size of other synth configs is ignored
@@ -2276,12 +2272,13 @@ class TaskManager(BaseManager):
     def __add_synthesizer_fallbacks(self, primary_config, fallbacks, synthesizer_kwargs):
         """A single voice with fallbacks runs as a one-voice pool, which moves it between providers."""
         label = self.language or DEFAULT_LANGUAGE_CODE
-        synthesizer, entries, serving = self.__start_on_healthy(
-            "synthesizer",
+        start = self.__start_on_healthy(
+            FallbackComponent.SYNTHESIZER,
             primary_config,
             self.tools["synthesizer"],
             self.__synthesizer_fallback_entries(fallbacks, synthesizer_kwargs),
         )
+        serving = start.entry.config
         if serving is not primary_config:
             self.__set_synthesizer_identity(
                 serving["provider"],
@@ -2290,11 +2287,11 @@ class TaskManager(BaseManager):
                 on_platform_key=not self.provider_api_keys.get(serving["provider"]),
             )
         self.tools["synthesizer"] = SynthesizerPool(
-            synthesizers={label: synthesizer},
+            synthesizers={label: start.instance},
             active_label=label,
             multilingual_config={label: serving},
             lazy_legs=True,
-            fallbacks={label: entries},
+            fallbacks={label: start.fallbacks},
             on_fallback=self.__on_synthesizer_fallback,
         )
         logger.info(f"Synthesizer {self.synthesizer_provider} with fallbacks for '{label}'")
@@ -2334,16 +2331,18 @@ class TaskManager(BaseManager):
     def __on_synthesizer_fallback(self, label, failed, replacement, entry, error):
         # The engine is what request logs name each voice by, so usage on either side of the switch matches them.
         failed_info = {"provider": self.synthesizer_provider, "model": failed.get_engine()}
-        self.record_fallback(
-            "synthesizer",
+        self.fallback_recorder.record(
+            FallbackComponent.SYNTHESIZER,
             failed_info,
             {"provider": entry.provider, "model": replacement.get_engine()},
-            reason="connection_error",
+            reason=FallbackReason.CONNECTION_ERROR,
             error=str(error) if error else None,
             replacement=replacement,
         )
         # Health is kept under the model the voice's own turns report, which is not always its engine.
-        self.__spawn_health_report("synthesizer", failed_info["provider"], getattr(failed, "model", None))
+        self.__spawn_health_report(
+            FallbackComponent.SYNTHESIZER, failed_info["provider"], getattr(failed, "model", None)
+        )
         self.__set_synthesizer_identity(
             entry.provider,
             entry.config["provider_config"],
@@ -2390,58 +2389,50 @@ class TaskManager(BaseManager):
             build = partial(llm_class, language=self.language, **config, **kwargs)
             entries.append(FallbackEntry(entry["provider"], entry["model"], build))
         logger.info(f"LLM fallbacks: {[f'{e.provider}/{e.model}' for e in entries]}")
-        llm, entries, passed_over = self.__start_llm_on_healthy(llm, entries)
+        # What comes back into force if the call starts past the agent's own model and ends up on it after all.
+        own_settings = {
+            "llm_config": dict(self.llm_config),
+            "meters": (self.on_turn_usage, self.on_overflow),
+            "llm_key": self.kwargs.get("llm_key"),
+        }
+        own = FallbackEntry(self.llm_config.get("provider"), self.llm_config.get("model"), lambda: llm, own_settings)
+        start = start_on_healthy(own, entries, self.unhealthy_providers.get(FallbackComponent.LLM) or ())
+        passed_over = None
+        if start.entry is not own:
+            self.__on_llm_fallback(ProviderUnhealthy(), start.entry, None)
+            passed_over = llm
         return FallbackLLM(
-            llm, entries, on_switch=self.__on_llm_fallback, on_retry=self.__on_llm_retry, passed_over=passed_over
+            start.instance,
+            start.fallbacks,
+            on_switch=self.__on_llm_fallback,
+            on_retry=self.__on_llm_retry,
+            passed_over=passed_over,
         )
-
-    def __start_llm_on_healthy(self, llm, entries):
-        """(LLM to start on, fallbacks behind it, the agent's own LLM if it was passed over).
-
-        The agent's own model serves unless the caller marked it unhealthy; then the first fallback not marked so
-        does, and the agent's own becomes the last to try.
-        """
-        unhealthy = self.unhealthy_providers.get("llm") or ()
-        own = (self.llm_config.get("provider"), self.llm_config.get("model"))
-        if own not in unhealthy:
-            return llm, entries, None
-        for entry in entries:
-            if (entry.provider, entry.model) in unhealthy:
-                continue
-            try:
-                serving = entry.build()
-            except Exception as e:
-                logger.error(f"LLM fallback {entry.provider}/{entry.model} could not be built: {e}")
-                continue
-            # What comes back into force if the call ends up on the agent's own model after all.
-            own_settings = {
-                "llm_config": dict(self.llm_config),
-                "meters": (self.on_turn_usage, self.on_overflow),
-                "llm_key": self.kwargs.get("llm_key"),
-            }
-            last_resort = FallbackEntry(*own, lambda: llm, config=own_settings)
-            self.__on_llm_fallback(ProviderUnhealthy(), entry, None)
-            return serving, [*(other for other in entries if other is not entry), last_resort], llm
-        return llm, entries, None
 
     def __on_llm_retry(self, error):
         """A failed attempt counts against the model even when its second try answers the turn."""
-        self.__spawn_health_report("llm", self.llm_config.get("provider"), self.llm_config.get("model"))
+        self.__spawn_health_report(FallbackComponent.LLM, self.llm_config.get("provider"), self.llm_config.get("model"))
 
     def __on_llm_fallback(self, error, entry, meta_info):
         failed = {"provider": self.llm_config.get("provider"), "model": self.llm_config.get("model")}
-        status = getattr(error, "status_code", None)
         skipped = isinstance(error, ProviderUnhealthy)
-        self.record_fallback(
-            "llm",
+        if skipped:
+            reason = FallbackReason.PROVIDER_UNHEALTHY
+        else:
+            status = status_of(error)
+            reason = f"http_{status}" if status else type(error).__name__
+        self.fallback_recorder.record(
+            FallbackComponent.LLM,
             failed,
             {"provider": entry.provider, "model": entry.model},
-            reason=PROVIDER_UNHEALTHY if skipped else f"http_{status}" if status else type(error).__name__,
+            reason=reason,
             error=None if skipped else str(error),
             meta_info=meta_info,
         )
-        if not skipped:
-            self.__spawn_health_report("llm", failed["provider"], failed["model"])
+        # A request the model refused (too long, filtered, malformed) still moves the call, but says nothing about
+        # the provider's health.
+        if is_provider_fault(error):
+            self.__spawn_health_report(FallbackComponent.LLM, failed["provider"], failed["model"])
         if entry.config:
             # Back on the agent's own model: its settings, key and load meters apply again.
             self.llm_config.update(entry.config["llm_config"])
@@ -2450,7 +2441,7 @@ class TaskManager(BaseManager):
                 self.kwargs["llm_key"] = entry.config["llm_key"]
             return
         # Logs, latency rows and error attribution follow the model now serving.
-        for key in ("reasoning_effort", "verbosity", "reasoning_summary", "thinking_budget", "extra_body"):
+        for key in REASONING_SETTINGS:
             self.llm_config.pop(key, None)
         self.llm_config["provider"], self.llm_config["model"] = entry.provider, entry.model
         # The agent's own backend no longer serves this call, so its load meters stop and its key is not the
@@ -2458,52 +2449,9 @@ class TaskManager(BaseManager):
         self.on_turn_usage = self.on_overflow = None
         self.kwargs.pop("llm_key", None)
 
-    def record_fallback(self, component, failed, served, reason, error, meta_info=None, replacement=None):
-        event = {
-            "component": component,
-            "from": failed,
-            "to": served,
-            "reason": reason,
-            "error": error,
-            "sequence_id": (meta_info or {}).get("sequence_id"),
-            "turn_id": (meta_info or {}).get("turn_id"),
-            "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
-        }
-        self.fallback_events.append(event)
-        if replacement is not None:
-            self._fallback_replacements.append((event, replacement))
-        elif component == "llm":
-            turns = self.llm_latencies.turn_latencies
-            # A row opened for the turn that failed is finished by the model taking over, so it counts as its own.
-            reruns_open_row = bool(turns) and turns[-1].get("sequence_id") == event["sequence_id"]
-            self._llm_fallback_turns.append((event, len(turns) - reruns_open_row))
-
-    def fallback_events_with_usage(self):
-        """Each fallback event with what the provider it moved to served for the rest of the call."""
-        for event, replacement in self._fallback_replacements:
-            if event["component"] == "transcriber":
-                event["served_usage"] = {"audio_s": round(replacement.billed_audio_s(), 4)}
-            else:
-                event["served_usage"] = {"characters": replacement.get_synthesized_characters()}
-        for index, (event, start) in enumerate(self._llm_fallback_turns):
-            # A switch re-runs the failed turn, so the entry serves every turn logged from then to the next switch.
-            later = self._llm_fallback_turns[index + 1 :]
-            usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "turns": 0}
-            for turn in self.llm_latencies.turn_latencies[start : later[0][1] if later else None]:
-                for key in ("input_tokens", "output_tokens", "cached_tokens"):
-                    usage[key] += turn.get(key) or 0
-                usage["turns"] += 1
-            event["served_usage"] = usage
-        # A language that began on a fallback but never carried the call did not fall back.
-        return [
-            event
-            for event in self.fallback_events
-            if event["reason"] != PROVIDER_UNHEALTHY or any((event.get("served_usage") or {}).values())
-        ]
-
-    def __spawn_health_report(self, service, provider, model):
+    def __spawn_health_report(self, component, provider, model):
         """A failure the call survived still counts against the provider that failed."""
-        task = asyncio.create_task(self._report_provider_health(service, provider, model, False))
+        task = asyncio.create_task(self._report_provider_health(component.value, provider, model, False))
         self._cb_tasks.add(task)
         task.add_done_callback(self._cb_tasks.discard)
 
@@ -10273,7 +10221,7 @@ class TaskManager(BaseManager):
                     "lid_detection_events": list(self.__snapshot_lid_events()),
                     "asr_lid_events": self._collect_flux_lid_events(),
                     "transcriber_error_events": list(self.transcriber_error_events),
-                    "fallback_events": self.fallback_events_with_usage(),
+                    "fallback_events": self.fallback_recorder.with_usage(),
                     "transcriber_reconnect_count": getattr(self.tools.get("transcriber"), "reconnect_count", 0),
                     "blocked_audio_events": list(self.blocked_audio_events),
                     "tts_audio_quality": self.__tts_audio_quality(output["latency_dict"]["synthesizer_chunk_marks"]),
