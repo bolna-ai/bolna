@@ -64,6 +64,9 @@ class LiteLLM(BaseLLM):
             self.trigger_function_call = False
         self.run_id = kwargs.get("run_id", None)
 
+    def fail_fast(self):
+        self.model_args["max_retries"] = 0
+
     async def generate_stream(self, messages, synthesize=True, meta_info=None, tool_choice=None, tools=None):
         if not messages or len(messages) == 0:
             raise Exception("No messages provided")

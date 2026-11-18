@@ -1,10 +1,13 @@
 """A conversation turn that fails before any output moves to the next fallback model, which serves the rest of the
 call; a turn that already produced output is never re-run."""
 
+import httpx
 import pytest
+from google.genai import errors as genai_errors
 
 from bolna.helpers.fallbacks import FallbackEntry
-from bolna.llms.fallback_llm import FallbackLLM, fallback_llm_arguments
+from bolna.llms.fallback_llm import FallbackLLM, fallback_llm_arguments, is_provider_fault
+from bolna.llms.litellm import LiteLLM
 
 
 class Refused(Exception):
@@ -208,3 +211,30 @@ async def test_the_agents_own_model_passed_over_at_the_start_is_closed_with_the_
 
     assert own.closed and serving.closed
     assert not own.fails_fast
+
+
+def status(code):
+    return type("APIStatusError", (Exception,), {"status_code": code})(f"HTTP {code}")
+
+
+@pytest.mark.parametrize(
+    "error, counts",
+    [
+        (status(503), True),
+        (status(429), True),
+        (status(401), True),
+        (genai_errors.ServerError(503, {"error": {"message": "overloaded"}}), True),
+        (httpx.ConnectError("refused"), True),
+        (status(400), False),
+        (genai_errors.ClientError(400, {"error": {"message": "context too long"}}), False),
+        (RuntimeError("a bug in the stream code"), False),
+    ],
+)
+def test_only_a_failure_of_the_provider_counts_against_it(error, counts):
+    assert is_provider_fault(error) is counts
+
+
+def test_a_litellm_model_with_a_fallback_behind_it_does_not_retry_in_place():
+    llm = LiteLLM("groq/llama-3.3-70b-versatile", llm_key="key")
+    llm.fail_fast()
+    assert llm.model_args["max_retries"] == 0

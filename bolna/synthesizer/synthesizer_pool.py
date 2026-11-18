@@ -1,5 +1,6 @@
 import asyncio
 import time
+from bolna.helpers.fallbacks import next_built
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import process_task_cancellation
 
@@ -89,7 +90,9 @@ class SynthesizerPool:
         self.retire_tasks = set()
         # What the current turn has pushed, resent to a fallback that takes over mid-turn.
         self.open_turn = []
-        # Text sent a second time, to a fallback; the call's usage counts it once.
+        # The serving synth's character count when the open turn began.
+        self.open_turn_counted_from = 0
+        # Characters a failed synth counted for a turn its fallback then spoke whole; the call's usage leaves them out.
         self.resent_characters = 0
 
     # ------------------------------------------------------------------
@@ -121,8 +124,11 @@ class SynthesizerPool:
         meta_info = message.get("meta_info") or {}
         if self.open_turn and self.open_turn[0]["meta_info"].get("sequence_id") != meta_info.get("sequence_id"):
             self.open_turn.clear()
+        synth = self.synthesizers[self.active_label]
+        if not self.open_turn:
+            self.open_turn_counted_from = synth.get_synthesized_characters()
         self.open_turn.append({**message, "meta_info": dict(meta_info)})
-        await self.synthesizers[self.active_label].push(message)
+        await synth.push(message)
 
     async def handle_interruption(self):
         self.open_turn.clear()
@@ -211,32 +217,31 @@ class SynthesizerPool:
         async with self._switch_lock:
             if self.cleaning_up or label != self.active_label:
                 return False
-            pending = self.fallbacks.get(label) or []
-            while pending:
-                entry = pending.pop(0)
+            built = next_built(self.fallbacks.get(label) or [])
+            if built is None:
+                return False
+            entry, replacement = built
+            failed = self.synthesizers[label]
+            self.synthesizers[label] = replacement
+            if entry.config is not None:
+                self._multilingual_config = {**self._multilingual_config, label: entry.config}
+            self.retire(failed, self._monitor_tasks.pop(label, None))
+            self._monitor_tasks[label] = asyncio.create_task(replacement.monitor_connection())
+            self._gen_task = asyncio.create_task(self._run_generate(label))
+            logger.warning(f"SynthesizerPool: '{label}' moved to its next provider after: {error}")
+            if self.on_fallback is not None:
                 try:
-                    replacement = entry.build()
+                    self.on_fallback(label, failed, replacement, entry, error)
                 except Exception as e:
-                    logger.error(f"SynthesizerPool: fallback for '{label}' could not be built: {e}")
-                    continue
-                failed = self.synthesizers[label]
-                self.synthesizers[label] = replacement
-                if entry.config is not None:
-                    self._multilingual_config = {**self._multilingual_config, label: entry.config}
-                self.retire(failed, self._monitor_tasks.pop(label, None))
-                self._monitor_tasks[label] = asyncio.create_task(replacement.monitor_connection())
-                self._gen_task = asyncio.create_task(self._run_generate(label))
-                logger.warning(f"SynthesizerPool: '{label}' moved to its next provider after: {error}")
-                if self.on_fallback is not None:
-                    try:
-                        self.on_fallback(label, failed, replacement, entry, error)
-                    except Exception as e:
-                        logger.error(f"SynthesizerPool: fallback callback failed: {e}")
-                for message in self.open_turn:
-                    self.resent_characters += len(message.get("data") or "")
-                    await replacement.push({**message, "meta_info": dict(message["meta_info"])})
-                return True
-            return False
+                    logger.error(f"SynthesizerPool: fallback callback failed: {e}")
+            if self.open_turn:
+                # The fallback speaks the whole turn, so only it bills the turn. What the failed synth counted
+                # depends on the synth: a socket voice counts text as it is pushed, an HTTP voice as it renders.
+                self.resent_characters += failed.get_synthesized_characters() - self.open_turn_counted_from
+                self.open_turn_counted_from = replacement.get_synthesized_characters()
+            for message in self.open_turn:
+                await replacement.push({**message, "meta_info": dict(message["meta_info"])})
+            return True
 
     def retire(self, synth, monitor):
         self.retired.append(synth)

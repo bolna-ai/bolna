@@ -4,14 +4,19 @@ import time
 from typing import Callable, Optional
 
 import httpx
+from google.genai import errors as genai_errors
 from openai import APIConnectionError
 
+from bolna.helpers.fallbacks import next_built
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 
 # A failure slower than this has already cost the caller a pause, so the turn moves on instead of trying again.
 RETRY_WITHIN_S = 1.5
+
+# Settings one model family reads, carried from the agent's LLM config onto its own model only.
+REASONING_SETTINGS = ("reasoning_effort", "verbosity", "reasoning_summary", "thinking_budget", "extra_body")
 
 # Bound to one model or backend, so a fallback never inherits them from the agent's own LLM.
 MODEL_BOUND_LLM_SETTINGS = frozenset(
@@ -22,15 +27,14 @@ MODEL_BOUND_LLM_SETTINGS = frozenset(
         "overflow_llm",
         "service_tier",
         "aws_region_name",
-        "reasoning_effort",
-        "reasoning_summary",
-        "verbosity",
-        "thinking_budget",
-        "extra_body",
         "use_responses_api",
         "compact_threshold",
+        *REASONING_SETTINGS,
     }
 )
+
+# Statuses that say the provider cannot serve, whatever was asked: key, access, model, timeout or capacity.
+PROVIDER_FAULT_STATUSES = frozenset({401, 403, 404, 408, 429})
 
 
 def fallback_llm_arguments(llm_config, kwargs, entry, credentials):
@@ -42,12 +46,27 @@ def fallback_llm_arguments(llm_config, kwargs, entry, credentials):
     return config, entry_kwargs
 
 
+def status_of(error):
+    """The HTTP status an SDK error carries, if any."""
+    if isinstance(error, genai_errors.APIError):
+        return error.code
+    return getattr(error, "status_code", None)
+
+
 def is_transient(error):
     """A fault the same model may not repeat: no connection, or a server-side error."""
-    status = getattr(error, "status_code", None)
+    status = status_of(error)
     if status is not None:
         return status >= 500
     return isinstance(error, (APIConnectionError, httpx.TransportError, ConnectionError, asyncio.TimeoutError))
+
+
+def is_provider_fault(error):
+    """A failure of the provider rather than of the request, so it counts against the provider's health."""
+    status = status_of(error)
+    if status is not None:
+        return status >= 500 or status in PROVIDER_FAULT_STATUSES
+    return is_transient(error)
 
 
 class FallbackLLM:
@@ -120,17 +139,13 @@ class FallbackLLM:
 
     def _switch(self, error, meta_info):
         """Move to the next entry that builds; False when none is left."""
-        while self._pending:
-            entry = self._pending.pop(0)
-            try:
-                llm = entry.build()
-            except Exception as e:
-                logger.error(f"LLM fallback {entry.provider}/{entry.model} could not be built: {e}")
-                continue
-            logger.warning(f"LLM failed before any output, moving to {entry.provider}/{entry.model}: {error!r}")
-            self._move_to(entry, llm, error, meta_info)
-            return True
-        return False
+        built = next_built(self._pending)
+        if built is None:
+            return False
+        entry, llm = built
+        logger.warning(f"LLM failed before any output, moving to {entry.provider}/{entry.model}: {error!r}")
+        self._move_to(entry, llm, error, meta_info)
+        return True
 
     def _move_to(self, entry, llm, error, meta_info):
         if self._pending:

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import bolna.agent_manager.task_manager as tmmod
 from bolna.agent_manager.task_manager import TaskManager
+from bolna.helpers.fallbacks import FallbackRecorder
 from bolna.llms.fallback_llm import FallbackLLM
 
 
@@ -33,12 +34,9 @@ def setup_tm(task_config, kwargs=None, provider_api_keys=None):
     tm.language_switcher = None
     tm.kwargs = kwargs or {}
     tm.provider_api_keys = provider_api_keys or {}
-    tm.fallback_events = []
     tm.unhealthy_providers = {}
-    tm._fallback_replacements = []
-    tm._llm_fallback_turns = []
     tm.llm_latencies = MagicMock(turn_latencies=[])
-    tm.conversation_start_init_ts = 0
+    tm.fallback_recorder = FallbackRecorder(0, lambda: tm.llm_latencies.turn_latencies)
     bind(
         tm,
         "_TaskManager__pool_leg_kwargs",
@@ -50,7 +48,6 @@ def setup_tm(task_config, kwargs=None, provider_api_keys=None):
         "_TaskManager__build_synthesizer_leg",
         "_TaskManager__synthesizer_fallback_entries",
         "_TaskManager__set_synthesizer_identity",
-        "record_fallback",
     )
     return tm
 
@@ -200,7 +197,6 @@ async def test_an_llm_switch_is_recorded_and_the_call_follows_the_model_now_serv
         tm,
         "_TaskManager__on_llm_fallback",
         "_TaskManager__on_llm_retry",
-        "_TaskManager__start_llm_on_healthy",
         "_TaskManager__spawn_health_report",
     )
     built = []
@@ -217,7 +213,7 @@ async def test_an_llm_switch_is_recorded_and_the_call_follows_the_model_now_serv
     tm._TaskManager__on_llm_fallback(error, entry, {"sequence_id": 3, "turn_id": 2})
     await asyncio.sleep(0)
 
-    (event,) = tm.fallback_events
+    (event,) = tm.fallback_recorder.events
     assert event["component"] == "llm"
     assert event["from"] == {"provider": "azure", "model": "azure/gpt-4.1-mini"}
     assert event["to"] == {"provider": "openai", "model": "gpt-4.1-mini"}
@@ -236,9 +232,7 @@ async def test_an_asr_switch_is_recorded_with_what_the_new_provider_served_and_t
     tm._cb_transcriber_connect_reported = True
     tm._report_provider_health = AsyncMock()
     tm._cb_tasks = set()
-    tm._fallback_replacements = []
-    tm.llm_latencies = MagicMock(turn_latencies=[])
-    bind(tm, "_TaskManager__on_transcriber_fallback", "_TaskManager__spawn_health_report", "fallback_events_with_usage")
+    bind(tm, "_TaskManager__on_transcriber_fallback", "_TaskManager__spawn_health_report")
     replacement = MagicMock()
     entry = MagicMock(provider="sarvam", model="saaras:v3")
 
@@ -246,7 +240,7 @@ async def test_an_asr_switch_is_recorded_with_what_the_new_provider_served_and_t
     await asyncio.sleep(0)
     replacement.billed_audio_s.return_value = 41.25
 
-    (event,) = tm.fallback_events_with_usage()
+    (event,) = tm.fallback_recorder.with_usage()
     assert (event["from"], event["to"]) == (
         {"provider": "deepgram", "model": "nova-3"},
         {"provider": "sarvam", "model": "saaras:v3"},
@@ -258,28 +252,24 @@ async def test_an_asr_switch_is_recorded_with_what_the_new_provider_served_and_t
 
 
 def test_each_llm_fallback_is_credited_with_the_turns_logged_after_it_took_over():
-    tm = setup_tm({})
-    tm._fallback_replacements = []
-    tm._llm_fallback_turns = []
     turns = []
-    tm.llm_latencies = MagicMock(turn_latencies=turns)
-    bind(tm, "fallback_events_with_usage")
+    recorder = FallbackRecorder(0, lambda: turns)
 
     def answer(sequence_id):
         turns.append({"sequence_id": sequence_id, "input_tokens": 100, "output_tokens": 1, "cached_tokens": 0})
 
     answer(1)
     # A switch made outside a caller turn carries no turn of its own.
-    tm.record_fallback("llm", {}, {"model": "second"}, "http_429", "", meta_info={"sequence_id": -1})
+    recorder.record("llm", {}, {"model": "second"}, "http_429", "", meta_info={"sequence_id": -1})
     answer(2)
     answer(3)
     # This turn's row was opened before it failed; the model taking over finishes it.
     turns.append({"sequence_id": 4})
-    tm.record_fallback("llm", {}, {"model": "third"}, "http_503", "", meta_info={"sequence_id": 4})
+    recorder.record("llm", {}, {"model": "third"}, "http_503", "", meta_info={"sequence_id": 4})
     turns[-1] = {"sequence_id": 4, "input_tokens": 100, "output_tokens": 1, "cached_tokens": 0}
     answer(5)
 
-    second, third = tm.fallback_events_with_usage()
+    second, third = recorder.with_usage()
     assert second["served_usage"] == {"input_tokens": 200, "output_tokens": 2, "cached_tokens": 0, "turns": 2}
     assert third["served_usage"] == {"input_tokens": 200, "output_tokens": 2, "cached_tokens": 0, "turns": 2}
 
@@ -289,9 +279,7 @@ async def test_a_tts_switch_names_both_voices_as_request_logs_do_and_the_call_sp
     tm.synthesizer_provider = "cartesia"
     tm._report_provider_health = AsyncMock()
     tm._cb_tasks = set()
-    tm._fallback_replacements = []
-    tm.llm_latencies = MagicMock(turn_latencies=[])
-    bind(tm, "_TaskManager__on_synthesizer_fallback", "_TaskManager__spawn_health_report", "fallback_events_with_usage")
+    bind(tm, "_TaskManager__on_synthesizer_fallback", "_TaskManager__spawn_health_report")
     failed, replacement = MagicMock(), MagicMock()
     failed.get_engine.return_value = "sonic-3"
     replacement.get_engine.return_value = "bulbul:v3"
@@ -302,7 +290,7 @@ async def test_a_tts_switch_names_both_voices_as_request_logs_do_and_the_call_sp
     await asyncio.sleep(0)
     replacement.get_synthesized_characters.return_value = 310
 
-    (event,) = tm.fallback_events_with_usage()
+    (event,) = tm.fallback_recorder.with_usage()
     assert (event["from"], event["to"]) == (
         {"provider": "cartesia", "model": "sonic-3"},
         {"provider": "sarvam", "model": "bulbul:v3"},
@@ -381,7 +369,7 @@ def test_a_transcriber_marked_unhealthy_is_passed_over_and_kept_as_the_last_to_t
     assert tm.transcriber_provider == "sarvam"
     (last_resort,) = pool_kwargs["fallbacks"]["hi"]
     assert (last_resort.provider, last_resort.build().model) == ("deepgram", "nova-3")
-    (event,) = tm.fallback_events
+    (event,) = tm.fallback_recorder.events
     assert (event["from"]["provider"], event["to"]["provider"], event["reason"]) == (
         "deepgram",
         "sarvam",
@@ -428,7 +416,7 @@ def test_a_voice_marked_unhealthy_is_passed_over_and_the_call_speaks_as_its_fall
     assert (tm.synthesizer_provider, tm.synthesizer_voice_id) == ("sarvam", "anushka")
     (last_resort,) = pool_kwargs["fallbacks"]["hi"]
     assert last_resort.provider == "cartesia"
-    assert [event["reason"] for event in tm.fallback_events] == ["provider_unhealthy"]
+    assert [event["reason"] for event in tm.fallback_recorder.events] == ["provider_unhealthy"]
 
 
 async def test_an_llm_marked_unhealthy_is_passed_over_without_counting_against_it(monkeypatch):
@@ -444,7 +432,6 @@ async def test_an_llm_marked_unhealthy_is_passed_over_without_counting_against_i
         tm,
         "_TaskManager__on_llm_fallback",
         "_TaskManager__on_llm_retry",
-        "_TaskManager__start_llm_on_healthy",
         "_TaskManager__spawn_health_report",
     )
     backup = MagicMock()
@@ -456,7 +443,7 @@ async def test_an_llm_marked_unhealthy_is_passed_over_without_counting_against_i
 
     assert chain.active is backup
     own.fail_fast.assert_not_called()
-    (event,) = tm.fallback_events
+    (event,) = tm.fallback_recorder.events
     assert (event["to"]["model"], event["reason"], event["error"]) == ("gpt-4.1-mini", "provider_unhealthy", None)
     tm._report_provider_health.assert_not_awaited()
     assert (tm.llm_config["provider"], tm.llm_config["model"]) == ("openai", "gpt-4.1-mini")
@@ -471,15 +458,29 @@ async def test_an_llm_marked_unhealthy_is_passed_over_without_counting_against_i
 
 
 def test_a_language_that_began_on_a_fallback_but_never_carried_the_call_is_not_reported():
-    tm = setup_tm({})
-    bind(tm, "fallback_events_with_usage")
+    recorder = FallbackRecorder(0, lambda: [])
     spoken, silent = MagicMock(), MagicMock()
     spoken.get_synthesized_characters.return_value = 120
     silent.get_synthesized_characters.return_value = 0
     for replacement in (spoken, silent):
-        tm.record_fallback(
-            "synthesizer", {}, {"provider": "sarvam"}, "provider_unhealthy", None, replacement=replacement
-        )
+        recorder.record("synthesizer", {}, {"provider": "sarvam"}, "provider_unhealthy", None, replacement=replacement)
 
-    (event,) = tm.fallback_events_with_usage()
+    (event,) = recorder.with_usage()
     assert event["served_usage"] == {"characters": 120}
+
+
+async def test_a_request_the_model_refused_moves_the_call_without_counting_against_the_provider():
+    tm = setup_tm({})
+    tm.llm_config = {"provider": "azure", "model": "azure/gpt-4.1-mini"}
+    tm._report_provider_health = AsyncMock()
+    tm._cb_tasks = set()
+    bind(tm, "_TaskManager__on_llm_fallback", "_TaskManager__spawn_health_report")
+    entry = MagicMock(provider="openai", model="gpt-4.1-mini", config=None)
+    too_long = type("BadRequestError", (Exception,), {"status_code": 400})("context_length_exceeded")
+
+    tm._TaskManager__on_llm_fallback(too_long, entry, {"sequence_id": 3})
+    await asyncio.sleep(0)
+
+    (event,) = tm.fallback_recorder.events
+    assert (event["reason"], event["to"]["model"]) == ("http_400", "gpt-4.1-mini")
+    tm._report_provider_health.assert_not_awaited()

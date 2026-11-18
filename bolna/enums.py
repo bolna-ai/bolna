@@ -230,6 +230,21 @@ class HangupReason(str, Enum):
         return [r.value for r in cls]
 
 
+class FallbackComponent(str, Enum):
+    """The parts of a call that run on a provider and can move to a fallback."""
+
+    LLM = "llm"
+    TRANSCRIBER = "transcriber"
+    SYNTHESIZER = "synthesizer"
+
+
+class FallbackReason(str, Enum):
+    """Why a component moved off a provider; an LLM failure is named by its HTTP status or error type instead."""
+
+    PROVIDER_UNHEALTHY = "provider_unhealthy"
+    CONNECTION_ERROR = "connection_error"
+
+
 class LogComponent(str, Enum):
     """Enum for CSV trace log component types."""
 

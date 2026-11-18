@@ -184,6 +184,33 @@ async def test_a_turn_sent_again_to_the_fallback_counts_once_toward_usage():
     await pool.cleanup()
 
 
+class RenderingSynth(FakeSynth):
+    """Counts text as it renders it, as HTTP voices do, rather than as it is pushed."""
+
+    async def push(self, message):
+        self.pushed.append(message["data"])
+        await self.audio.put(message)
+
+    async def generate(self):
+        async for packet in super().generate():
+            self.characters += len(packet["meta_info"]["text"])
+            yield packet
+
+
+async def test_a_turn_an_http_voice_had_not_rendered_yet_is_billed_once_by_its_fallback():
+    primary, backup = RenderingSynth("polly"), FakeSynth("bulbul:v3")
+    pool, _ = await started_pool(primary, backup)
+    stream = pool.generate()
+    await pool.push({**text("Namaste,"), "meta_info": {"sequence_id": 1, "text": "Namaste,"}})
+    await next_audio(pool, stream)
+    primary.fail(RuntimeError("HTTP 503"))
+    await pool.push({**text(" kaise madad karun?"), "meta_info": {"sequence_id": 1, "text": " kaise madad karun?"}})
+    await next_audio(pool, stream)
+
+    assert pool.get_synthesized_characters() == len("Namaste, kaise madad karun?")
+    await pool.cleanup()
+
+
 class DroppingSynth(FakeSynth):
     """Its socket drops once: generate() returns, and what happens when it is entered again is up to `reconnects`."""
 
