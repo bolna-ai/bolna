@@ -22,7 +22,7 @@ class SmallestSynthesizer(StreamSynthesizer):
     def __init__(
         self,
         voice_id,
-        model="lightning_v3.1",
+        model="lightning_v3.1_pro",
         language="en",
         audio_format="mp3",
         sampling_rate="8000",
