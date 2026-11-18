@@ -59,6 +59,9 @@ class SmallestSynthesizer(StreamSynthesizer):
     def _get_audio_format(self):
         return "wav"
 
+    def get_sleep_time(self):
+        return 0.01 if self.stream else super().get_sleep_time()
+
     def form_payload(self, text):
         return {
             "voice_id": self.voice_id,

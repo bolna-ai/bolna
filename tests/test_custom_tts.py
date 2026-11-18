@@ -118,7 +118,7 @@ class TestExtraBody:
         monkeypatch.setattr("bolna.synthesizer.openai_synthesizer.validate_outbound_url", AsyncMock())
         monkeypatch.setattr(
             "bolna.synthesizer.openai_synthesizer.DefaultAsyncHttpxClient",
-            lambda **kwargs: DefaultAsyncHttpxClient(transport=httpx.MockTransport(server), **kwargs),
+            lambda **kwargs: DefaultAsyncHttpxClient(**{**kwargs, "transport": httpx.MockTransport(server)}),
         )
         synth = _custom_tts(speed=1.0, extra_body={"speed": 1.3, "instructions": "calm"})
         assert await synth.synthesize("hello") == b"mp3"
