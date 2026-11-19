@@ -11,6 +11,9 @@ logger = configure_logger(__name__)
 
 
 class BaseSynthesizer:
+    # Set where a one-shot render is verified to match the stream's voice and loudness, so a stored clip can replace it.
+    one_shot_matches_stream = False
+
     def __init__(self, task_manager_instance=None, stream=True, buffer_size=40, event_loop=None):
         self.stream = stream
         self.buffer_size = buffer_size
