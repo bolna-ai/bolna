@@ -56,6 +56,7 @@ from .constants import (
     TTS_CONTROL_MODEL_PREFIXES,
     TTS_CONTROL_MODELS,
     TTS_MODEL_CONTROL_LIMITS,
+    TTS_SOCKET_CLIP_MODEL_PREFIXES,
 )
 
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
@@ -137,7 +138,7 @@ def _render_value(value) -> str:
 
 
 def tts_render_settings(provider: str, provider_config: Optional[dict], exclude=()) -> str:
-    """The TTS_AUDIO_SETTINGS values in provider_config, as a stable string for audio cache keys.
+    """The TTS_AUDIO_SETTINGS values in provider_config and the clip path, as a stable string for audio cache keys.
     Values at bolna's default are left out, so keys built before a setting was set still match."""
     config_model = SYNTHESIZER_CONFIG_MODELS.get(provider)
     if config_model is None or not isinstance(provider_config, dict):
@@ -153,6 +154,8 @@ def tts_render_settings(provider: str, provider_config: Optional[dict], exclude=
         if default is not None and rendered == _render_value(default):
             continue
         settings.append(f"{key}={rendered}")
+    if (provider_config.get("model") or "").startswith(TTS_SOCKET_CLIP_MODEL_PREFIXES.get(provider, ())):
+        settings.append("clip=socket")
     return ",".join(settings)
 
 

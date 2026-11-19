@@ -135,17 +135,17 @@ async def test_prewarm_renders_all_labels_and_survives_failure():
 async def test_elevenlabs_clip_uses_wire_format_and_skips_non_mulaw():
     from bolna.synthesizer.elevenlabs_synthesizer import ElevenlabsSynthesizer
 
-    s = MagicMock(spec=["use_mulaw", "_generate_http"])
-    s._generate_http = AsyncMock(return_value=b"\x7f" * 100)
+    s = MagicMock(spec=["use_mulaw", "_render_clip"])
+    s._render_clip = AsyncMock(return_value=b"\x7f" * 100)
     clip_fn = ElevenlabsSynthesizer.synthesize_telephony_clip.__get__(s, ElevenlabsSynthesizer)
 
     s.use_mulaw = False  # web config → no native clip, caller falls back to synthesize()
     assert await clip_fn("hello") is None
-    s._generate_http.assert_not_awaited()
+    s._render_clip.assert_not_awaited()
 
     s.use_mulaw = True  # telephony → wire format (no explicit format arg = wire default)
     assert await clip_fn("hello") == b"\x7f" * 100
-    s._generate_http.assert_awaited_once_with("hello")
+    s._render_clip.assert_awaited_once_with("hello")
 
 
 async def test_prewarm_prefers_native_mulaw_one_shot():
@@ -275,12 +275,12 @@ async def test_clip_cache_keys_are_wire_specific():
 async def test_elevenlabs_pcm_clip_uses_native_pcm_format():
     from bolna.synthesizer.elevenlabs_synthesizer import ElevenlabsSynthesizer
 
-    s = MagicMock(spec=["_generate_http"])
-    s._generate_http = AsyncMock(return_value=b"\x00\x01" * 100)
+    s = MagicMock(spec=["_render_clip"])
+    s._render_clip = AsyncMock(return_value=b"\x00\x01" * 100)
     clip_fn = ElevenlabsSynthesizer.synthesize_pcm_clip.__get__(s, ElevenlabsSynthesizer)
 
     assert await clip_fn("hello", 24000) == b"\x00\x01" * 100
-    s._generate_http.assert_awaited_once_with("hello", format="pcm_24000")
+    s._render_clip.assert_awaited_once_with("hello", format="pcm_24000")
 
     assert await clip_fn("hello", 8000) is None  # unsupported rate → converter fallback
 
