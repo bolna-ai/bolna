@@ -5,7 +5,7 @@ from collections import OrderedDict
 
 from bolna.constants import WEBCALL_TTS_SAMPLE_RATE
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import audio_to_mulaw8k, audio_to_pcm, store_raw_audio_bytes
+from bolna.helpers.utils import audio_to_mulaw8k, audio_to_pcm, get_raw_audio_bytes, store_raw_audio_bytes
 
 logger = configure_logger(__name__)
 
@@ -20,7 +20,7 @@ RENDER_TIMEOUT_S = 30
 
 _clips: OrderedDict[str, bytes] = OrderedDict()
 _clip_bytes = 0
-_rendering: set[str] = set()
+_loading: set[str] = set()
 _background: set[asyncio.Task] = set()
 
 
@@ -106,29 +106,31 @@ async def render_clip(synth, text, mulaw_wire):
     return clip
 
 
-def store_fixed_line_clip(synth, text, key, mulaw_wire, storage):
-    """Render and store a fixed line in the background, once per process at a time, for later calls to replay."""
-    if key in _rendering:
+def load_fixed_line_clip(synth, text, key, mulaw_wire, storage):
+    """Bring a fixed line's clip into this process in the background: read it from the store, or render and store it."""
+    if key in _loading:
         return
-    _rendering.add(key)
-    task = asyncio.create_task(_render_and_store(synth, text, key, mulaw_wire, storage))
+    _loading.add(key)
+    task = asyncio.create_task(_load_or_render(synth, text, key, mulaw_wire, storage))
     _background.add(task)
     task.add_done_callback(_background.discard)
 
 
-async def _render_and_store(synth, text, key, mulaw_wire, storage):
+async def _load_or_render(synth, text, key, mulaw_wire, storage):
     try:
-        clip = await asyncio.wait_for(render_clip(synth, text, mulaw_wire), RENDER_TIMEOUT_S)
+        clip = await get_raw_audio_bytes(key, **storage)
         if not clip:
-            return
-        seconds = wire_seconds(clip, mulaw_wire)
-        if not plausible_length(seconds, text):
-            logger.error(f"Fixed-line clip {key} is {seconds:.2f}s for {len(text)} chars, not storing it")
-            return
-        await store_raw_audio_bytes(clip, key, **storage)
+            clip = await asyncio.wait_for(render_clip(synth, text, mulaw_wire), RENDER_TIMEOUT_S)
+            if not clip:
+                return
+            seconds = wire_seconds(clip, mulaw_wire)
+            if not plausible_length(seconds, text):
+                logger.error(f"Fixed-line clip {key} is {seconds:.2f}s for {len(text)} chars, not storing it")
+                return
+            await store_raw_audio_bytes(clip, key, **storage)
+            logger.info(f"Stored fixed-line clip {key} ({len(clip)} bytes)")
         remember_clip(key, clip)
-        logger.info(f"Stored fixed-line clip {key} ({len(clip)} bytes)")
     except Exception as e:
-        logger.error(f"Could not render or store fixed-line clip {key}: {e}")
+        logger.error(f"Could not load or render fixed-line clip {key}: {e}")
     finally:
-        _rendering.discard(key)
+        _loading.discard(key)
