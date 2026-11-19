@@ -1648,7 +1648,7 @@ class GraphAgent(BaseAgent):
         else:
             prompt = node_prompt
 
-        # Right after a language switch the earlier turns go into the prompt as a transcript instead
+        # After a language switch the earlier turns go into the prompt as a transcript instead
         # (set by TaskManager, which keeps routing on the full history).
         prompt_transcript = bool(meta_info and meta_info.get("prompt_transcript"))
         if not prompt_transcript:

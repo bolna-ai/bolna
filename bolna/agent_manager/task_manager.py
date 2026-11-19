@@ -36,7 +36,6 @@ from bolna.constants import (
     LANGUAGE_NAMES,
     LANGUAGE_SWITCH_AUDIO_GAP_S,
     LANGUAGE_SWITCH_DECIDE_TIMEOUT_S,
-    LANGUAGE_SWITCH_TRANSCRIPT_REPLIES,
     LANGUAGE_SWITCH_MAX_HOLD_S,
     LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S,
     LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S,
@@ -755,8 +754,6 @@ class TaskManager(BaseManager):
         # Dedicated LLM that decides language switches from the unbiased detector
         # transcript. Set up in __setup_transcriber only for gated multilingual agents.
         self.language_switcher = None
-        # History length at the last switch; None until one. The prompt transcript window counts agent replies after it.
-        self.language_switch_history_start = None
         # Serializes switch decisions so overlapping turns can't interleave two
         # switch+follow-up sequences. Background-only: the caller-facing pipeline
         # (ASR -> main LLM -> TTS) never waits on this lock.
@@ -7658,29 +7655,16 @@ class TaskManager(BaseManager):
     def prompt_transcript_due(self, speculative: bool = False) -> bool:
         """Whether this reply gets the earlier turns as prompt text (language_switch_prompt_transcript flag).
 
-        The speculative post-switch reply always does. Other replies do until the switch is followed by
-        LANGUAGE_SWITCH_TRANSCRIPT_REPLIES agent replies with text: those replies in the new language
-        are what flip the model, so tool follow-ups and replies dropped before they were stored don't count.
+        From the speculative post-switch reply to the end of the call: some models follow the language of
+        the chat history over every instruction, and go back to the old language as soon as the history is
+        sent as messages again, even after several replies in the new one.
         """
         if (
             not self.task_config.get("tools_config", {}).get("language_switch_prompt_transcript")
             or not self.language_switcher
         ):
             return False
-        if speculative:
-            return True
-        start = self.language_switch_history_start
-        history = self.conversation_history.messages
-        if start is None or start > len(history):
-            return False
-        replies = sum(
-            1
-            for message in history[start:]
-            if message.get("role") == ChatRole.ASSISTANT
-            and isinstance(message.get("content"), str)
-            and message["content"].strip()
-        )
-        return replies < LANGUAGE_SWITCH_TRANSCRIPT_REPLIES
+        return speculative or bool(self.language_switch_events)
 
     def __apply_language_directive(self, label: str, context_note: str = None) -> None:
         """Install or refresh the language directive at the end of the system prompt.
@@ -7932,7 +7916,6 @@ class TaskManager(BaseManager):
         # Update TaskManager state so silence detection, fillers, and LLM
         # language stay in sync with the active pools.
         self.language = label
-        self.language_switch_history_start = len(self.conversation_history.messages)
         # Reset silence timers to prevent __check_for_completion from
         # interpreting the switch gap as inactivity and hanging up.
         self.last_transmitted_timestamp = time.time()
