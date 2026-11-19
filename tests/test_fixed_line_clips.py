@@ -56,14 +56,14 @@ def _meta(category=IS_USER_ONLINE_MESSAGE):
 @pytest.fixture(autouse=True)
 def fresh_process_clips():
     tts_clips._clips.clear()
-    tts_clips._rendering.clear()
+    tts_clips._loading.clear()
     tts_clips._clip_bytes = 0
 
 
 @pytest.fixture
 def storage():
     with (
-        patch("bolna.agent_manager.task_manager.get_raw_audio_bytes", new=AsyncMock(return_value=None)) as get,
+        patch("bolna.helpers.tts_clips.get_raw_audio_bytes", new=AsyncMock(return_value=None)) as get,
         patch("bolna.helpers.tts_clips.store_raw_audio_bytes", new=AsyncMock()) as store,
         patch("bolna.agent_manager.task_manager.convert_to_request_log"),
     ):
@@ -85,8 +85,11 @@ def _played(tm):
 
 @pytest.mark.parametrize("category", [IS_USER_ONLINE_MESSAGE, "agent_hangup"])
 async def test_a_stored_clip_replays_without_tts(storage, category):
-    tm = _tm()
     storage.get.return_value = MULAW_CLIP
+    # The first call in a process speaks live while the stored clip loads.
+    assert await _play(_tm(), category=category) is False
+    await _settle()
+    tm = _tm()
 
     assert await _play(tm, category=category) is True
 
@@ -157,18 +160,21 @@ async def test_a_failing_store_stays_off_the_call(storage):
     assert await _play(tm) is False
 
 
-async def test_a_slow_store_leaves_the_line_to_live_tts(storage):
+async def test_a_slow_store_never_holds_up_the_line(storage):
     tm = _tm()
 
     async def stalled(*args, **kwargs):
         await asyncio.sleep(5)
 
     storage.get.side_effect = stalled
-    with patch("bolna.agent_manager.task_manager.STORED_CLIP_FETCH_TIMEOUT_S", 0.01):
-        assert await _play(tm) is False
+    started = time.perf_counter()
 
-    tm.tools["synthesizer"].synthesize_telephony_clip.assert_not_awaited()
+    assert await _play(tm) is False
+
+    assert time.perf_counter() - started < 0.1
     tm._TaskManager__enqueue_chunk.assert_not_called()
+    for task in list(tts_clips._background):
+        task.cancel()
 
 
 async def test_a_provider_whose_one_shot_differs_stays_live(storage):
