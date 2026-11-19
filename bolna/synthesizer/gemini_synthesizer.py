@@ -12,6 +12,7 @@ import re
 import aiohttp
 
 from .base_synthesizer import BaseSynthesizer
+from bolna.helpers.ssl_context import tcp_connector
 from bolna.constants import GEMINI_TTS_DEFAULT_MODEL, GEMINI_TTS_LOCATION, GEMINI_TTS_NATIVE_SAMPLE_RATE
 from bolna.helpers.gcp_auth import get_gcp_credentials
 from bolna.helpers.logger_config import configure_logger
@@ -113,7 +114,7 @@ class GeminiSynthesizer(BaseSynthesizer):
         }
         timeout = aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT_SECONDS)
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(connector=tcp_connector(), timeout=timeout) as session:
                 async with session.post(
                     self._endpoint(project), headers=headers, json=self._build_payload(text)
                 ) as response:

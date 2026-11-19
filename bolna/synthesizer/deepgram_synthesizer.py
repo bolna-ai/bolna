@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from .stream_synthesizer import StreamSynthesizer
 from bolna.constants import DEEPGRAM_AURA_2_SPEED_MAX, DEEPGRAM_AURA_2_SPEED_MIN
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.ssl_context import get_ssl_context
+from bolna.helpers.ssl_context import get_ssl_context, tcp_connector
 from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, resolve_deepgram_mip_opt_out
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
@@ -291,7 +291,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
         url = self._http_url()
         logger.info(f"Sending deepgram request {url}")
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(connector=tcp_connector()) as session:
                 async with session.post(url, headers=headers, json={"text": text}) as response:
                     if response.status == 200:
                         return await response.read()

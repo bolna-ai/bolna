@@ -10,7 +10,7 @@ import websockets
 from .stream_synthesizer import StreamSynthesizer
 from bolna.constants import SMALLEST_TTS_SPEED_MAX, SMALLEST_TTS_SPEED_MIN
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.ssl_context import get_ssl_context
+from bolna.helpers.ssl_context import get_ssl_context, tcp_connector
 
 logger = configure_logger(__name__)
 
@@ -195,7 +195,7 @@ class SmallestSynthesizer(StreamSynthesizer):
             "Accept": "audio/wav",
             "X-Source": self.SOURCE,
         }
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=tcp_connector()) as session:
             async with session.post(self.api_url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     return await response.read()

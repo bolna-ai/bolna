@@ -18,7 +18,7 @@ from websockets.exceptions import InvalidHandshake
 from .stream_synthesizer import StreamSynthesizer
 from bolna.constants import MAYA_TTS_SUPPORTED_LANGUAGES, MAYA_TTS_SUPPORTED_VOICES
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.ssl_context import get_ssl_context
+from bolna.helpers.ssl_context import get_ssl_context, tcp_connector
 from bolna.helpers.utils import StreamingPcmResampler, pcm_to_ulaw, pcm_to_wav_bytes, resample
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
@@ -393,7 +393,7 @@ class MayaSynthesizer(StreamSynthesizer):
             # A default client User-Agent can trip a filter into a non-JSON 403.
             "User-Agent": "bolna",
         }
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=tcp_connector()) as session:
             async with session.post(self.api_url, headers=headers, json=payload) as response:
                 request_id = response.headers.get("x-request-id")
                 if response.status == 200:

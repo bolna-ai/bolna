@@ -21,7 +21,7 @@ from bolna.constants import (
 )
 from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.ssl_context import get_ssl_context
+from bolna.helpers.ssl_context import get_ssl_context, tcp_connector
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
 logger = configure_logger(__name__)
@@ -92,7 +92,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         if not self.stream:
             # For non-streaming HTTP API
             self.api_url = f"https://api.assemblyai.com/v2/transcript"
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(connector=tcp_connector())
 
         self.audio_submitted = False
         self.audio_submission_time = None
@@ -281,7 +281,7 @@ class AssemblyAITranscriber(BaseTranscriber):
     async def _get_http_transcription(self, audio_data):
         """Handle non-streaming HTTP transcription"""
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(connector=tcp_connector())
 
         headers = {
             "Authorization": self.api_key,

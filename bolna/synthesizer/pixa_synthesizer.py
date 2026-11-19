@@ -12,7 +12,7 @@ import os
 import traceback
 from collections import deque
 
-from bolna.helpers.ssl_context import get_ssl_context
+from bolna.helpers.ssl_context import get_ssl_context, tcp_connector
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
@@ -237,7 +237,7 @@ class PixaSynthesizer(BaseSynthesizer):
                 "repetition_penalty": self.repetition_penalty,
             }
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(connector=tcp_connector()) as session:
                 async with session.post(url, headers=headers, json=payload) as response:
                     if response.status != 200:
                         error_text = await response.text()

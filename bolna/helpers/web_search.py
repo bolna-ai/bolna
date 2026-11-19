@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import aiohttp
 from openai import AsyncOpenAI
 
+from bolna.helpers.ssl_context import tcp_connector
 from bolna.constants import default_reasoning_effort, is_reasoning_model
 from bolna.enums import ReasoningEffort
 from bolna.helpers.logger_config import configure_logger
@@ -64,7 +65,9 @@ def format_hits(query: str, hits: list[SearchHit], max_results: int, max_snippet
 
 
 async def _post_json(url: str, headers: dict, body: dict, timeout_s: float) -> dict:
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_s)) as session:
+    async with aiohttp.ClientSession(
+        connector=tcp_connector(), timeout=aiohttp.ClientTimeout(total=timeout_s)
+    ) as session:
         async with session.post(url, headers={"Content-Type": "application/json", **headers}, json=body) as resp:
             if resp.status >= 400:
                 detail = (await resp.text())[:200]

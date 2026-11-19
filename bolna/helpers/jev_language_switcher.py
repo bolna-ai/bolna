@@ -14,6 +14,7 @@ import unicodedata
 
 import aiohttp
 
+from bolna.helpers.ssl_context import tcp_connector
 from bolna.helpers.language_switcher import (
     DEFAULT_LANGUAGE_SWITCH_LLM,
     RUNTIME_FALLBACK_AFTER,
@@ -679,7 +680,9 @@ class JevLanguageSwitcher(LanguageSwitcher):
 
     def _http(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {self._api_key}"})
+            self._session = aiohttp.ClientSession(
+                connector=tcp_connector(), headers={"Authorization": f"Bearer {self._api_key}"}
+            )
         return self._session
 
     def prewarm(self):

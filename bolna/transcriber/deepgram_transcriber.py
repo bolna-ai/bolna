@@ -13,7 +13,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Inval
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.asr_keywords import keyword_entries
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.ssl_context import get_ssl_context
+from bolna.helpers.ssl_context import get_ssl_context, tcp_connector
 from bolna.helpers.utils import create_ws_data_packet, resolve_deepgram_mip_opt_out, timestamp_ms
 from bolna.enums import TelephonyProvider
 from bolna.constants import (
@@ -83,7 +83,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.api_url += f"&tag={quote(self.run_id)}&extra={quote(f'run_id:{self.run_id}')}"
             if self.mip_opt_out:
                 self.api_url += "&mip_opt_out=true"
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(connector=tcp_connector())
             if self.keywords is not None:
                 keyword_list = [quote(entry) for entry in keyword_entries(self.keywords)]
                 if keyword_list:
@@ -570,7 +570,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
     async def _get_http_transcription(self, audio_data):
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(connector=tcp_connector())
 
         headers = {
             "Authorization": "Token {}".format(self.api_key),
