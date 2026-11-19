@@ -140,7 +140,8 @@ from bolna.helpers.utils import (
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.tts_audio_monitor import TtsAudioMonitor
-from ..helpers.tts_clips import clip_pieces, load_fixed_line_clip, recall_clip, render_clip
+from ..helpers.tts_clips import clip_pieces, load_fixed_line_clip, recall_clip, render_clip, wire_seconds
+from ..helpers.tts_response_cache import Capture, TtsResponseCache
 from ..helpers.observable_variable import ObservableVariable
 from bolna.models import S2SConfig, WebSearchConfig, tts_render_settings
 from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
@@ -387,6 +388,12 @@ class TaskManager(BaseManager):
         self.kwargs = kwargs
         self.kwargs["task_manager_instance"] = self
         self.provider_api_keys = self.kwargs.pop("provider_api_keys", None) or {}
+        # scope, min_plays, max_age_days and the record_play counter for replaying repeated replies.
+        self.tts_response_cache_config = self.kwargs.pop("tts_response_cache", None)
+        self.tts_response_cache = None
+        self._response_captures = {}
+        self._synth_pushed_sequences = set()
+        self._replayed_reply_keys = set()
         # Characters played from stored audio instead of being synthesized: billed, but not rendered.
         self.synthesizer_cached_characters = 0
         # Optional load-signal callback (set by the caller only for PTU-served calls).
@@ -2348,6 +2355,11 @@ class TaskManager(BaseManager):
 
         agent_type = (self.task_config["tools_config"].get("llm_agent") or {}).get("agent_type", "simple_llm_agent")
         self.is_local = local
+        if self.tts_response_cache_config and self._is_conversation_task():
+            self.tts_response_cache = TtsResponseCache(**self.tts_response_cache_config, local=local)
+            wire_format = self.__fixed_line_wire_format()
+            for voice_identity in self.fixed_line_voices.values() if wire_format else ():
+                self.tts_response_cache.warm(self.tts_response_cache.prefix(voice_identity, wire_format))
         if task_id == 0:
             if (
                 self.context_data
@@ -6397,6 +6409,17 @@ class TaskManager(BaseManager):
     #################################################################
     # Synthesizer task
     #################################################################
+    def __enqueue_synthesized(self, message):
+        """Queue one synthesizer message for output, split into output-sized chunks where the transport takes them."""
+        if self.tools["output"].process_in_chunks(self.yield_chunks):
+            number_of_chunks = math.ceil(len(message["data"]) / self.output_chunk_size)
+            for chunk_idx, chunk in enumerate(
+                yield_chunks_from_memory(message["data"], chunk_size=self.output_chunk_size)
+            ):
+                self.__enqueue_chunk(chunk, chunk_idx, number_of_chunks, message["meta_info"])
+        else:
+            self.buffered_output_queue.put_nowait(message)
+
     def __enqueue_chunk(self, chunk, i, number_of_chunks, meta_info):
         meta_info["chunk_id"] = i
         copied_meta_info = copy.deepcopy(meta_info)
@@ -7686,6 +7709,102 @@ class TaskManager(BaseManager):
         logger.info(f"Playing stored {category} clip {clip_key} ({len(clip)} bytes)")
         return True
 
+    def __reply_cache_slot(self, text, meta_info):
+        """(prefix, object_key, wire_format) when this push is a whole LLM reply in one piece, else None."""
+        if not self.tts_response_cache:
+            return None
+        sequence_id = meta_info.get("sequence_id")
+        first_push = sequence_id not in self._synth_pushed_sequences
+        self._synth_pushed_sequences.add(sequence_id)
+        if not first_push or sequence_id in (None, -1) or meta_info.get("message_category"):
+            return None
+        if not meta_info.get("end_of_llm_stream") or not text or not text.strip():
+            return None
+        wire_format = self.__fixed_line_wire_format()
+        synth = self.tools["synthesizer"]
+        voice_identity = self.fixed_line_voices.get(synth.active_label if isinstance(synth, SynthesizerPool) else None)
+        if not wire_format or voice_identity is None:
+            return None
+        prefix = self.tts_response_cache.prefix(voice_identity, wire_format)
+        self.tts_response_cache.warm(prefix)
+        return prefix, self.tts_response_cache.object_key(prefix, " ".join(text.split())), wire_format
+
+    async def __replay_cached_reply(self, text, meta_info):
+        """Play a whole reply from its stored clip; False means synthesize it live, capturing it to learn the line."""
+        slot = self.__reply_cache_slot(text, meta_info)
+        if slot is None:
+            return False
+        prefix, object_key, wire_format = slot
+        cache = self.tts_response_cache
+        if not cache.has(object_key, prefix):
+            self._response_captures[meta_info["sequence_id"]] = Capture(
+                object_key, prefix, " ".join(text.split()), wire_format=wire_format
+            )
+            return False
+        # The same line twice in one call goes live, so a re-prompt is not word-for-word identical audio.
+        if object_key in self._replayed_reply_keys:
+            return False
+        started = time.perf_counter()
+        clip = cache.fetch(object_key)
+        if clip is None:
+            return False
+        audio_format, chunks = clip
+        fetch_s = time.perf_counter() - started
+        self._replayed_reply_keys.add(object_key)
+        self.synthesizer_cached_characters += len(text)
+        base = {**meta_info, "format": audio_format, "text": text, "is_cached": True, "synthesizer_latency": fetch_s}
+        for index, (audio, text_synthesized) in enumerate(chunks):
+            chunk_meta = {**base, "text_synthesized": text_synthesized, "is_first_chunk": index == 0}
+            self.__enqueue_synthesized({"data": audio, "meta_info": {**chunk_meta, "mark_id": str(uuid.uuid4())}})
+        end_meta = {**base, "text_synthesized": "", "end_of_synthesizer_stream": True, "mark_id": str(uuid.uuid4())}
+        self.__enqueue_synthesized({"data": b"\x00", "meta_info": end_meta})
+        self.__record_cached_reply_latency(meta_info, text, fetch_s)
+        convert_to_request_log(
+            message=text,
+            meta_info=base,
+            component=LogComponent.SYNTHESIZER,
+            direction=LogDirection.RESPONSE,
+            model=self.synthesizer_provider,
+            is_cached=True,
+            engine=self.tools["synthesizer"].get_engine(),
+            run_id=self.run_id,
+        )
+        logger.info(f"Replayed reply clip {object_key} for sequence {meta_info.get('sequence_id')}")
+        return True
+
+    def __record_cached_reply_latency(self, meta_info, text, fetch_s):
+        synth = self.tools["synthesizer"]
+        if isinstance(synth, SynthesizerPool):
+            synth = synth.synthesizers[synth.active_label]
+        synth._upsert_turn_latency(
+            {
+                "turn_id": meta_info.get("turn_id"),
+                "sequence_id": meta_info.get("sequence_id"),
+                "tts_start_ms": meta_info.get("tts_start_ms"),
+                "first_result_latency_ms": round(fetch_s * 1000),
+                "total_stream_duration_ms": round(fetch_s * 1000),
+                "characters": len(text),
+                "message_category": meta_info.get("message_category"),
+                "cached": True,
+            }
+        )
+
+    def __capture_reply_audio(self, message):
+        """Keep a learning reply's live audio; at its end, hand the whole clip to the cache."""
+        meta_info = message["meta_info"]
+        capture = self._response_captures.get(meta_info.get("sequence_id"))
+        if capture is None:
+            return
+        if message["data"] != b"\x00":
+            capture.chunks.append((message["data"], meta_info.get("text_synthesized", "")))
+            capture.audio_format = meta_info.get("format")
+        if not meta_info.get("end_of_synthesizer_stream"):
+            return
+        del self._response_captures[meta_info["sequence_id"]]
+        if capture.chunks:
+            seconds = sum(wire_seconds(audio, capture.wire_format == "mulaw") for audio, _ in capture.chunks)
+            self.tts_response_cache.finish_capture(capture, seconds)
+
     def __language_directive(self, label: str) -> str:
         """The one standing language order, installed at setup and on every switch."""
         name = LANGUAGE_NAMES.get(label, label)
@@ -8062,14 +8181,8 @@ class TaskManager(BaseManager):
                                             "_cb_synthesizer_connect_reported",
                                         )
 
-                                if self.tools["output"].process_in_chunks(self.yield_chunks):
-                                    number_of_chunks = math.ceil(len(message["data"]) / self.output_chunk_size)
-                                    for chunk_idx, chunk in enumerate(
-                                        yield_chunks_from_memory(message["data"], chunk_size=self.output_chunk_size)
-                                    ):
-                                        self.__enqueue_chunk(chunk, chunk_idx, number_of_chunks, meta_info)
-                                else:
-                                    self.buffered_output_queue.put_nowait(message)
+                                self.__enqueue_synthesized(message)
+                                self.__capture_reply_audio(message)
                             else:
                                 # Non-streaming output
                                 logger.info("Stream not enabled, sending entire audio")
@@ -8093,6 +8206,7 @@ class TaskManager(BaseManager):
                                 )
                         else:
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
+                            self._response_captures.pop(sequence_id, None)
                             # A retired sequence's final chunk is skipped here, so its
                             # is_final_chunk mark never reaches Plivo and no mark echo ever
                             # arrives to clear is_audio_being_played. Without this, the flag
@@ -8320,7 +8434,7 @@ class TaskManager(BaseManager):
                             run_id=self.run_id,
                         )
                         await self.__send_preprocessed_audio(meta_info, get_md5_hash(text))
-                    else:
+                    elif not await self.__replay_cached_reply(text, meta_info):
                         self.synthesizer_characters += len(text)
                         await self.tools["synthesizer"].push(message)
                 else:

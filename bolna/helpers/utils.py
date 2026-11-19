@@ -314,6 +314,19 @@ async def delete_s3_file_by_prefix(bucket_name, file_key):
             return error
 
 
+async def list_s3_objects(bucket_name, prefix):
+    """(key, last-modified epoch seconds) for every object under prefix."""
+    session = AioSession()
+    async with AsyncExitStack() as exit_stack:
+        s3_client = await exit_stack.enter_async_context(session.create_client("s3"))
+        objects = []
+        paginator = s3_client.get_paginator("list_objects_v2")
+        async for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+            for item in page.get("Contents", []):
+                objects.append((item["Key"], item["LastModified"].timestamp()))
+        return objects
+
+
 async def store_file(
     bucket_name=None, file_key=None, file_data=None, content_type="json", local=False, preprocess_dir=None
 ):
