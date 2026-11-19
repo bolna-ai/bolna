@@ -11,6 +11,7 @@ import httpcore
 import httpx
 from yarl import URL
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssl_context import get_ssl_context
 from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log, format_error_message
 
@@ -127,11 +128,11 @@ def _guarded_socket(addr_info):
 
 def outbound_connector(url):
     """Connector that checks the address it dials, so DNS changed after the pre-flight check cannot
-    reach an internal host. None for an allowlisted host."""
+    reach an internal host. An allowlisted host skips the address check."""
     host = (urlsplit(url).hostname or "").lower()
     if host in _ALLOWLISTED_HOSTS:
-        return None
-    return aiohttp.TCPConnector(socket_factory=_guarded_socket)
+        return aiohttp.TCPConnector(ssl=get_ssl_context())
+    return aiohttp.TCPConnector(socket_factory=_guarded_socket, ssl=get_ssl_context())
 
 
 _HAPPY_EYEBALLS_DELAY_S = 0.25
