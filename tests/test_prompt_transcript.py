@@ -2,8 +2,8 @@
 
 Some models keep the language of the chat history over every language instruction, so after a switch
 they reply in the old language. The earlier turns go into the system prompt as a transcript and only
-the caller's latest turn stays a message. The LLM request changes only: history is untouched, and
-graph agents keep routing on the full history."""
+the caller's latest turn stays a message. It applies to simple LLM agents only; graph and knowledge-base
+agents get their request unchanged. The LLM request changes only: history is untouched."""
 
 import types
 
@@ -241,16 +241,15 @@ async def test_graph_and_knowledge_base_agents_get_their_request_unchanged(agent
     tm.prompt_transcript_due = TaskManager.prompt_transcript_due.__get__(tm, TaskManager)
     messages = history()
 
-    meta_info = await generate_once(tm, messages)
+    await generate_once(tm, messages)
 
-    assert meta_info["prompt_transcript"] is False
     assert captured["messages"][: len(history())] == history()
 
 
-async def test_a_graph_agent_without_the_transcript_sends_the_history_as_messages():
+async def test_a_graph_agent_sends_the_history_as_messages_under_its_heading():
     agent = graph_agent()
 
-    sent = await agent._build_messages(history(), meta_info={"prompt_transcript": False})
+    sent = await agent._build_messages(history())
 
     assert sent[0]["content"].endswith("## Conversation History")
     assert [m["role"] for m in sent] == ["system", "assistant", "user", "assistant", "user"]

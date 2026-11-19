@@ -4338,9 +4338,7 @@ class TaskManager(BaseManager):
         # Pass detected language to LLM for pre_call_message selection
         meta_info["detected_language"] = self.language
 
-        transcript_due = self.prompt_transcript_due()
-        meta_info["prompt_transcript"] = transcript_due
-        llm_messages = with_prompt_transcript(messages) if transcript_due else messages
+        llm_messages = with_prompt_transcript(messages) if self.prompt_transcript_due() else messages
 
         try:
             # The transcript goes to the LLM only: `messages` is written back into history below.
