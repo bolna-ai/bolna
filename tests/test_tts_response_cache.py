@@ -18,6 +18,7 @@ CHUNKS = [(b"\x7f" * 8000, "Sure, which day"), (b"\x7e" * 16000, " suits you for
 
 def _forget():
     cache_module._manifests.clear()
+    cache_module._loading.clear()
     tts_clips._clips.clear()
     tts_clips._clip_bytes = 0
 
@@ -59,7 +60,7 @@ async def test_line_is_stored_only_once_it_reaches_min_plays():
         store.assert_awaited_once()
         assert store.await_args.kwargs["file_key"] == key
         assert at.has(key, prefix)
-        assert await at.fetch(key) == ("mulaw", CHUNKS)
+        assert at.fetch(key) == ("mulaw", CHUNKS)
 
 
 @pytest.mark.asyncio
@@ -86,19 +87,19 @@ async def test_capture_cut_short_of_its_text_is_not_counted():
 async def test_unreadable_clip_reads_as_missing(blob):
     cache = _cache()
     tts_clips.remember_clip("key", blob)
-    assert await cache.fetch("key") is None
+    assert cache.fetch("key") is None
 
 
 @pytest.mark.asyncio
-async def test_slow_store_reads_as_missing():
+async def test_a_clip_this_process_lacks_goes_live_and_loads_for_later():
     cache = _cache()
+    cache._read = AsyncMock(return_value=encode_clip("mulaw", CHUNKS))
 
-    async def stalled(object_key):
-        await asyncio.sleep(5)
+    assert cache.fetch("key") is None
+    await asyncio.gather(*list(cache_module._background))
 
-    cache._read = stalled
-    with patch.object(cache_module, "STORED_CLIP_FETCH_TIMEOUT_S", 0.01):
-        assert await cache.fetch("key") is None
+    assert cache.fetch("key") == ("mulaw", CHUNKS)
+    cache._read.assert_awaited_once_with("key")
 
 
 @pytest.mark.asyncio

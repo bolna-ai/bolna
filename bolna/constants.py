@@ -10,8 +10,6 @@ PCM16_SCALE = 32768.0
 WEB_BASED_CALL_PROVIDER = "web_based_call"
 # Web + FreeSWITCH webcall paths play raw PCM at this fixed rate (telephony stays 8k mulaw).
 WEBCALL_TTS_SAMPLE_RATE = 24000
-# A stored clip not read back within this is spoken live instead, so a slow store never holds up a turn.
-STORED_CLIP_FETCH_TIMEOUT_S = 0.5
 # Input handlers on these providers batch a different amount of audio than the transcriber's
 # frame constant assumes, so the stream cursor measures the payload instead of trusting it.
 # sip-trunk batches 80ms against a 200ms constant; the webcall paths batch 200ms against 256ms/500ms.

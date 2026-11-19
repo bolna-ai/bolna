@@ -28,7 +28,6 @@ from bolna.constants import (
     DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION,
     IS_USER_ONLINE_MESSAGE,
-    STORED_CLIP_FETCH_TIMEOUT_S,
     DTMF_MESSAGE_PREFIX,
     DUPLICATE_RESPONSE_SIMILARITY,
     FILLER_DICT,
@@ -141,14 +140,7 @@ from bolna.helpers.utils import (
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.tts_audio_monitor import TtsAudioMonitor
-from ..helpers.tts_clips import (
-    clip_pieces,
-    recall_clip,
-    remember_clip,
-    render_clip,
-    store_fixed_line_clip,
-    wire_seconds,
-)
+from ..helpers.tts_clips import clip_pieces, load_fixed_line_clip, recall_clip, render_clip, wire_seconds
 from ..helpers.tts_response_cache import Capture, TtsResponseCache
 from ..helpers.observable_variable import ObservableVariable
 from bolna.models import S2SConfig, WebSearchConfig, tts_render_settings
@@ -7658,7 +7650,7 @@ class TaskManager(BaseManager):
         return None
 
     async def __play_fixed_line_clip(self, text, meta_info):
-        """Play a fixed line from its stored clip; False means speak it live, storing a clip for later calls on a miss."""
+        """Play a fixed line from the clip this process holds; on a miss speak it live and load the clip for later calls."""
         category = meta_info["message_category"]
         if not text or category not in self.fixed_line_categories or not self.assistant_id:
             return False
@@ -7683,15 +7675,8 @@ class TaskManager(BaseManager):
         }
         clip = recall_clip(clip_key)
         if clip is None:
-            try:
-                clip = await asyncio.wait_for(get_raw_audio_bytes(clip_key, **storage), STORED_CLIP_FETCH_TIMEOUT_S)
-            except Exception as e:
-                logger.error(f"Fixed-line clip unreadable for {category}, synthesizing live: {e}")
-                return False
-            if not clip:
-                store_fixed_line_clip(synth, text, clip_key, mulaw_wire, storage)
-                return False
-            remember_clip(clip_key, clip)
+            load_fixed_line_clip(synth, text, clip_key, mulaw_wire, storage)
+            return False
 
         meta_info = {
             **meta_info,
@@ -7760,7 +7745,7 @@ class TaskManager(BaseManager):
         if object_key in self._replayed_reply_keys:
             return False
         started = time.perf_counter()
-        clip = await cache.fetch(object_key)
+        clip = cache.fetch(object_key)
         if clip is None:
             return False
         audio_format, chunks = clip

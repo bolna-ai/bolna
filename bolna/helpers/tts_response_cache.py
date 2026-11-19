@@ -7,7 +7,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 
-from bolna.constants import PREPROCESS_DIR, STORED_CLIP_FETCH_TIMEOUT_S
+from bolna.constants import PREPROCESS_DIR
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.tts_clips import plausible_length, recall_clip, remember_clip
 from bolna.helpers.utils import BUCKET_NAME, get_md5_hash, get_s3_file, list_s3_objects, store_file
@@ -40,6 +40,8 @@ class Capture:
 
 
 _manifests: dict[str, Manifest] = {}
+_loading: set[str] = set()
+_background: set[asyncio.Task] = set()
 
 
 def encode_clip(audio_format, chunks):
@@ -90,20 +92,36 @@ class TtsResponseCache:
         manifest = _manifests.get(prefix)
         return manifest is not None and object_key in manifest.keys
 
-    async def fetch(self, object_key):
-        """A stored reply's (audio_format, chunks), or None when it is missing, unreadable or slow to read."""
+    def fetch(self, object_key):
+        """A stored reply's (audio_format, chunks) when this process holds it; otherwise load it in the background, None."""
         blob = recall_clip(object_key)
+        if blob is None:
+            self._load(object_key)
+            return None
         try:
-            if blob is None:
-                blob = await asyncio.wait_for(self._read(object_key), STORED_CLIP_FETCH_TIMEOUT_S)
-            clip = decode_clip(blob) if blob else None
+            clip = decode_clip(blob)
         except Exception as e:
-            logger.error(f"Could not read reply clip {object_key}, synthesizing live: {e}")
+            logger.error(f"Unreadable reply clip {object_key}, synthesizing live: {e}")
             return None
-        if not clip or not clip[1]:
-            return None
-        remember_clip(object_key, blob)
-        return clip
+        return clip if clip[1] else None
+
+    def _load(self, object_key):
+        if object_key in _loading:
+            return
+        _loading.add(object_key)
+        task = asyncio.create_task(self._load_clip(object_key))
+        _background.add(task)
+        task.add_done_callback(_background.discard)
+
+    async def _load_clip(self, object_key):
+        try:
+            blob = await self._read(object_key)
+            if blob and decode_clip(blob)[1]:
+                remember_clip(object_key, blob)
+        except Exception as e:
+            logger.error(f"Could not load reply clip {object_key}: {e}")
+        finally:
+            _loading.discard(object_key)
 
     def finish_capture(self, capture, audio_seconds):
         """Count a completed live play of the line and store its audio once it reaches min_plays."""
