@@ -1,6 +1,7 @@
 import ssl
 import threading
 
+import aiohttp
 import certifi
 
 _ssl_context: ssl.SSLContext | None = None
@@ -24,3 +25,8 @@ def get_ssl_context(url: str | None = None) -> ssl.SSLContext | None:
             if _ssl_context is None:
                 _ssl_context = _build_ssl_context()
     return _ssl_context
+
+
+def tcp_connector(**kwargs) -> aiohttp.TCPConnector:
+    """aiohttp connector that verifies against the same trust store as the websocket and tool-call clients."""
+    return aiohttp.TCPConnector(ssl=get_ssl_context(), **kwargs)

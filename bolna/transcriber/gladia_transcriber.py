@@ -16,7 +16,7 @@ from .base_transcriber import BaseTranscriber
 from bolna.enums import TelephonyProvider
 from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.ssl_context import get_ssl_context
+from bolna.helpers.ssl_context import get_ssl_context, tcp_connector
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
 load_dotenv()
@@ -223,7 +223,7 @@ class GladiaTranscriber(BaseTranscriber):
             f"keywords={bool(self.keywords)}"
         )
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=tcp_connector()) as session:
             async with session.post(
                 self.session_url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=10)
             ) as response:
