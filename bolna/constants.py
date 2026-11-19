@@ -487,6 +487,8 @@ TTS_AUDIO_SETTINGS = {
     SynthesizerProvider.SONIOX: frozenset({"speed", "reduce_silence"}),
     SynthesizerProvider.CUSTOM: frozenset({"speed", "extra_body"}),
 }
+# Models whose one-shot clips render on the same socket a call speaks on, so that path joins their audio cache keys.
+TTS_SOCKET_CLIP_MODEL_PREFIXES = {SynthesizerProvider.ELEVENLABS: ELEVENLABS_DIALOGUE_MODEL_PREFIXES}
 
 # Provider pronunciation dictionaries, referenced by ID and applied by the provider. A dictionary
 # lives in one provider account, so it only works with that account's API key.

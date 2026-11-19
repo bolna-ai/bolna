@@ -285,10 +285,15 @@ async def test_dialogue_socket_without_dictionaries_is_unchanged(fake_connect, m
     assert fake_connect[0].sent[0] == {"voices": ["voice-id"], "voice_settings": {"stability": 0.5}}
 
 
-@pytest.mark.parametrize("model", ["eleven_turbo_v2_5", "eleven_v3_conversational", "eleven_v4_turbo"])
-async def test_elevenlabs_one_shot_renders_send_the_dictionaries(posted_bodies, model):
-    await _elevenlabs(model, pronunciation_dictionary_locators=[LOCATOR]).synthesize("Welcome to Bolna")
+async def test_elevenlabs_one_shot_renders_send_the_dictionaries(posted_bodies):
+    await _elevenlabs(pronunciation_dictionary_locators=[LOCATOR]).synthesize("Welcome to Bolna")
     assert posted_bodies[0]["pronunciation_dictionary_locators"] == [LOCATOR]
+
+
+@pytest.mark.parametrize("model", ["eleven_v3_conversational", "eleven_v4_turbo"])
+async def test_dialogue_clips_open_with_the_dictionaries(fake_connect, model):
+    await _elevenlabs(model, pronunciation_dictionary_locators=[LOCATOR]).synthesize("Welcome to Bolna")
+    assert fake_connect[0].sent[0]["pronunciation_dictionary_locators"] == [LOCATOR]
 
 
 # ---------------------------------------------------------------------------

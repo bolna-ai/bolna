@@ -134,6 +134,8 @@ class ElevenlabsBase(StreamSynthesizer):
         self.elevenlabs_host = os.getenv("ELEVENLABS_API_HOST", "api.elevenlabs.io")
         # Set from the x-trace-id response header on connect; both sockets log against it.
         self.ws_trace_id = None
+        self.pending_text = ""
+        self.pending_sequence_id = None
         if self.use_mulaw:
             self.wire_format = "ulaw_8000"
             self.wire_pcm_rate = None
@@ -186,6 +188,18 @@ class ElevenlabsBase(StreamSynthesizer):
             )
         return True
 
+    def _take_flushable(self, text, sequence_id, end_of_llm_stream):
+        """Units of this turn's text to send now; the unfinished sentence stays held."""
+        carried = []
+        if sequence_id != self.pending_sequence_id:
+            if self.pending_text and self.should_synthesize_response(self.pending_sequence_id):
+                carried = [self.pending_text]
+            self.pending_text, self.pending_sequence_id = "", sequence_id
+        # The LLM wrappers cut pushes at a space and drop it.
+        joined = " ".join(f"{self.pending_text} {text or ''}".split())
+        units, self.pending_text = split_flushable(joined, end_of_llm_stream)
+        return carried + units
+
     def _voice_settings(self):
         return {
             "stability": self.temperature,
@@ -213,13 +227,13 @@ class ElevenlabsBase(StreamSynthesizer):
         return self.wire_format
 
     async def synthesize(self, text):
-        return await self._generate_http(text, format="mp3_44100_128")
+        return await self._render_clip(text, format="mp3_44100_128")
 
     async def synthesize_pcm_clip(self, text, sample_rate):
         # Natively rendered rates only.
         if int(sample_rate) not in (16000, 22050, 24000, 44100):
             return None
-        return await self._generate_http(text, format=f"pcm_{int(sample_rate)}")
+        return await self._render_clip(text, format=f"pcm_{int(sample_rate)}")
 
     async def synthesize_telephony_clip(self, text):
         """One-shot render in the telephony wire format (mu-law 8000) — no
@@ -227,7 +241,11 @@ class ElevenlabsBase(StreamSynthesizer):
         returns. None on non-mulaw configs so callers fall back to synthesize()."""
         if not self.use_mulaw:
             return None
-        return await self._generate_http(text)
+        return await self._render_clip(text)
+
+    async def _render_clip(self, text, format=None):
+        """A whole clip outside a call turn: a welcome, a dashboard preview, a handoff clip."""
+        return await self._generate_http(text, format)
 
     async def _generate_http(self, text, format=None):
         payload = {
@@ -276,8 +294,6 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
         self.eos_accum_text = ""  # spoken-so-far for that context (end-of-stream match)
         self.opened_context_id = None  # last context whose first message carried its voice settings
         self._reported_closed_ws = None  # socket whose close was already logged
-        self.pending_text = ""
-        self.pending_sequence_id = None
 
     def _report_closed_socket(self, ws):
         """Log why ElevenLabs closed a socket, once per socket."""
@@ -315,18 +331,6 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
         if not self.context_id and self.should_synthesize_response(meta_info.get("sequence_id")):
             self.context_id = str(uuid.uuid4())
             self.current_turn_context_id = self.context_id
-
-    def _take_flushable(self, text, sequence_id, end_of_llm_stream):
-        """Units of this turn's text to send now; the unfinished sentence stays held."""
-        carried = []
-        if sequence_id != self.pending_sequence_id:
-            if self.pending_text and self.should_synthesize_response(self.pending_sequence_id):
-                carried = [self.pending_text]
-            self.pending_text, self.pending_sequence_id = "", sequence_id
-        # The LLM wrappers cut pushes at a space and drop it.
-        joined = " ".join(f"{self.pending_text} {text or ''}".split())
-        units, self.pending_text = split_flushable(joined, end_of_llm_stream)
-        return carried + units
 
     async def handle_interruption(self):
         self.pending_text = ""
@@ -617,7 +621,9 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
 # v3 accepts any stability value but only these three change anything.
 STABILITY_PRESETS = (0.0, 0.5, 1.0)
 DEFAULT_STABILITY = 0.5
+CONNECT_TIMEOUT_S = 10
 CLOSE_TIMEOUT_S = 1
+CLIP_RECV_TIMEOUT_S = 10
 RECONNECT_POLL_INTERVAL_S = 0.05
 # The endpoint ignores inactivity_timeout and drops idle sockets at 20s.
 KEEP_ALIVE_INTERVAL_S = 8
@@ -628,13 +634,8 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.ws_url = (
-            f"wss://{self.elevenlabs_host}/v1/text-to-dialogue/stream-input"
-            f"?model_id={self.model}&output_format={self.wire_format}&sync_alignment=true"
-        )
-        # v3 rejects optimize_streaming_latency with a 400.
-        self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/stream?output_format="
-        # Snapped once so the inherited HTTP path matches the streamed voice. temperature is
+        self.ws_url = self._socket_url(self.wire_format)
+        # Snapped once so every socket, call or clip, gets the same value. temperature is
         # optional in the config and reaches the constructor unvalidated, so it may be None.
         stability = DEFAULT_STABILITY if self.temperature is None else self.temperature
         self.temperature = min(STABILITY_PRESETS, key=lambda preset: abs(preset - stability))
@@ -651,6 +652,64 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
     def get_sleep_time(self):
         return 0.01
 
+    def _socket_url(self, output_format):
+        return (
+            f"wss://{self.elevenlabs_host}/v1/text-to-dialogue/stream-input"
+            f"?model_id={self.model}&output_format={output_format}&sync_alignment=true"
+        )
+
+    def _session_message(self):
+        """First message on a socket: stability, clone_strength on v4, and dictionaries for the whole socket."""
+        message = {"voices": [self.voice], "voice_settings": {"stability": self.temperature}}
+        if self.clone_strength is not None:
+            message["voice_settings"]["clone_strength"] = self.clone_strength
+        if self.pronunciation_dictionary_locators:
+            message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
+        return message
+
+    def _turn_input(self, unit, new_turn):
+        """One sentence of a turn. new_turn goes on a turn's first only; per-sentence it breaks intonation."""
+        item = {"text": f"{unit} ", "voice_id": self.voice}
+        if new_turn:
+            item["new_turn"] = True
+        return {"inputs": [item]}
+
+    async def _render_clip(self, text, format=None):
+        """Over a socket of its own, sent the way a call turn is, so the clip sounds like the call's replies."""
+        units, _ = split_flushable(" ".join((text or "").split()), end_of_stream=True)
+        if not units:
+            return None
+        url = self._socket_url(format or self.wire_format)
+        websocket = None
+        try:
+            websocket = await asyncio.wait_for(
+                websockets.connect(url, ssl=get_ssl_context(url), additional_headers={"xi-api-key": self.api_key}),
+                timeout=CONNECT_TIMEOUT_S,
+            )
+            await websocket.send(json.dumps(self._session_message()))
+            for index, unit in enumerate(units):
+                await websocket.send(json.dumps(self._turn_input(unit, new_turn=index == 0)))
+            await websocket.send(json.dumps({"flush": True}))
+            audio = bytearray()
+            while True:
+                data = json.loads(await asyncio.wait_for(websocket.recv(), timeout=CLIP_RECV_TIMEOUT_S))
+                if data.get("error"):
+                    logger.error(f"ElevenLabs v3 clip error: {data.get('error')} - {data.get('message')}")
+                    return None
+                if data.get("audio"):
+                    audio += base64.b64decode(data["audio"])
+                if data.get("is_final_audio_for_turn"):
+                    return bytes(audio) or None
+        except Exception as e:
+            logger.error(f"ElevenLabs v3 clip failed: {e!r}")
+            return None
+        finally:
+            if websocket is not None:
+                try:
+                    await asyncio.wait_for(websocket.close(), timeout=CLOSE_TIMEOUT_S)
+                except Exception:
+                    pass
+
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
@@ -660,22 +719,12 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
                     ssl=get_ssl_context(self.ws_url),
                     additional_headers={"xi-api-key": self.api_key},
                 ),
-                timeout=10.0,
+                timeout=CONNECT_TIMEOUT_S,
             )
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
                 self.ws_trace_id = websocket.response.headers.get("x-trace-id")
                 logger.info(f"Elevenlabs v3 WebSocket connected trace_id={self.ws_trace_id}")
-            # First message only. The socket takes stability and, on v4, clone_strength; dictionaries apply to the
-            # whole socket.
-            first_message = {
-                "voices": [self.voice],
-                "voice_settings": {"stability": self.temperature},
-            }
-            if self.clone_strength is not None:
-                first_message["voice_settings"]["clone_strength"] = self.clone_strength
-            if self.pronunciation_dictionary_locators:
-                first_message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
-            await websocket.send(json.dumps(first_message))
+            await websocket.send(json.dumps(self._session_message()))
             self._last_send_time = time.perf_counter()
             self._new_turn_pending = True
             # Teardown is over once a replacement is up.
@@ -750,6 +799,7 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
         # No network I/O: the caller awaits this on the interruption path. Detaching the
         # socket synchronously also stops the receiver reading the abandoned turn.
         try:
+            self.pending_text = ""
             self.current_turn_start_time = None
             self._new_turn_pending = True
             self._interrupted = True
@@ -790,40 +840,38 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
                 await self.flush_synthesizer_stream()
                 return
 
+            # Before any await, so pushes reach the buffer in order.
+            units = self._take_flushable(text, sequence_id, end_of_llm_stream)
+
             # Tighter than the 1s default: every barge-in redials, and the next turn should
             # not wait a full poll tick on a socket that reconnects in about 200ms.
             await self._wait_for_ws(poll_interval=RECONNECT_POLL_INTERVAL_S)
 
-            if text != "":
-                for text_chunk in self.text_chunker(text):
-                    if not self.should_synthesize_response(sequence_id):
-                        logger.info(f"Not synthesizing (inner): sequence_id {sequence_id} not current")
-                        await self.flush_synthesizer_stream()
-                        return
-                    try:
-                        if self.ws_send_time is None:
-                            self.ws_send_time = time.perf_counter()
-                            self._turn_eos_emitted = False
-                            logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
-                        # Only the first fragment of a turn; per-fragment new_turn would
-                        # break intonation inside one utterance.
-                        payload = {"text": text_chunk, "voice_id": self.voice}
-                        if self._new_turn_pending:
-                            payload["new_turn"] = True
-                            self._new_turn_pending = False
-                        ws = self.websocket
-                        if ws is None:
-                            self._classify_lost_socket("mid-send")
-                            return
-                        await ws.send(json.dumps({"inputs": [payload]}))
-                        self._last_send_time = time.perf_counter()
-                    except websockets.exceptions.ConnectionClosed:
+            for unit in units:
+                if not self.should_synthesize_response(sequence_id):
+                    logger.info(f"Not synthesizing (inner): sequence_id {sequence_id} not current")
+                    await self.flush_synthesizer_stream()
+                    return
+                try:
+                    if self.ws_send_time is None:
+                        self.ws_send_time = time.perf_counter()
+                        self._turn_eos_emitted = False
+                        logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
+                    message = self._turn_input(unit, self._new_turn_pending)
+                    self._new_turn_pending = False
+                    ws = self.websocket
+                    if ws is None:
                         self._classify_lost_socket("mid-send")
                         return
-                    except Exception as e:
-                        logger.info(f"Error sending chunk: {e}")
-                        self.connection_error = str(e)
-                        return
+                    await ws.send(json.dumps(message))
+                    self._last_send_time = time.perf_counter()
+                except websockets.exceptions.ConnectionClosed:
+                    self._classify_lost_socket("mid-send")
+                    return
+                except Exception as e:
+                    logger.info(f"Error sending chunk: {e}")
+                    self.connection_error = str(e)
+                    return
 
             if end_of_llm_stream:
                 self.last_text_sent = True
