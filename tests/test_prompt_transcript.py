@@ -6,6 +6,8 @@ the caller's latest turn stays a message. The LLM request changes only: history 
 graph agents keep routing on the full history."""
 
 import types
+
+import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bolna.agent_manager.task_manager import TaskManager
@@ -103,9 +105,9 @@ def test_a_non_text_caller_turn_or_system_prompt_is_left_alone():
 # --- when a reply gets it ---
 
 
-def holder(flag=True, switcher=True):
+def holder(flag=True, switcher=True, agent_type="simple_llm_agent"):
     tm = MagicMock()
-    tm.task_config = {"tools_config": FLAG if flag else {}}
+    tm.task_config = {"tools_config": {**FLAG, "llm_agent": {"agent_type": agent_type}} if flag else {}}
     tm.language_switcher = MagicMock() if switcher else None
     tm.conversation_history = ConversationHistory(initial_history=history())
     tm.language_switch_events = []
@@ -127,6 +129,13 @@ def test_off_without_the_flag_a_switcher_or_a_switch():
     assert not due(holder())
 
 
+def test_only_simple_agents_get_it():
+    for agent_type in ("graph_agent", "knowledgebase_agent"):
+        assert not due(switched(holder(agent_type=agent_type)))
+        assert not due(holder(agent_type=agent_type), speculative=True)
+    assert due(switched(holder()))
+
+
 def test_the_speculative_reply_gets_it_before_the_switch_lands():
     assert due(holder(), speculative=True)
     assert not due(holder(flag=False), speculative=True)
@@ -135,8 +144,7 @@ def test_the_speculative_reply_gets_it_before_the_switch_lands():
 def test_it_stays_on_for_the_rest_of_the_call_after_a_switch():
     tm = switched(holder())
     h = tm.conversation_history
-    # The model went back to the old language once plain history returned, even after
-    # two replies in the new one, so neither the handoff clip nor later replies end it.
+    # Neither the handoff clip nor later replies end the transcript.
     h.append_assistant("Sure", message_category="handoff")
     for n in range(10):
         h.append_assistant(f"Reply {n} in English.")
@@ -219,32 +227,27 @@ def graph_agent():
     return agent
 
 
-async def test_a_graph_agent_routes_on_the_full_history_and_its_node_prompt_gets_the_transcript():
+@pytest.mark.parametrize("agent_type", ["graph_agent", "knowledgebase_agent"])
+async def test_graph_and_knowledge_base_agents_get_their_request_unchanged(agent_type):
     captured = {}
-    agent = graph_agent()
 
     async def generate(messages, synthesize=True, meta_info=None):
-        captured["routed_on"] = messages
-        captured["sent"] = await agent._build_messages(messages, meta_info=meta_info)
+        captured["messages"] = messages
         yield {"static_message": "Sure.", "static_audio_hash": "hash"}
 
+    agent = MagicMock()
     agent.generate = generate
-    tm = generation_tm(agent, "graph_agent")
+    tm = generation_tm(agent, agent_type)
+    tm.prompt_transcript_due = TaskManager.prompt_transcript_due.__get__(tm, TaskManager)
     messages = history()
 
     meta_info = await generate_once(tm, messages)
 
-    assert meta_info["prompt_transcript"] is True
-    assert captured["routed_on"][: len(history())] == history()
-    sent = captured["sent"]
-    assert [m["role"] for m in sent] == ["system", "user"]
-    prompt = sent[0]["content"]
-    assert "## Conversation History" not in prompt
-    assert "Agent: வணக்கம், நான் நவ்யா.\nCaller: ஆமாங்க.\n" in prompt
-    assert prompt.index("## Transcript:") < prompt.index("LANGUAGE GUIDELINES")
+    assert meta_info["prompt_transcript"] is False
+    assert captured["messages"][: len(history())] == history()
 
 
-async def test_a_graph_agent_without_the_window_sends_the_history_as_messages():
+async def test_a_graph_agent_without_the_transcript_sends_the_history_as_messages():
     agent = graph_agent()
 
     sent = await agent._build_messages(history(), meta_info={"prompt_transcript": False})

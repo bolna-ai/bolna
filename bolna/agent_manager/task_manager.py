@@ -4339,9 +4339,8 @@ class TaskManager(BaseManager):
         meta_info["detected_language"] = self.language
 
         transcript_due = self.prompt_transcript_due()
-        # Graph agents route on the full history, so their node prompt takes the transcript instead.
         meta_info["prompt_transcript"] = transcript_due
-        llm_messages = with_prompt_transcript(messages) if transcript_due and not self.__is_graph_agent() else messages
+        llm_messages = with_prompt_transcript(messages) if transcript_due else messages
 
         try:
             # The transcript goes to the LLM only: `messages` is written back into history below.
@@ -7657,11 +7656,14 @@ class TaskManager(BaseManager):
 
         From the speculative post-switch reply to the end of the call: some models follow the language of
         the chat history over every instruction, and go back to the old language as soon as the history is
-        sent as messages again, even after several replies in the new one.
+        sent as messages again, even after several replies in the new one. Simple LLM agents only: graph and
+        knowledge-base agents build their own request and get it unchanged.
         """
+        tools_config = self.task_config.get("tools_config", {})
         if (
-            not self.task_config.get("tools_config", {}).get("language_switch_prompt_transcript")
+            not tools_config.get("language_switch_prompt_transcript")
             or not self.language_switcher
+            or (tools_config.get("llm_agent") or {}).get("agent_type", "simple_llm_agent") != "simple_llm_agent"
         ):
             return False
         return speculative or bool(self.language_switch_events)
