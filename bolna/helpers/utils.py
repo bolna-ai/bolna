@@ -287,7 +287,7 @@ async def get_s3_file(bucket_name=BUCKET_NAME, file_key=""):
             response = await s3_client.get_object(Bucket=bucket_name, Key=file_key)
         except ClientError as error:
             if error.response.get("Error", {}).get("Code") == "NoSuchKey":
-                logger.info(f"No S3 object at {file_key}")
+                logger.info("No S3 object at the requested key")
             else:
                 logger.error(error)
         except BotoCoreError as error:
