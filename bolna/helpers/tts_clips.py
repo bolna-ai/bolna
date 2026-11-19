@@ -1,12 +1,61 @@
-"""One-shot renders of fixed agent lines in a call's wire format."""
+"""One-shot renders of fixed agent lines in a call's wire format, and the clips a process keeps in memory."""
 
 import asyncio
+from collections import OrderedDict
 
 from bolna.constants import WEBCALL_TTS_SAMPLE_RATE
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import audio_to_mulaw8k, audio_to_pcm
+from bolna.helpers.utils import audio_to_mulaw8k, audio_to_pcm, store_raw_audio_bytes
 
 logger = configure_logger(__name__)
+
+# Stored clip bytes a worker process keeps across calls, least recently played evicted first.
+CLIP_MEMORY_BYTES = 32 * 1024 * 1024
+# Spoken length per character outside which a render is a bad take, not a clip worth storing.
+MIN_SECONDS_PER_CHAR = 0.03
+MAX_SECONDS_PER_CHAR = 0.2
+# Wire audio per message when a clip is played, so no transport gets one oversized frame.
+CLIP_PIECE_SECONDS = 1.0
+RENDER_TIMEOUT_S = 30
+
+_clips: OrderedDict[str, bytes] = OrderedDict()
+_clip_bytes = 0
+_rendering: set[str] = set()
+_background: set[asyncio.Task] = set()
+
+
+def recall_clip(key):
+    """Clip bytes this process already holds for key, or None."""
+    clip = _clips.get(key)
+    if clip is not None:
+        _clips.move_to_end(key)
+    return clip
+
+
+def remember_clip(key, clip):
+    global _clip_bytes
+    if key in _clips:
+        _clips.move_to_end(key)
+        return
+    _clips[key] = clip
+    _clip_bytes += len(clip)
+    while _clip_bytes > CLIP_MEMORY_BYTES and len(_clips) > 1:
+        _, evicted = _clips.popitem(last=False)
+        _clip_bytes -= len(evicted)
+
+
+def wire_seconds(audio, mulaw_wire):
+    return len(audio) / 8000 if mulaw_wire else len(audio) / (2 * WEBCALL_TTS_SAMPLE_RATE)
+
+
+def plausible_length(seconds, text):
+    return MIN_SECONDS_PER_CHAR * len(text) <= seconds <= MAX_SECONDS_PER_CHAR * len(text) + 1.0
+
+
+def clip_pieces(clip, mulaw_wire):
+    """The clip cut into transport-sized pieces on sample boundaries."""
+    size = int(CLIP_PIECE_SECONDS * (8000 if mulaw_wire else 2 * WEBCALL_TTS_SAMPLE_RATE))
+    return [clip[i : i + size] for i in range(0, len(clip), size)]
 
 
 def convert_clip(synth, audio, mulaw_wire):
@@ -28,7 +77,7 @@ def convert_clip(synth, audio, mulaw_wire):
 
 
 async def render_clip(synth, text, mulaw_wire):
-    """Render text as one wire-format clip, billing its characters, or None when nothing usable comes back."""
+    """Render text as one wire-format clip, or None when nothing usable comes back."""
     # Under ~50ms is a failed one-shot returning a sentinel, not a clip.
     min_clip_bytes = 400 if mulaw_wire else 2400
     clip = None
@@ -54,6 +103,32 @@ async def render_clip(synth, text, mulaw_wire):
     if clip and len(clip) < min_clip_bytes:
         logger.error(f"{synth.__class__.__name__} clip is {len(clip)}B, discarding")
         return None
-    if clip:
-        synth.synthesized_characters = getattr(synth, "synthesized_characters", 0) + len(text)
     return clip
+
+
+def store_fixed_line_clip(synth, text, key, mulaw_wire, storage):
+    """Render and store a fixed line in the background, once per process at a time, for later calls to replay."""
+    if key in _rendering:
+        return
+    _rendering.add(key)
+    task = asyncio.create_task(_render_and_store(synth, text, key, mulaw_wire, storage))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+async def _render_and_store(synth, text, key, mulaw_wire, storage):
+    try:
+        clip = await asyncio.wait_for(render_clip(synth, text, mulaw_wire), RENDER_TIMEOUT_S)
+        if not clip:
+            return
+        seconds = wire_seconds(clip, mulaw_wire)
+        if not plausible_length(seconds, text):
+            logger.error(f"Fixed-line clip {key} is {seconds:.2f}s for {len(text)} chars, not storing it")
+            return
+        await store_raw_audio_bytes(clip, key, **storage)
+        remember_clip(key, clip)
+        logger.info(f"Stored fixed-line clip {key} ({len(clip)} bytes)")
+    except Exception as e:
+        logger.error(f"Could not render or store fixed-line clip {key}: {e}")
+    finally:
+        _rendering.discard(key)

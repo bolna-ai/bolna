@@ -107,7 +107,6 @@ from bolna.helpers.utils import (
     create_ws_data_packet,
     get_file_names_in_directory,
     get_raw_audio_bytes,
-    store_raw_audio_bytes,
     fixed_line_clip_key,
     has_template_variables,
     tts_voice_identity,
@@ -142,7 +141,7 @@ from bolna.helpers.utils import (
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.tts_audio_monitor import TtsAudioMonitor
-from ..helpers.tts_clips import render_clip
+from ..helpers.tts_clips import clip_pieces, recall_clip, remember_clip, render_clip, store_fixed_line_clip
 from ..helpers.observable_variable import ObservableVariable
 from bolna.models import S2SConfig, WebSearchConfig, tts_render_settings
 from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
@@ -389,6 +388,8 @@ class TaskManager(BaseManager):
         self.kwargs = kwargs
         self.kwargs["task_manager_instance"] = self
         self.provider_api_keys = self.kwargs.pop("provider_api_keys", None) or {}
+        # Characters played from stored audio instead of being synthesized: billed, but not rendered.
+        self.synthesizer_cached_characters = 0
         # Optional load-signal callback (set by the caller only for PTU-served calls).
         self.on_turn_usage = kwargs.get("on_turn_usage")
         # Fired instead of on_turn_usage when another backend served the turn.
@@ -7605,6 +7606,7 @@ class TaskManager(BaseManager):
             try:
                 clip = await render_clip(synth, text, mulaw_wire)
                 if clip:
+                    synth.synthesized_characters = getattr(synth, "synthesized_characters", 0) + len(text)
                     self.handoff_audio_cache[label] = clip
                     if len(HANDOFF_CLIP_CACHE) >= HANDOFF_CLIP_CACHE_MAX:
                         HANDOFF_CLIP_CACHE.pop(next(iter(HANDOFF_CLIP_CACHE)))
@@ -7626,7 +7628,7 @@ class TaskManager(BaseManager):
         return None
 
     async def __play_fixed_line_clip(self, text, meta_info):
-        """Play a fixed line from its stored clip, rendering and storing it on first use; False means speak it live."""
+        """Play a fixed line from its stored clip; False means speak it live, storing a clip for later calls on a miss."""
         category = meta_info["message_category"]
         if not text or category not in self.fixed_line_categories or not self.assistant_id:
             return False
@@ -7641,6 +7643,7 @@ class TaskManager(BaseManager):
         voice_identity = self.fixed_line_voices.get(label)
         if voice_identity is None or not synth.one_shot_matches_stream:
             return False
+        mulaw_wire = wire_format == "mulaw"
         clip_key = fixed_line_clip_key(text, voice_identity, wire_format)
         storage = {
             "agent_name": self.assistant_name,
@@ -7648,26 +7651,25 @@ class TaskManager(BaseManager):
             "assistant_id": self.assistant_id,
             "local": self.is_local,
         }
-        try:
-            clip = await asyncio.wait_for(get_raw_audio_bytes(clip_key, **storage), STORED_CLIP_FETCH_TIMEOUT_S)
-            stored = bool(clip)
-            if not stored:
-                clip = await render_clip(synth, text, wire_format == "mulaw")
-        except Exception as e:
-            logger.error(f"Fixed-line clip unavailable for {category}, synthesizing live: {e}")
-            return False
-        if not clip:
-            return False
+        clip = recall_clip(clip_key)
+        if clip is None:
+            try:
+                clip = await asyncio.wait_for(get_raw_audio_bytes(clip_key, **storage), STORED_CLIP_FETCH_TIMEOUT_S)
+            except Exception as e:
+                logger.error(f"Fixed-line clip unreadable for {category}, synthesizing live: {e}")
+                return False
+            if not clip:
+                store_fixed_line_clip(synth, text, clip_key, mulaw_wire, storage)
+                return False
+            remember_clip(clip_key, clip)
 
         meta_info = {
             **meta_info,
             "format": wire_format,
             "text": text,
             "type": "audio",
-            "cached": stored,
+            "cached": True,
             "end_of_llm_stream": True,
-            "end_of_synthesizer_stream": True,
-            "is_first_chunk": True,
         }
         for direction in (LogDirection.REQUEST, LogDirection.RESPONSE):
             convert_to_request_log(
@@ -7676,16 +7678,20 @@ class TaskManager(BaseManager):
                 component=LogComponent.SYNTHESIZER,
                 direction=direction,
                 model=self.synthesizer_provider,
-                is_cached=stored,
+                is_cached=True,
                 engine=self.tools["synthesizer"].get_engine(),
                 run_id=self.run_id,
             )
-        self.__enqueue_chunk(clip, 0, 1, meta_info)
-        logger.info(
-            f"Playing {'stored' if stored else 'newly rendered'} {category} clip {clip_key} ({len(clip)} bytes)"
-        )
-        if not stored:
-            await store_raw_audio_bytes(clip, clip_key, **storage)
+        pieces = clip_pieces(clip, mulaw_wire)
+        for index, piece in enumerate(pieces):
+            piece_meta = {
+                **meta_info,
+                "is_first_chunk": index == 0,
+                "end_of_synthesizer_stream": index == len(pieces) - 1,
+            }
+            self.__enqueue_chunk(piece, index, len(pieces), piece_meta)
+        self.synthesizer_cached_characters += len(text)
+        logger.info(f"Playing stored {category} clip {clip_key} ({len(clip)} bytes)")
         return True
 
     def __language_directive(self, label: str) -> str:
@@ -9909,6 +9915,7 @@ class TaskManager(BaseManager):
                     "synthesizer_characters": (
                         self.tools["synthesizer"].get_synthesized_characters() if _has_asr_tts else 0
                     ),
+                    "synthesizer_cached_characters": self.synthesizer_cached_characters,
                     "ended_by_assistant": self.ended_by_assistant,
                     "user_spoke": self.user_spoke,
                     "node_extracted_data": (
