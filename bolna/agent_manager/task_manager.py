@@ -28,6 +28,7 @@ from bolna.constants import (
     DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION,
     IS_USER_ONLINE_MESSAGE,
+    STORED_CLIP_FETCH_TIMEOUT_S,
     DTMF_MESSAGE_PREFIX,
     DUPLICATE_RESPONSE_SIMILARITY,
     FILLER_DICT,
@@ -7648,7 +7649,7 @@ class TaskManager(BaseManager):
             "local": self.is_local,
         }
         try:
-            clip = await get_raw_audio_bytes(clip_key, **storage)
+            clip = await asyncio.wait_for(get_raw_audio_bytes(clip_key, **storage), STORED_CLIP_FETCH_TIMEOUT_S)
             stored = bool(clip)
             if not stored:
                 clip = await render_clip(synth, text, wire_format == "mulaw")

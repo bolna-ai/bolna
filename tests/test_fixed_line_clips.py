@@ -1,5 +1,6 @@
 """The inactivity check and the hangup message replay a clip stored per agent, voice and text."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -103,6 +104,20 @@ async def test_a_failed_render_leaves_the_line_to_live_tts(storage):
     assert await _play(tm) is False
 
     storage.store.assert_not_awaited()
+    tm._TaskManager__enqueue_chunk.assert_not_called()
+
+
+async def test_a_slow_store_leaves_the_line_to_live_tts(storage):
+    tm = _tm()
+
+    async def stalled(*args, **kwargs):
+        await asyncio.sleep(5)
+
+    storage.get.side_effect = stalled
+    with patch("bolna.agent_manager.task_manager.STORED_CLIP_FETCH_TIMEOUT_S", 0.01):
+        assert await _play(tm) is False
+
+    tm.tools["synthesizer"].synthesize_telephony_clip.assert_not_awaited()
     tm._TaskManager__enqueue_chunk.assert_not_called()
 
 
