@@ -3199,6 +3199,8 @@ class TaskManager(BaseManager):
             logger.warning("wait_for_current_message: synth pipeline flush timed out after 3s")
 
         entry_time = time.time()
+        expected_play_end = entry_time
+        accounted_marks = set()
         while not self.conversation_ended:
             if self._caller_disconnected():
                 logger.info("wait_for_current_message: caller disconnected, not waiting for playout")
@@ -3228,16 +3230,17 @@ class TaskManager(BaseManager):
                 ):
                     break
 
-            # Use entry_time (not time.time()) so the deadline is a fixed point in the
-            # future rather than one that recedes with each iteration. Without this,
-            # `remaining = sum(durations) + hangup_mark_event_timeout` never reaches 0
-            # when Plivo stops ACKing marks, causing an indefinite spin.
-            remaining_durations = [
-                v.get("duration", 0)
-                for v in mark_events.values()
-                if v.get("type") != "pre_mark_message" and v.get("sent_ts")
-            ]
-            expected_play_end = (entry_time + sum(remaining_durations)) if remaining_durations else entry_time
+            # Count each chunk once: ACKs must not shorten the queued playout budget.
+            # New audio can still arrive after the synth flush timeout; extend the
+            # estimate only for those new marks, so missing ACKs remain bounded.
+            new_audio_duration = 0
+            for mark_id, mark_data in mark_events.items():
+                if mark_id not in accounted_marks:
+                    accounted_marks.add(mark_id)
+                    if mark_data.get("type") != "pre_mark_message" and mark_data.get("sent_ts"):
+                        new_audio_duration += mark_data.get("duration", 0)
+            if new_audio_duration > 0:
+                expected_play_end = max(expected_play_end, time.time()) + new_audio_duration
             deadline = expected_play_end + self.hangup_mark_event_timeout
 
             remaining = deadline - time.time()
