@@ -1,6 +1,7 @@
 """The inactivity check and the hangup message replay a clip stored per agent, voice and text."""
 
 import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,13 +9,14 @@ import pytest
 
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.constants import IS_USER_ONLINE_MESSAGE
-from bolna.helpers import utils
+from bolna.helpers import tts_clips, utils
 from bolna.helpers.utils import fixed_line_clip_key, has_template_variables, tts_voice_identity
 from bolna.synthesizer.synthesizer_pool import SynthesizerPool
 
 TEXT = "Hey, are you still there?"
-MULAW_CLIP = b"\x7f" * 800
-PCM_CLIP = b"\x00\x01" * 2400
+# 1.75 s, a natural length for TEXT.
+MULAW_CLIP = b"\x7f" * 14000
+PCM_CLIP = b"\x00\x01" * 42000
 VOICE = tts_voice_identity("elevenlabs", {"voice": "Nila", "voice_id": "v1", "model": "eleven_flash_v2_5"})
 
 
@@ -42,6 +44,7 @@ def _tm(output="plivo", web=False):
     tm.fixed_line_categories = {IS_USER_ONLINE_MESSAGE, "agent_hangup"}
     tm.fixed_line_voices = {None: VOICE}
     tm.tools = {"output": SimpleNamespace(get_provider=lambda: output), "synthesizer": _synth()}
+    tm.synthesizer_cached_characters = 0
     tm._TaskManager__enqueue_chunk = MagicMock()
     return tm
 
@@ -50,11 +53,18 @@ def _meta(category=IS_USER_ONLINE_MESSAGE):
     return {"io": "plivo", "request_id": "r", "cached": False, "sequence_id": -1, "message_category": category}
 
 
+@pytest.fixture(autouse=True)
+def fresh_process_clips():
+    tts_clips._clips.clear()
+    tts_clips._rendering.clear()
+    tts_clips._clip_bytes = 0
+
+
 @pytest.fixture
 def storage():
     with (
         patch("bolna.agent_manager.task_manager.get_raw_audio_bytes", new=AsyncMock(return_value=None)) as get,
-        patch("bolna.agent_manager.task_manager.store_raw_audio_bytes", new=AsyncMock()) as store,
+        patch("bolna.helpers.tts_clips.store_raw_audio_bytes", new=AsyncMock()) as store,
         patch("bolna.agent_manager.task_manager.convert_to_request_log"),
     ):
         yield SimpleNamespace(get=get, store=store)
@@ -62,6 +72,15 @@ def storage():
 
 async def _play(tm, text=TEXT, category=IS_USER_ONLINE_MESSAGE):
     return await tm._TaskManager__play_fixed_line_clip(text, _meta(category))
+
+
+async def _settle():
+    await asyncio.gather(*list(tts_clips._background))
+
+
+def _played(tm):
+    calls = [c.args for c in tm._TaskManager__enqueue_chunk.call_args_list]
+    return b"".join(chunk for chunk, *_ in calls), [meta for *_, meta in calls]
 
 
 @pytest.mark.parametrize("category", [IS_USER_ONLINE_MESSAGE, "agent_hangup"])
@@ -74,37 +93,68 @@ async def test_a_stored_clip_replays_without_tts(storage, category):
     assert storage.get.await_args.args[0] == fixed_line_clip_key(TEXT, VOICE, "mulaw")
     assert storage.get.await_args.kwargs["assistant_id"] == "agent-1"
     tm.tools["synthesizer"].synthesize_telephony_clip.assert_not_awaited()
-    storage.store.assert_not_awaited()
-    chunk, _, _, meta = tm._TaskManager__enqueue_chunk.call_args.args
-    assert chunk == MULAW_CLIP
-    assert meta["format"] == "mulaw"
-    assert meta["message_category"] == category
-    assert meta["sequence_id"] == -1
-    # Both end flags make the clip's mark final, which is what ends the call after a hangup message.
-    assert meta["end_of_llm_stream"] and meta["end_of_synthesizer_stream"]
+    clip, metas = _played(tm)
+    assert clip == MULAW_CLIP
+    assert {m["format"] for m in metas} == {"mulaw"}
+    assert {m["message_category"] for m in metas} == {category}
+    assert metas[0]["is_first_chunk"] and not any(m["is_first_chunk"] for m in metas[1:])
+    # Only the last piece carries both end flags, which is what ends the call after a hangup message.
+    assert [m["end_of_llm_stream"] and m["end_of_synthesizer_stream"] for m in metas] == [False] * (len(metas) - 1) + [
+        True
+    ]
+    # Billed like the live line, but not rendered.
+    assert tm.synthesizer_cached_characters == len(TEXT)
 
 
-async def test_first_use_renders_stores_and_bills_once(storage):
+async def test_a_miss_speaks_live_and_stores_the_clip_for_later_calls(storage):
     tm = _tm()
-
-    assert await _play(tm) is True
-
-    tm.tools["synthesizer"].synthesize_telephony_clip.assert_awaited_once_with(TEXT)
-    stored_clip, stored_key = storage.store.await_args.args
-    assert stored_clip == MULAW_CLIP
-    assert stored_key == fixed_line_clip_key(TEXT, VOICE, "mulaw")
-    assert tm.tools["synthesizer"].synthesized_characters == len(TEXT)
-    assert tm._TaskManager__enqueue_chunk.call_args.args[0] == MULAW_CLIP
-
-
-async def test_a_failed_render_leaves_the_line_to_live_tts(storage):
-    tm = _tm()
-    tm.tools["synthesizer"].synthesize_telephony_clip.return_value = None
 
     assert await _play(tm) is False
+    await _settle()
+
+    tm.tools["synthesizer"].synthesize_telephony_clip.assert_awaited_once_with(TEXT)
+    assert storage.store.await_args.args == (MULAW_CLIP, fixed_line_clip_key(TEXT, VOICE, "mulaw"))
+    # The live line is billed on its own path; the background render is not billed again.
+    assert getattr(tm.tools["synthesizer"], "synthesized_characters", 0) == 0
+    assert tm.synthesizer_cached_characters == 0
+
+    later = _tm()
+    assert await _play(later) is True
+    storage.get.assert_awaited_once()
+    assert _played(later)[0] == MULAW_CLIP
+
+
+async def test_concurrent_misses_render_once(storage):
+    first, second = _tm(), _tm()
+
+    assert await _play(first) is False
+    assert await _play(second) is False
+    await _settle()
+
+    first.tools["synthesizer"].synthesize_telephony_clip.assert_awaited_once()
+    second.tools["synthesizer"].synthesize_telephony_clip.assert_not_awaited()
+
+
+@pytest.mark.parametrize("render", [None, MULAW_CLIP[:800], MULAW_CLIP * 10])
+async def test_a_failed_or_implausible_render_is_not_stored(storage, render):
+    tm = _tm()
+    tm.tools["synthesizer"].synthesize_telephony_clip.return_value = render
+
+    assert await _play(tm) is False
+    await _settle()
 
     storage.store.assert_not_awaited()
     tm._TaskManager__enqueue_chunk.assert_not_called()
+
+
+async def test_a_failing_store_stays_off_the_call(storage):
+    tm = _tm()
+    storage.store.side_effect = RuntimeError("s3 down")
+
+    assert await _play(tm) is False
+    await _settle()
+
+    assert await _play(tm) is False
 
 
 async def test_a_slow_store_leaves_the_line_to_live_tts(storage):
@@ -153,11 +203,14 @@ async def test_a_templated_line_is_never_stored(storage):
 async def test_web_calls_store_their_own_pcm_clip(storage):
     tm = _tm(output="default", web=True)
 
-    assert await _play(tm) is True
+    assert await _play(tm) is False
+    await _settle()
 
     tm.tools["synthesizer"].synthesize_pcm_clip.assert_awaited_once()
-    assert storage.store.await_args.args[1] == fixed_line_clip_key(TEXT, VOICE, "pcm")
-    assert tm._TaskManager__enqueue_chunk.call_args.args[3]["format"] == "pcm"
+    assert storage.store.await_args.args == (PCM_CLIP, fixed_line_clip_key(TEXT, VOICE, "pcm"))
+    assert await _play(tm) is True
+    clip, metas = _played(tm)
+    assert clip == PCM_CLIP and {m["format"] for m in metas} == {"pcm"}
 
 
 async def test_a_language_pool_speaks_in_the_active_voice(storage):
@@ -169,12 +222,22 @@ async def test_a_language_pool_speaks_in_the_active_voice(storage):
     pool.get_engine = MagicMock(return_value="bulbul:v3")
     tm.tools["synthesizer"] = pool
     tm.fixed_line_voices = {"en": VOICE, "hi": hindi_voice}
+    text = "क्या आप अभी भी लाइन पर हैं?"
 
-    assert await _play(tm, text="क्या आप लाइन पर हैं?") is True
+    assert await _play(tm, text=text) is False
+    await _settle()
 
     pool.synthesizers["hi"].synthesize_telephony_clip.assert_awaited_once()
     pool.synthesizers["en"].synthesize_telephony_clip.assert_not_awaited()
-    assert storage.store.await_args.args[1] == fixed_line_clip_key("क्या आप लाइन पर हैं?", hindi_voice, "mulaw")
+    assert storage.store.await_args.args[1] == fixed_line_clip_key(text, hindi_voice, "mulaw")
+
+
+def test_a_new_month_renders_the_line_afresh():
+    with patch("bolna.helpers.utils.time.gmtime", return_value=time.gmtime(1_790_000_000)):
+        november = fixed_line_clip_key(TEXT, VOICE, "mulaw")
+    with patch("bolna.helpers.utils.time.gmtime", return_value=time.gmtime(1_790_000_000 + 40 * 86400)):
+        december = fixed_line_clip_key(TEXT, VOICE, "mulaw")
+    assert november != december
 
 
 def test_voice_identity_follows_every_audio_setting():

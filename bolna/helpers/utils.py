@@ -437,8 +437,9 @@ def tts_voice_identity(provider, provider_config, pronunciation_rules=None):
 
 
 def fixed_line_clip_key(text, voice_identity, wire_format):
-    """Filename stem for a stored fixed-line clip, bound to the voice and wire format it was rendered in."""
-    return get_md5_hash(f"{voice_identity}|{wire_format}|{text}")
+    """Filename stem for a stored fixed-line clip, bound to its voice and wire format; a new month renders it afresh."""
+    month = time.strftime("%Y-%m", time.gmtime())
+    return get_md5_hash(f"{voice_identity}|{wire_format}|{month}|{text}")
 
 
 def has_template_variables(message_config):
