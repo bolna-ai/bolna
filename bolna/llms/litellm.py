@@ -20,6 +20,24 @@ from bolna.helpers.logger_config import configure_logger
 logger = configure_logger(__name__)
 load_dotenv()
 
+
+def _stream_usage_kwargs(usage) -> dict:
+    """Map an OpenAI-shaped usage record from a LiteLLM stream chunk onto LLMStreamChunk."""
+    if not usage:
+        return {}
+    kwargs = {
+        "input_tokens": getattr(usage, "prompt_tokens", None),
+        "output_tokens": getattr(usage, "completion_tokens", None),
+    }
+    details = getattr(usage, "completion_tokens_details", None)
+    if details is not None:
+        kwargs["reasoning_tokens"] = getattr(details, "reasoning_tokens", None)
+    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    if prompt_details is not None:
+        kwargs["cached_tokens"] = getattr(prompt_details, "cached_tokens", None)
+    return kwargs
+
+
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 logging.getLogger("LiteLLM Router").setLevel(logging.WARNING)
 logging.getLogger("LiteLLM Proxy").setLevel(logging.WARNING)
@@ -71,11 +89,15 @@ class LiteLLM(BaseLLM):
         answer, buffer = "", ""
         first_token_time = None
         finish_reason = None
+        stream_usage = None
 
         model_args = self.model_args.copy()
         model_args["messages"] = strip_internal_keys(messages)
         model_args["stream"] = True
         model_args["stop"] = ["User:"]
+        # Groq, OpenRouter and Deepseek omit usage unless asked. Providers that
+        # reject the flag drop it; Anthropic already attaches the record.
+        model_args["stream_options"] = {"include_usage": True}
 
         if self.trigger_function_call:
             _tools = tools if tools is not None else self.tools
@@ -118,6 +140,14 @@ class LiteLLM(BaseLLM):
 
         async for chunk in completion_stream:
             now = now_ms()
+            usage = chunk.get("usage") if hasattr(chunk, "get") else getattr(chunk, "usage", None)
+            if usage:
+                stream_usage = usage
+            choices = chunk["choices"]
+            if not choices:
+                # Usage-only chunk (choices=[]) sent once include_usage is set.
+                continue
+
             if not first_token_time:
                 first_token_time = now
                 self.started_streaming = True
@@ -127,7 +157,7 @@ class LiteLLM(BaseLLM):
                 )
                 self._log_llm_request_id(completion_stream, getattr(chunk, "id", None))
 
-            choice = chunk["choices"][0]
+            choice = choices[0]
             delta = choice.get("delta", {})
             finish_reason = choice.get("finish_reason") or finish_reason
 
@@ -163,17 +193,30 @@ class LiteLLM(BaseLLM):
         if isinstance(meta_info, dict):
             meta_info["llm_finish_reason"] = finish_reason
 
+        usage_kwargs = _stream_usage_kwargs(stream_usage)
+        delivered = False
+
         if accumulator and accumulator.final_tool_calls:
             api_call_payload = accumulator.build_api_payload(model_args, meta_info, answer)
             if api_call_payload:
                 yield LLMStreamChunk(
-                    data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True
+                    data=api_call_payload,
+                    end_of_stream=False,
+                    latency=latency_data,
+                    is_function_call=True,
+                    **usage_kwargs,
                 )
+                delivered = True
 
         if synthesize and buffer.strip():
-            yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
+            yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data, **usage_kwargs)
+            delivered = True
         elif not synthesize:
-            yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data)
+            yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data, **usage_kwargs)
+            delivered = True
+        elif not delivered and usage_kwargs.get("input_tokens") is not None:
+            # The reply was already flushed. Still hand the tally to the turn.
+            yield LLMStreamChunk(data="", end_of_stream=True, latency=latency_data, **usage_kwargs)
 
         self.started_streaming = False
 
