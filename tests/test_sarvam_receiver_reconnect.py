@@ -259,6 +259,9 @@ class FakeStreamSynth:
     _record_turn_latency = StreamSynthesizer._record_turn_latency
     reset_turn_state = StreamSynthesizer.reset_turn_state
     has_unsettled_turn_on = StreamSynthesizer.has_unsettled_turn_on
+    _receive = StreamSynthesizer._receive
+    _turn_lost_with_socket = StreamSynthesizer._turn_lost_with_socket
+    settles_lost_turns = SarvamSynthesizer.settles_lost_turns
 
 
 async def test_lost_turn_sentinel_unlatches_turn_state():

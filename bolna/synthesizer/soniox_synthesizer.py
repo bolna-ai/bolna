@@ -220,15 +220,18 @@ class SonioxSynthesizer(StreamSynthesizer):
             await self._send_frame({"keep_alive": True})
 
     async def _send_frame(self, payload):
-        """Send one frame; the caller settles the turn on a False.
+        """Send one frame; False when it could not be sent.
 
         Not the shared _send_json: that records connection_error, which _generate_ws_loop
-        treats as fatal and never clears. A socket dying mid-send is transient — the redial
-        settles it (cf. kalpa _send_frame)."""
+        treats as fatal and never clears. A socket dying mid-send is transient — the turn it
+        loses is ended once the receiver sees the socket closed."""
         if not self._is_ws_connected():
             logger.info("Soniox TTS websocket is not connected; dropping frame")
             return False
         try:
+            # The open turn's audio now depends on this socket; losing it loses the turn.
+            if self.current_turn_start_time is not None:
+                self.current_turn_socket = self.websocket
             await self.websocket.send(json.dumps(payload))
             self._last_send_time = time.perf_counter()
             return True
@@ -318,11 +321,17 @@ class SonioxSynthesizer(StreamSynthesizer):
             if not self._is_ws_connected():
                 await asyncio.sleep(0.05)
                 continue
+            ws = self.websocket
             try:
-                message = await self.websocket.recv()
+                message = await ws.recv()
             except Exception as e:
                 logger.error(f"Soniox TTS receiver lost the socket: {e}")
                 self._stream_open = False
+                # Keeps looping instead of returning, so _generate_ws_loop never sees this
+                # close; end the turn lost with the socket here or it never gets its audio_end.
+                if self.has_unsettled_turn_on(ws):
+                    logger.error("Soniox TTS socket dropped mid-turn, ending the turn")
+                    yield b"\x00"
                 await asyncio.sleep(0.05)
                 continue
 

@@ -87,6 +87,8 @@ def split_flushable(text, end_of_stream):
 class ElevenlabsBase(StreamSynthesizer):
     """Credentials, wire format and HTTP synthesis shared by the ElevenLabs synthesizers."""
 
+    settles_lost_turns = True  # receiver() drains a closed socket before ending its turn
+
     def __init__(
         self,
         voice,
