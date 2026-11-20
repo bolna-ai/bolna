@@ -66,6 +66,7 @@ class RimeSynthesizer(StreamSynthesizer):
             self.stream = False
 
         self.context_id = None
+        self._context_sequence_id = None
         self.audio_data = b""
 
         if caching:
@@ -126,6 +127,13 @@ class RimeSynthesizer(StreamSynthesizer):
             await self._wait_for_ws()
 
             if text != "":
+                # A new turn (new sequence_id) gets its own context. The context must stay
+                # stable for the whole turn: Rime tags every reply frame with the contextId of
+                # the text that produced it, so rotating it here would make the receiver treat
+                # the reply's own audio as a stale context (#1125).
+                if not self.context_id or sequence_id != self._context_sequence_id:
+                    self.context_id = str(uuid.uuid4())
+                    self._context_sequence_id = sequence_id
                 for text_chunk in self.text_chunker(text):
                     if not self.should_synthesize_response(sequence_id):
                         logger.info(f"Not synthesizing (inner): sequence_id {sequence_id} not current")
@@ -142,7 +150,6 @@ class RimeSynthesizer(StreamSynthesizer):
 
             if end_of_llm_stream:
                 self.last_text_sent = True
-                self.context_id = str(uuid.uuid4())
 
             try:
                 await self._send_json({"operation": "flush"})
@@ -180,15 +187,19 @@ class RimeSynthesizer(StreamSynthesizer):
                 response = await self.websocket.recv()
                 data = json.loads(response)
 
-                if data.get("type", "") == "chunk":
+                # Frames tagged with a context other than the current one are leftovers from
+                # an interrupted/cleared turn -- drop them, they must not end the open turn.
+                chunk_context_id = data.get("contextId")
+                if chunk_context_id is not None and chunk_context_id != self.context_id:
+                    continue
+
+                if data["type"] == "chunk":
                     self.audio_data += base64.b64decode(data["data"])
 
                 if data["type"] == "timestamps":
                     yield self.audio_data
                     self.audio_data = b""
-
-                chunk_context_id = data.get("contextId")
-                if chunk_context_id != self.context_id:
+                elif data["type"] == "done":
                     yield b"\x00"
                 else:
                     logger.info("No audio data in the response")
