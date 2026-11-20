@@ -8,6 +8,16 @@ logger = configure_logger(__name__)
 # Sentinel pushed into _output_queue to unblock generate() on switch
 _SWITCH_SENTINEL = object()
 
+# generate() returns when the provider's websocket closes. monitor_connection()
+# reconnects within about a second, so the forwarder waits this long before
+# re-entering rather than spinning on a socket that is still down.
+_REENTER_DELAY = 0.5
+
+# Cap on back-to-back generate() rounds that produced no audio, so a provider
+# refusing connections cannot keep the forwarder looping for the whole call.
+# Mirrors TranscriberPool's _MAX_RECONNECTS_PER_CALL.
+_MAX_EMPTY_ROUNDS = 10
+
 
 class SynthesizerPool:
     """
@@ -135,15 +145,41 @@ class SynthesizerPool:
         logger.info(f"SynthesizerPool: generate task started for active='{self.active_label}'")
 
     async def _run_generate(self, label):
-        """Iterate synth.generate() and forward results into the shared _output_queue."""
+        """Iterate synth.generate() and forward results into the shared _output_queue.
+
+        generate() ends when the provider's websocket closes, which happens mid-call:
+        Cartesia drops idle TTS sockets after ~5 minutes and websockets closes on a
+        missed ping. monitor_connection() reconnects, but nothing would read the new
+        socket if the forwarder ended with the old one, leaving the active leg silent
+        for the rest of the call. So re-enter generate() until this task is cancelled
+        or the pool switches away from this label.
+        """
+        synth = self.synthesizers[label]
+        empty_rounds = 0
         try:
-            synth = self.synthesizers[label]
-            async for message in synth.generate():
-                self._output_queue.put_nowait(message)
+            while label == self.active_label:
+                produced = False
+                try:
+                    async for message in synth.generate():
+                        produced = True
+                        self._output_queue.put_nowait(message)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"SynthesizerPool: error in _run_generate for '{label}': {e}", exc_info=True)
+
+                empty_rounds = 0 if produced else empty_rounds + 1
+                if empty_rounds >= _MAX_EMPTY_ROUNDS:
+                    logger.error(
+                        f"SynthesizerPool: giving up on '{label}' after {empty_rounds} "
+                        f"generate() rounds produced no audio"
+                    )
+                    return
+
+                logger.info(f"SynthesizerPool: generate() ended for '{label}', re-entering after reconnect")
+                await asyncio.sleep(_REENTER_DELAY)
         except asyncio.CancelledError:
             logger.info(f"SynthesizerPool: _run_generate cancelled for '{label}'")
-        except Exception as e:
-            logger.error(f"SynthesizerPool: error in _run_generate for '{label}': {e}", exc_info=True)
 
     async def generate(self):
         """Async generator that yields audio packets from the active synthesizer.
