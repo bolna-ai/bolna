@@ -1431,11 +1431,16 @@ def structure_system_prompt(
 
     if context_data is not None:
         enrich_context_with_time_variables(context_data, timezone)
-        default_variables["agent_number"] = context_data.get("recipient_data", {}).get("agent_number")
-        default_variables["user_number"] = context_data.get("recipient_data", {}).get("user_number")
+        # recipient_data may be present but null; the helpers above and below already allow that.
+        recipient_data = context_data.get("recipient_data")
+        if not isinstance(recipient_data, dict):
+            recipient_data = {}
+        default_variables["agent_number"] = recipient_data.get("agent_number")
+        default_variables["user_number"] = recipient_data.get("user_number")
         if primary_language:
-            user_data = context_data.get("recipient_data", {})
-            context_data.get("recipient_data", {}).update(user_data.get(primary_language, {}))
+            language_data = recipient_data.get(primary_language)
+            if isinstance(language_data, dict):
+                recipient_data.update(language_data)
 
         if not is_web_based_call:
             final_prompt = update_prompt_with_context(system_prompt, context_data, language)
