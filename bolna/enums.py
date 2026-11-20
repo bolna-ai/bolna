@@ -17,6 +17,7 @@ class TelephonyProvider(str, Enum):
     EXOTEL = "exotel"
     PLIVO = "plivo"
     VOBIZ = "vobiz"
+    TELNYX = "telnyx"
     SIP_TRUNK = "sip-trunk"
     FREESWITCH = "freeswitch"  # linear16 16k in / 24k out (not ulaw/8k) — deliberately not a telephony_provider
     # Agent/execution label for calls on client or platform SIP trunks. Their audio is the 16 kHz
@@ -28,7 +29,7 @@ class TelephonyProvider(str, Enum):
     @classmethod
     def telephony_providers(cls):
         """Return only telephony providers (excluding default and database)."""
-        return [cls.TWILIO, cls.EXOTEL, cls.PLIVO, cls.VOBIZ, cls.SIP_TRUNK]
+        return [cls.TWILIO, cls.EXOTEL, cls.PLIVO, cls.VOBIZ, cls.TELNYX, cls.SIP_TRUNK]
 
     @classmethod
     def all_values(cls):
@@ -43,7 +44,7 @@ class TelephonyProvider(str, Enum):
     @classmethod
     def mulaw_providers(cls):
         """Telephony providers that stream mulaw; every other telephony provider streams linear16."""
-        return [cls.TWILIO, cls.SIP_TRUNK]
+        return [cls.TWILIO, cls.TELNYX, cls.SIP_TRUNK]
 
     @classmethod
     def mulaw_values(cls):
