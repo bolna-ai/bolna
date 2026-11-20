@@ -115,7 +115,7 @@ class TestGemini:
         assert payload.called_fun == TOOL
         assert (payload.url, payload.method, payload.param) == (URL, "post", TOOLS_PARAMS[TOOL]["param"])
         assert (payload.api_token, payload.headers) == ("Bearer tok", {"X-Api-Key": "key"})
-        assert payload.order_id == "A-100"
+        assert payload.arguments["order_id"] == "A-100"
 
     async def test_the_filler_is_the_configured_tools_own(self):
         filler = next(c for c in await self._stream(self._llm()) if c.function_name)
@@ -173,7 +173,7 @@ class TestChatCompletions:
         with patch("bolna.llms.tool_call_accumulator.convert_to_request_log"):
             payload = self._accumulator().build_api_payload({}, {}, "")
 
-        assert (payload.called_fun, payload.url, payload.order_id) == (TOOL, URL, "A-100")
+        assert (payload.called_fun, payload.url, payload.arguments["order_id"]) == (TOOL, URL, "A-100")
         assert payload.model_response[0]["function"]["name"] == TOOL
 
     def test_the_filler_is_the_configured_tools_own(self):
@@ -197,7 +197,7 @@ class TestResponsesApi:
         payload = next(c.data for c in chunks if c.is_function_call)
 
         assert (filler.data, filler.function_name) == (FILLER, TOOL)
-        assert (payload.called_fun, payload.url, payload.order_id) == (TOOL, URL, "A-100")
+        assert (payload.called_fun, payload.url, payload.arguments["order_id"]) == (TOOL, URL, "A-100")
         assert payload.model_response[0]["function"]["name"] == TOOL
 
     async def test_http_stream_resolves_the_filler_and_the_call(self):
@@ -240,4 +240,4 @@ class TestResponsesApi:
         )
 
         assert chunk is not None and chunk.is_function_call
-        assert (chunk.data.called_fun, chunk.data.url, chunk.data.order_id) == (TOOL, URL, "A-100")
+        assert (chunk.data.called_fun, chunk.data.url, chunk.data.arguments["order_id"]) == (TOOL, URL, "A-100")

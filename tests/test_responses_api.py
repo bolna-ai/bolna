@@ -214,7 +214,7 @@ class TestResponsesAPIStreaming:
         assert payload.called_fun == "get_weather"
         assert payload.tool_call_id == "call_xyz"
         assert payload.url == "https://api.example.com/weather"
-        assert payload.city == "NYC"  # parsed args merged in
+        assert payload.arguments["city"] == "NYC"  # parsed args remain data
         # model_response in Chat Completions format for task_manager compat
         assert payload.model_response[0]["function"]["name"] == "get_weather"
         assert payload.model_response[0]["id"] == "call_xyz"

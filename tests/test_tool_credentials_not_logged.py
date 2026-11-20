@@ -38,8 +38,7 @@ def _payload():
         model_args={"api_key": "byok-key", "messages": [{"role": "user", "content": "hi"}]},
         meta_info={"run_id": "r1", "sequence_id": 4, "turn_id": 2},
         called_fun="book_slot",
-        slot="3pm",
-        customer_name="Asha",
+        arguments={"slot": "3pm", "customer_name": "Asha"},
     )
 
 
@@ -55,9 +54,9 @@ def test_no_log_line_interpolates_a_whole_tool_or_llm_config():
     assert offenders == []
 
 
-def test_model_extra_holds_only_the_llm_arguments():
+def test_argument_mapping_holds_only_the_llm_arguments():
     # what the function-call log line prints in place of the payload
-    assert _payload().model_extra == {"slot": "3pm", "customer_name": "Asha"}
+    assert _payload().arguments == {"slot": "3pm", "customer_name": "Asha"}
 
 
 def test_header_names_keeps_the_keys_and_drops_the_values():
