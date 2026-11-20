@@ -229,6 +229,8 @@ class AzureLLM(OpenAICompatibleLLM):
 
         if not is_reasoning_model(self.model_family):
             model_args["stop"] = ["User:"]
+        elif model_args.get("reasoning_effort") != "none":  # temperature is a 400 above effort none
+            model_args.pop("temperature", None)
 
         if self.trigger_function_call:
             _tools = self._parse_tools(tools)
