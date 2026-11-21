@@ -64,6 +64,9 @@ class InterruptionManager:
         self._last_user_start_ts: float = -1
         self._pending_user_start_ts: float = -1  # snapshot of user_start paired with _adjusted_user_stop_ts
         self.user_bot_latencies: List[Dict] = []
+        # Arrival of the first below-threshold interim over agent audio, and when the caller last stopped speaking.
+        self.first_ignored_interim_ts: float = -1
+        self.last_speech_ended_ts: float = -1
 
         logger.info(
             f"InterruptionManager initialized: "
@@ -144,12 +147,17 @@ class InterruptionManager:
 
     # ── Speech lifecycle callbacks ────────────────────────────────────────────
 
-    def on_user_speech_started(self) -> None:
-        """Called when user starts speaking (first interim transcript received)."""
+    def on_user_speech_started(self, user_start_ts_wall: Optional[float] = None) -> None:
+        """Called when user starts speaking (first interim transcript received).
+
+        user_start_ts_wall is the provider's speech onset. The first interim lands an ASR delay after
+        it, so stamping arrival put a short utterance's start after its provider-measured end."""
         if not self.callee_speaking:
             self.callee_speaking = True
             self.callee_speaking_start_time = time.time()
-            self._last_user_start_ts = self.callee_speaking_start_time
+            # Providers replace the onset at each turn start, so a repeat is a later segment of the same turn.
+            onset_is_current = user_start_ts_wall is not None and user_start_ts_wall <= self.callee_speaking_start_time
+            self._last_user_start_ts = user_start_ts_wall if onset_is_current else self.callee_speaking_start_time
             logger.info("User started speaking")
 
     def on_interim_transcript_received(self) -> None:
@@ -175,6 +183,7 @@ class InterruptionManager:
         for user_bot_latencies; the former avoids vendor endpointing lag.
         """
         self.callee_speaking = False
+        self.last_speech_ended_ts = time.time()
         self.let_remaining_audio_pass_through = True
         self.time_since_first_interim_result = -1
         self.last_interim_ts = -1
@@ -194,7 +203,8 @@ class InterruptionManager:
             self.callee_speaking_start_time = -1  # prevent double-count on duplicate speech-ended signals
 
         if self._open_event is not None and self._open_event.get("user_end_s") is None:
-            self._open_event["user_end_s"] = now_s
+            # Same clock as the event's onset-based start.
+            self._open_event["user_end_s"] = user_stop_ts_wall if user_stop_ts_wall is not None else now_s
             self._open_event = None
 
         logger.info("User speech ended")
@@ -213,7 +223,7 @@ class InterruptionManager:
             "type": "user_interrupted_agent",
             "turn_id": self.turn_id,
             "asr_turn_id": asr_turn_id,
-            "user_start_s": self.callee_speaking_start_time if self.callee_speaking_start_time > 0 else None,
+            "user_start_s": self._last_user_start_ts if self.callee_speaking_start_time > 0 else None,
             "user_end_s": None,
             "recovery_completed": False,
         }
@@ -236,7 +246,7 @@ class InterruptionManager:
             "type": "agent_interrupted_user",
             "turn_id": self.turn_id,
             "asr_turn_id": asr_turn_id,
-            "user_start_s": self.callee_speaking_start_time if self.callee_speaking_start_time > 0 else None,
+            "user_start_s": self._last_user_start_ts if self.callee_speaking_start_time > 0 else None,
             "user_end_s": None,
             "recovery_completed": False,
         }
@@ -263,10 +273,16 @@ class InterruptionManager:
 
         if self._adjusted_user_stop_ts is not None:
             latency_ms = (now_s - self._adjusted_user_stop_ts) * 1000
+            # A start after the end belongs to speech begun since this utterance ended; keep the utterance's own.
+            user_start_ts = (
+                self._last_user_start_ts
+                if self._last_user_start_ts <= self._adjusted_user_stop_ts
+                else self._pending_user_start_ts
+            )
             self.user_bot_latencies.append(
                 {
                     "sequence_id": sequence_id,
-                    "user_start_s": self._last_user_start_ts if self._last_user_start_ts > 0 else None,
+                    "user_start_s": user_start_ts if user_start_ts > 0 else None,
                     "user_first_start_s": self._pending_user_start_ts if self._pending_user_start_ts > 0 else None,
                     "user_end_s": self._adjusted_user_stop_ts,
                     "agent_start_s": now_s,
@@ -461,6 +477,22 @@ class InterruptionManager:
     def is_user_speaking(self) -> bool:
         """Returns True if user is currently speaking."""
         return self.callee_speaking
+
+    def note_ignored_interim(self) -> None:
+        """An interim too short to barge in arrived over agent audio: the earliest sign the caller started."""
+        if self.first_ignored_interim_ts <= self.last_speech_ended_ts:
+            self.first_ignored_interim_ts = time.time()
+
+    def get_barge_in_onset(self, user_start_ts_wall: Optional[float] = None) -> Optional[float]:
+        """When the caller began talking over the agent in the current utterance, None if unknown.
+        No candidate is earlier than the speech, so the earliest is closest; any from before
+        the caller's last speech end belongs to an earlier utterance and is dropped."""
+        candidates = [
+            ts
+            for ts in (user_start_ts_wall, self.first_ignored_interim_ts)
+            if ts is not None and ts > 0 and ts > self.last_speech_ended_ts
+        ]
+        return min(candidates) if candidates else None
 
     def is_valid_sequence(self, sequence_id: int) -> bool:
         """Returns True if sequence_id is still valid."""

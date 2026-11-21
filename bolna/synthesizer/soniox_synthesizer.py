@@ -143,9 +143,8 @@ class SonioxSynthesizer(StreamSynthesizer):
     # ------------------------------------------------------------------
 
     def _stream_config(self, stream_id):
-        """The first frame of a stream: credentials and render settings together."""
+        """The first frame of a stream: render settings (credentials ride in the connect-time header)."""
         config = {
-            "api_key": self.api_key,
             "stream_id": stream_id,
             "model": self.model,
             "language": self.language,
@@ -163,7 +162,11 @@ class SonioxSynthesizer(StreamSynthesizer):
         try:
             start = time.perf_counter()
             ws = await asyncio.wait_for(
-                websockets.connect(self.ws_url, ssl=get_ssl_context(self.ws_url)),
+                websockets.connect(
+                    self.ws_url,
+                    additional_headers={"Authorization": f"Bearer {self.api_key}"},
+                    ssl=get_ssl_context(self.ws_url),
+                ),
                 timeout=10.0,
             )
             elapsed = round((time.perf_counter() - start) * 1000)

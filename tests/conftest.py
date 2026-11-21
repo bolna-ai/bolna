@@ -10,8 +10,13 @@ os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 # kwarg to pass one. Overwritten rather than defaulted, so a developer's .env can never point a
 # test at a live account. Tests needing any other provider credential supply it themselves.
 os.environ["OPENAI_API_KEY"] = "test-key"
+# Voicemail detection always runs on the platform Azure OpenAI deployment, whose client refuses to start
+# without an endpoint and key. Overwritten for the same reason.
+os.environ["AZURE_OPENAI_BASE_URL"] = "https://test-resource.openai.azure.com"
+os.environ["AZURE_OPENAI_API_KEY"] = "test-azure-key"
 
 import pytest  # noqa: E402
+from aiohttp import web
 from unittest.mock import AsyncMock, MagicMock
 
 from bolna.agent_manager.task_manager import TaskManager
@@ -73,3 +78,24 @@ def language_switch_tm(monkeypatch):
         return tm
 
     return _build
+
+
+@pytest.fixture
+async def local_http_server():
+    """HTTP server on 127.0.0.1 answering "ok", or a 302 for a path under /redirect; yields its port and the
+    paths it was asked for."""
+    paths = []
+
+    async def handle(request):
+        paths.append(request.path)
+        if request.path.startswith("/redirect"):
+            return web.Response(status=302, headers={"Location": "/landed"})
+        return web.Response(text="ok")
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 0).start()
+    yield runner.addresses[0][1], paths
+    await runner.cleanup()

@@ -28,6 +28,8 @@ EXPECTED_FIELDS = {
         "similarity_boost": False,
         "speed": False,
         "style": False,
+        "clone_strength": False,
+        "pronunciation_dictionary_locators": False,
     },
     "openai": {"voice": True, "model": True, "speed": False},
     "deepgram": {
@@ -45,6 +47,8 @@ EXPECTED_FIELDS = {
         "language": True,
         "speed": False,
         "volume": False,
+        "pronunciation_dict_id": False,
+        "pronunciation_dict_fingerprint": False,
     },
     "smallest": {"voice": True, "voice_id": True, "model": True, "language": True, "speed": False},
     "sarvam": {
@@ -86,10 +90,11 @@ EXPECTED_FIELDS = {
         "model": False,
         "temperature": False,
         "acoustic_temperature": False,
-        "max_new_tokens": False,
         "audio_quality": False,
         "chunk_length_schedule": False,
     },
+    "navana": {"voice": True, "voice_id": True, "model": True, "language": True},
+    "custom": {"voice": True, "model": True, "speed": False, "extra_body": False},
 }
 
 
@@ -138,6 +143,7 @@ def test_elevenlabs_control_defaults_are_stable():
     assert config.similarity_boost == 0.75
     assert config.speed == 1.0
     assert config.style == 0.0
+    assert config.clone_strength is None
 
 
 @pytest.mark.parametrize(
@@ -151,6 +157,8 @@ def test_elevenlabs_control_defaults_are_stable():
         ("speed", 1.21),
         ("style", -0.01),
         ("style", 1.01),
+        ("clone_strength", -0.01),
+        ("clone_strength", 1.01),
     ],
 )
 def test_elevenlabs_rejects_out_of_range_controls(field, value):

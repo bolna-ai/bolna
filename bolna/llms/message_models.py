@@ -33,6 +33,7 @@ INTERNAL_MESSAGE_KEYS = frozenset(
         "response_uid",
         "asr_turn_id",
         "sequence_id",
+        "node",
         "message_category",
         "exclude_from_llm",
         "exclude_from_transcript",

@@ -143,6 +143,14 @@ def test_text_already_streamed_suppresses_the_filler():
     assert acc.get_pre_call_message({}) is None
 
 
+def test_whitespace_before_the_call_does_not_suppress_the_filler():
+    acc = _accumulator()
+    acc.note_content("")
+    acc.note_content("\n ")
+    acc.process_delta([_delta(0, "custom", "{}", call_id="c")])
+    assert acc.get_pre_call_message({})[0] == "One moment please"
+
+
 def test_a_per_tool_message_overrides_the_default():
     acc = _accumulator()
     acc.process_delta([_delta(0, "custom", "{}", call_id="c")])

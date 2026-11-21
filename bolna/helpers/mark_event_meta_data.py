@@ -248,20 +248,28 @@ class MarkEventMetaData:
         return summary.model_dump()
 
     def fetch_cleared_mark_event_data(self):
-        return self.previous_mark_event_meta_data
+        """Consumed once: a clear skipped by a failed send must not hand back the previous barge-in's marks."""
+        cleared = self.previous_mark_event_meta_data
+        self.previous_mark_event_meta_data = {}
+        return cleared
+
+    def get_last_acked_mark_for_turn(self, turn_id) -> Optional[Dict]:
+        """The turn's most recently ACKed chunk; its ack_ts is the playback clock's last confirmed point."""
+        if turn_id is None:
+            return None
+        acked = [
+            data
+            for data in self._mark_history.values()
+            if data.get("acked") and data.get("turn_id") == turn_id and data.get("ack_ts")
+        ]
+        return max(acked, key=lambda data: data["ack_ts"]) if acked else None
 
     def get_last_ack_ts_for_turn(self, turn_id) -> Optional[float]:
         """Wall-clock of the turn's last ACKed chunk — the playback clock's last confirmed point.
         audio_playing_until can't serve here: it is a send-time estimate, not per-turn, and is
         zeroed by drop_playout_estimate; crediting needs the turn's last confirmed instant."""
-        if turn_id is None:
-            return None
-        ack_times = [
-            data.get("ack_ts")
-            for data in self._mark_history.values()
-            if data.get("acked") and data.get("turn_id") == turn_id and data.get("ack_ts")
-        ]
-        return max(ack_times) if ack_times else None
+        last_acked = self.get_last_acked_mark_for_turn(turn_id)
+        return last_acked["ack_ts"] if last_acked else None
 
     def get_chunk_marks(self) -> List[Dict]:
         """Per-mark wall-clock detail for post-call audio analysis.

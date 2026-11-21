@@ -67,6 +67,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         self.speech_model = LEGACY_SPEECH_MODEL_ALIASES.get(model, model)
         self.is_legacy_streaming_model = self.speech_model in LEGACY_STREAMING_MODELS
         self.is_universal_3_model = (self.speech_model or "").startswith("universal-3")
+        self.hinglish_mode = kwargs.get("hinglish_mode")
         self.sampling_rate = int(sampling_rate)
         self.encoding = encoding
         self.format_turns = format_turns
@@ -186,7 +187,8 @@ class AssemblyAITranscriber(BaseTranscriber):
             if self.speech_model == "universal-streaming-english" and base_language != "en":
                 logger.warning(f"AssemblyAI {self.speech_model} only supports English, got {self.language}")
         elif base_language in ASSEMBLYAI_SUPPORTED_LANGUAGES:
-            connection_params["language_codes"] = json.dumps([base_language])
+            hinglish = self.hinglish_mode and base_language == "hi" and self.speech_model == "universal-3-6-pro"
+            connection_params["language_codes"] = json.dumps(["hi", "en"] if hinglish else [base_language])
         else:
             logger.warning(f"AssemblyAI {self.speech_model} has no language code for {self.language}, auto-detecting")
 
@@ -429,6 +431,7 @@ class AssemblyAITranscriber(BaseTranscriber):
                         # Ahead of the audio, so the reply is in context before the caller answers it.
                         await self._send_pending_configuration(ws)
                         await ws.send(audio_data)
+                        self.count_audio_sent(len(audio_data), self.sampling_rate)
                     except ConnectionClosedError as e:
                         logger.error(f"Connection closed while sending data: {e}")
                         break
@@ -574,8 +577,8 @@ class AssemblyAITranscriber(BaseTranscriber):
                     audio_duration = msg.get("audio_duration_seconds", 0)
                     session_duration = msg.get("session_duration_seconds", 0)
                     logger.info(f"Audio duration: {audio_duration}s, Session duration: {session_duration}s")
-                    self.meta_info = {**(self.meta_info or {}), "transcriber_duration": audio_duration}
-                    yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
+                    # transcribe() emits the single closing packet; a second one here was billed twice.
+                    self.provider_audio_duration_s = msg.get("audio_duration_seconds")
                     return
 
                 elif message_type == "Error":
@@ -641,6 +644,7 @@ class AssemblyAITranscriber(BaseTranscriber):
     async def transcribe(self):
         """Main transcription method"""
         assemblyai_ws = None
+        self.reset_billed_audio()
         try:
             start_time = time.perf_counter()
 
@@ -702,7 +706,6 @@ class AssemblyAITranscriber(BaseTranscriber):
             if hasattr(self, "heartbeat_task") and self.heartbeat_task is not None:
                 self.heartbeat_task.cancel()
 
-            meta = dict(getattr(self, "meta_info", None) or {})
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )

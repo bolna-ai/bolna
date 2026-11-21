@@ -30,11 +30,12 @@ def _tm(*, buffer_age, speaking, buffered_lang="hi", active="mr", segments=None)
     pool.lid_buffer_language.return_value = buffered_lang
     pool.lid_buffer_event.return_value = None
     pool.lid_buffer_segments.return_value = segments or [{"lang": buffered_lang, "prob": 0.9, "audio_s": 1.2}]
-    tm.tools = {"transcriber": pool}
+    tm.tools = {"transcriber": pool, "input": MagicMock(**{"welcome_message_played.return_value": True})}
 
     tm._should_ignore_transcriber_input = TaskManager._should_ignore_transcriber_input.__get__(tm, TaskManager)
     tm._TaskManager__lid_idle_watcher = TaskManager._TaskManager__lid_idle_watcher.__get__(tm, TaskManager)
     tm._TaskManager__buffered_language_evidence = TaskManager._TaskManager__buffered_language_evidence
+    tm._TaskManager__spoken_over_welcome = TaskManager._TaskManager__spoken_over_welcome.__get__(tm, TaskManager)
     return tm
 
 

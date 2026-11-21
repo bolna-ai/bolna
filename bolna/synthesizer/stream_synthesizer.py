@@ -45,6 +45,8 @@ class StreamSynthesizer(BaseSynthesizer):
 
         # WebSocket state
         self.websocket = None
+        # Set whenever a fresh socket is assigned, so a sender waiting in _wait_for_ws wakes on the connect.
+        self.websocket_ready = asyncio.Event()
         self.sender_task = None
         self.conversation_ended = False
         self.connection_error = None
@@ -135,7 +137,12 @@ class StreamSynthesizer(BaseSynthesizer):
                 )
                 return
             logger.info(f"Waiting for {self.provider_name} WebSocket connection...")
-            await asyncio.sleep(poll_interval)
+            # Woken by the connect itself; the interval only bounds how stale the checks above can get.
+            self.websocket_ready.clear()
+            try:
+                await asyncio.wait_for(self.websocket_ready.wait(), timeout=poll_interval)
+            except asyncio.TimeoutError:
+                pass
 
     async def _send_json(self, payload):
         """Send a JSON payload over the WebSocket. Sets connection_error on failure."""
@@ -161,12 +168,13 @@ class StreamSynthesizer(BaseSynthesizer):
         text = message.get("data")
         self.current_text = text
         self.synthesized_characters += len(text) if text else 0
-        self.current_sequence_chars += len(text) if text else 0
         self.meta_info = copy.deepcopy(meta_info)
         meta_info["text"] = text
 
         # Stamp turn start on first push of a new turn
         self._stamp_turn_start(meta_info)
+        # After the stamp, which may close an abandoned turn and zero the count.
+        self.current_sequence_chars += len(text) if text else 0
 
         # Pre-push hook (e.g. context_id); Cartesia may defer end_of_llm_stream, so read it after.
         self._on_push(meta_info, text)
@@ -177,6 +185,8 @@ class StreamSynthesizer(BaseSynthesizer):
 
     def _stamp_turn_start(self, meta_info):
         """Only stamp on the first push of a new turn (don't re-stamp on subsequent chunks)."""
+        if self.open_turn_is_retired(meta_info.get("sequence_id")):
+            self.abandon_open_turn()
         if self.current_turn_start_time is None:
             # Drop leftover entries from a previous turn so this turn's first audio
             # chunk doesn't pop a stale entry and inherit a dead sequence_id (which
@@ -239,6 +249,18 @@ class StreamSynthesizer(BaseSynthesizer):
                 raise Exception(self.connection_error)
 
             audio, extra_meta = self._unpack_receiver_message(raw_item)
+
+            # An abandoned turn's eos goes out under its own retired sequence, so the downstream guard
+            # settles it, without taking the next turn's meta.
+            if audio == b"\x00" and extra_meta.get("retired_sequence_id") is not None:
+                logger.info(f"{self.provider_name}: eos for abandoned seq={extra_meta['retired_sequence_id']}")
+                retired_meta = {
+                    "sequence_id": extra_meta["retired_sequence_id"],
+                    "end_of_synthesizer_stream": True,
+                    "format": self._get_audio_format(),
+                }
+                yield create_ws_data_packet(audio, retired_meta)
+                continue
 
             # Pop meta_info from the text_queue when available
             if self.text_queue:
@@ -315,17 +337,55 @@ class StreamSynthesizer(BaseSynthesizer):
                         "message_category": self.current_message_category,
                     }
                 )
-                self.current_turn_start_time = None
-                self.current_turn_id = None
-                self.current_sequence_id = None
-                self.current_message_category = None
-                self.current_tts_start_ms = None
-                self.ws_send_time = None
-                self.current_turn_ttfb = None
-                self.current_sequence_chars = 0
-                self.current_turn_socket = None
+                self.reset_turn_state()
         except Exception:
             pass
+
+    def reset_turn_state(self):
+        self.current_turn_start_time = None
+        self.current_turn_id = None
+        self.current_sequence_id = None
+        self.current_message_category = None
+        self.current_tts_start_ms = None
+        self.ws_send_time = None
+        self.current_turn_ttfb = None
+        self.current_sequence_chars = 0
+        self.current_turn_socket = None
+
+    def open_turn_is_retired(self, next_sequence_id):
+        """True when a push for another sequence finds the open turn's sequence already retired."""
+        open_sequence_id = self.current_sequence_id
+        if self.current_turn_start_time is None or open_sequence_id in (None, -1, next_sequence_id):
+            return False
+        try:
+            return not self.should_synthesize_response(open_sequence_id)
+        except Exception:
+            return False
+
+    def call_relative_now_ms(self):
+        call_start_ms = getattr(self.task_manager_instance, "conversation_start_init_ts", None)
+        return round(time.time() * 1000 - call_start_ms, 2) if isinstance(call_start_ms, (int, float)) else None
+
+    def abandon_open_turn(self):
+        """Close a turn cut off before its eos, so the next sequence does not inherit its start.
+
+        Without this, the next push found the timer still running and reused this turn's tts_start and
+        first-result latency."""
+        if self.current_turn_start_time is None:
+            return
+        entry = {
+            "turn_id": self.current_turn_id,
+            "sequence_id": self.current_sequence_id,
+            "tts_start_ms": self.current_tts_start_ms,
+            "characters": self.current_sequence_chars,
+            "message_category": self.current_message_category,
+            "cancelled_at_ms": self.call_relative_now_ms(),
+        }
+        if self.current_turn_ttfb is not None:
+            entry["first_result_latency_ms"] = round(self.current_turn_ttfb * 1000)
+        self._upsert_turn_latency(entry)
+        logger.info(f"{self.provider_name}: abandoned open turn seq={self.current_sequence_id}")
+        self.reset_turn_state()
 
     # ------------------------------------------------------------------
     # monitor_connection() — shared reconnect loop
@@ -350,8 +410,19 @@ class StreamSynthesizer(BaseSynthesizer):
                         break
                 else:
                     self.websocket = result
+                    self.websocket_ready.set()
                     consecutive_failures = 0
             await asyncio.sleep(1)
+
+    async def close_connection(self):
+        """Close the socket without ending the synthesizer: a multilingual leg reopens it on a later switch."""
+        ws, self.websocket = self.websocket, None
+        if ws is None:
+            return
+        try:
+            await ws.close()
+        except Exception as e:
+            logger.info(f"Error closing idle {self.provider_name} WebSocket: {e}")
 
     # ------------------------------------------------------------------
     # cleanup() — cancel tasks and close WS

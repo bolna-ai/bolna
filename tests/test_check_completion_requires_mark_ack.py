@@ -3,10 +3,13 @@
 import asyncio
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from bolna.agent_manager.task_manager import TaskManager
+from bolna.agent_types.graph_agent import GraphAgent
 from bolna.constants import STALL_HANGUP_HARD_CAP_S
 from bolna.enums import HangupReason
+from bolna.helpers.expression_evaluator import evaluate_edge_expression
 from bolna.input_handlers.telephony import TelephonyInputHandler
 
 SILENT = STALL_HANGUP_HARD_CAP_S + 600
@@ -22,6 +25,7 @@ def _telephony_task_manager(last_transmitted_timestamp, *, hang_conversation_aft
     now = time.time()
     tm.is_web_based_call = False
     tm.has_transfer = False
+    tm.transfer_call_params = {"provider": "plivo"}
     tm.start_time = now - age
     tm.stream_sid_ts = None
     tm.task_config = {
@@ -46,6 +50,7 @@ def _telephony_task_manager(last_transmitted_timestamp, *, hang_conversation_aft
     tm.trigger_user_online_message_after = 6
     tm.asked_if_user_is_still_there = False
     tm.tools = {"input": SimpleNamespace(is_audio_being_played_to_user=lambda: False)}
+    tm.opening_node = None
     tm.hangup_detail = None
     tm.hangups = []
     tm.ended = []
@@ -138,6 +143,15 @@ async def test_call_terminate_caps_a_telephony_call(monkeypatch):
     assert tm.hangup_detail == HangupReason.MAX_DURATION_REACHED
 
 
+async def test_call_terminate_caps_a_trunk_call(monkeypatch):
+    # A trunk call's audio rides the freeswitch fork, which is not a carrier handler.
+    tm = _telephony_task_manager(time.time(), hang_conversation_after=0, call_terminate=600, age=900)
+    tm.task_config["tools_config"]["input"]["provider"] = "freeswitch"
+    tm.transfer_call_params = {"provider": "trunk"}
+    assert await _drive(tm, monkeypatch) == "loop_exited"
+    assert tm.hangup_detail == HangupReason.MAX_DURATION_REACHED
+
+
 async def test_call_terminate_does_not_cut_a_call_below_its_cap(monkeypatch):
     tm = _telephony_task_manager(time.time(), hang_conversation_after=0, call_terminate=600, age=120)
     assert await _drive(tm, monkeypatch) == "still_spinning"
@@ -165,6 +179,154 @@ async def test_an_unset_call_terminate_caps_nothing(monkeypatch):
     tm = _telephony_task_manager(time.time(), hang_conversation_after=0, call_terminate=0, age=90000)
     assert await _drive(tm, monkeypatch) == "still_spinning"
     assert tm.ended == []
+
+
+class _SilentCallGraph:
+    """Graph agent stand-in for a silent caller: each [silence] turn bumps _silence_repeats and
+    follows a matching expression edge, as GraphAgent's routing does. The caller never speaks, so
+    every node turn is a silence turn and _node_turns equals _silence_repeats."""
+
+    get_node_by_id = GraphAgent.get_node_by_id
+    silence_exit_threshold = GraphAgent.silence_exit_threshold
+    silence_exit_pending = GraphAgent.silence_exit_pending
+
+    def __init__(self, nodes, start):
+        self.config = {"nodes": nodes}
+        self.current_node_id = start
+        self._silence_repeats = 0
+
+    def silence_turn(self):
+        self._silence_repeats += 1
+        context = {"_silence_repeats": self._silence_repeats, "_node_turns": self._silence_repeats}
+        for edge in self.get_node_by_id(self.current_node_id).get("edges", []):
+            if evaluate_edge_expression(edge, context):
+                self.current_node_id = edge["to_node_id"]
+                self._silence_repeats = 0
+                return
+
+
+def _counter_edge(variable, to_node_id, at_least):
+    return {
+        "to_node_id": to_node_id,
+        "condition_type": "expression",
+        "expression": {"conditions": [{"variable": variable, "operator": "gte", "value": at_least}]},
+    }
+
+
+def _silence_edge(to_node_id, at_least):
+    return _counter_edge("_silence_repeats", to_node_id, at_least)
+
+
+def _node(node_id, *edges, repeat_after_silence_seconds=8):
+    return {"id": node_id, "repeat_after_silence_seconds": repeat_after_silence_seconds, "edges": list(edges)}
+
+
+GOODBYE = _node("goodbye", repeat_after_silence_seconds=None)
+
+
+async def _run_silent_call(
+    monkeypatch,
+    nodes,
+    *,
+    hang_conversation_after=20,
+    max_silence_repeats=2,
+    user_speaks_at=None,
+    horizon_s=300,
+    welcome_played=True,
+):
+    """Run the real completion loop on a fake clock for a caller who stays silent (optionally speaking
+    once at user_speaks_at seconds). Returns the events: ("reprompt"|"user"|"hangup", node)."""
+    clock = {"now": 1_000_000.0}
+    started = clock["now"]
+    monkeypatch.setattr(time, "time", lambda: clock["now"])
+    graph = _SilentCallGraph(nodes, nodes[0]["id"])
+    tm = _telephony_task_manager(clock["now"], hang_conversation_after=hang_conversation_after, age=30)
+    tm.repeat_after_silence_seconds = nodes[0]["repeat_after_silence_seconds"]
+    tm.max_silence_repeats = max_silence_repeats
+    tm._silence_repeats_sent = 0
+    tm.check_if_user_online = False
+    if not welcome_played:
+        tm.opening_node = nodes[0]
+        tm.tools["input"].welcome_message_played = lambda: False
+    tm.tools["llm_agent"] = graph
+    tm.tools["output"] = SimpleNamespace(handle_interruption=AsyncMock())
+    events = []
+
+    def agent_spoke():
+        tm.last_transmitted_timestamp = clock["now"] + 3  # the reply plays for ~3s
+        tm.asked_if_user_is_still_there = False
+
+    async def inject(_message):
+        events.append(("reprompt", graph.current_node_id))
+        graph.silence_turn()
+        tm.repeat_after_silence_seconds = graph.get_node_by_id(graph.current_node_id)["repeat_after_silence_seconds"]
+        agent_spoke()
+
+    async def hangup(_reason):
+        events.append(("hangup", graph.current_node_id))
+
+    tm._inject_and_run_llm = inject
+    tm._hangup_after_goodbye = hangup
+
+    real_sleep = asyncio.sleep
+
+    async def clock_sleep(delay, *args, **kwargs):
+        clock["now"] += delay
+        if clock["now"] - started == user_speaks_at:
+            tm._note_caller_speech()
+            events.append(("user", graph.current_node_id))
+            agent_spoke()
+        if clock["now"] - started > horizon_s:
+            raise _TickLimit
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", clock_sleep)
+    try:
+        await TaskManager._TaskManager__check_for_completion(tm)
+    except _TickLimit:
+        events.append(("still_running", graph.current_node_id))
+    return events
+
+
+async def test_a_silent_caller_on_a_node_without_a_silence_exit_is_hung_up(monkeypatch):
+    # online check 6s, re-prompt 8s, hangup 20s: uncapped, the re-prompt keeps resetting the clock forever
+    events = await _run_silent_call(monkeypatch, [_node("faq")])
+    assert events == [("reprompt", "faq"), ("reprompt", "faq"), ("hangup", "faq")]
+
+
+async def test_a_silence_exit_above_the_cap_still_fires(monkeypatch):
+    events = await _run_silent_call(monkeypatch, [_node("faq", _silence_edge("goodbye", 3)), GOODBYE])
+    assert events == [("reprompt", "faq")] * 3 + [("hangup", "goodbye")]
+
+
+async def test_a_node_reached_through_a_silence_edge_gets_its_own_reprompts(monkeypatch):
+    nodes = [_node("a", _silence_edge("b", 2)), _node("b", _silence_edge("goodbye", 2)), GOODBYE]
+    events = await _run_silent_call(monkeypatch, nodes)
+    assert events == [("reprompt", "a"), ("reprompt", "a"), ("reprompt", "b"), ("reprompt", "b"), ("hangup", "goodbye")]
+
+
+async def test_a_silence_turn_that_moves_to_the_next_question_grants_no_new_reprompts(monkeypatch):
+    # each question moves on after two node turns, and a [silence] turn counts as one
+    questions = [_node(f"q{i}", _counter_edge("_node_turns", f"q{i + 1}", 2)) for i in range(10)] + [_node("q10")]
+    events = await _run_silent_call(monkeypatch, questions)
+    assert events == [("reprompt", "q0"), ("reprompt", "q0"), ("hangup", "q1")]
+
+
+async def test_the_user_speaking_starts_a_new_silence_period(monkeypatch):
+    events = await _run_silent_call(monkeypatch, [_node("faq")], user_speaks_at=30)
+    assert [kind for kind, _ in events] == ["reprompt", "reprompt", "user", "reprompt", "reprompt", "hangup"]
+
+
+async def test_an_opening_node_does_not_reprompt_before_its_message_has_played(monkeypatch):
+    events = await _run_silent_call(monkeypatch, [_node("greeting")], welcome_played=False)
+    assert events == [("hangup", "greeting")]
+
+
+async def test_no_cap_when_the_silence_hangup_is_off(monkeypatch):
+    # with hangup_after_silence 0 nothing would end the call after the cap, only dead air
+    events = await _run_silent_call(monkeypatch, [_node("faq")], hang_conversation_after=0, horizon_s=120)
+    assert events[-1] == ("still_running", "faq")
+    assert [kind for kind, _ in events].count("reprompt") > 2
 
 
 def test_hangup_uses_the_known_sid_when_no_start_event_arrived():

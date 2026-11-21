@@ -1,7 +1,9 @@
 """Cartesia context_id rules: a finalized utterance closes its context, next push opens a fresh
 one — except the handoff doesn't finalize, so the reply continues it."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+from websockets.protocol import State
 
 from bolna.synthesizer.cartesia_synthesizer import CartesiaSynthesizer
 
@@ -64,3 +66,32 @@ def test_turn_change_still_opens_new_context_midstream():
     c1 = s.context_id
     _push(s, {"sequence_id": 2, "turn_id": 2, "end_of_llm_stream": False})
     assert s.context_id != c1
+
+
+def interrupted_synth(websocket):
+    s = CartesiaSynthesizer.__new__(CartesiaSynthesizer)
+    s.websocket = websocket
+    s.context_id = "ctx-1"
+    s.context_ids_to_ignore = set()
+    s.current_turn_start_time = 1.0
+    return s
+
+
+async def test_barge_in_before_the_socket_connects_still_starts_a_fresh_turn():
+    # A multilingual voice opened at the switch can still be connecting when the caller barges in.
+    s = interrupted_synth(websocket=None)
+    await CartesiaSynthesizer.handle_interruption(s)
+    assert s.context_id is None
+    assert s.current_turn_start_time is None
+    assert "ctx-1" in s.context_ids_to_ignore
+
+
+async def test_barge_in_on_a_connected_socket_cancels_the_context():
+    socket = MagicMock()
+    socket.state = State.OPEN
+    socket.send = AsyncMock()
+    s = interrupted_synth(websocket=socket)
+    await CartesiaSynthesizer.handle_interruption(s)
+    socket.send.assert_awaited_once()
+    assert '"cancel": true' in socket.send.await_args.args[0]
+    assert s.context_id is None and s.current_turn_start_time is None

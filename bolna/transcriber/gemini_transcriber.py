@@ -90,8 +90,6 @@ class GeminiTranscriber(BaseTranscriber):
         self.connection_error = None
         self.audio_submitted = False
         self._eos_received = False
-        # Gemini Live reports no billed duration, so bill on the audio actually streamed.
-        self.audio_duration_s = 0.0
 
         # Per-turn transcript state
         self.final_transcript = ""
@@ -215,7 +213,7 @@ class GeminiTranscriber(BaseTranscriber):
                 data = ws_data_packet.get("data")
                 if not data:
                     continue
-                self.audio_duration_s += len(data) / ((1 if self.encoding == "mulaw" else 2) * self.sampling_rate)
+                self.count_audio_sent(len(data), self.sampling_rate, mulaw=self.encoding == "mulaw")
                 try:
                     pcm = self._to_gemini_pcm(data)
                     await ws.send(
@@ -445,6 +443,7 @@ class GeminiTranscriber(BaseTranscriber):
     async def transcribe(self):
         """Stream until eos or shutdown, reopening a fresh session across the Live API's ~10 min cap."""
         start_time = timestamp_ms()
+        self.reset_billed_audio()
         self.utterance_timeout_task = asyncio.create_task(self.monitor_utterance_timeout())
         try:
             while self.connection_on and not self._eos_received:
@@ -498,8 +497,6 @@ class GeminiTranscriber(BaseTranscriber):
                 self.utterance_timeout_task.cancel()
             if self.sender_task is not None:
                 self.sender_task.cancel()
-            meta = dict(getattr(self, "meta_info", None) or {})
-            meta["transcriber_duration"] = round(self.audio_duration_s, 4)
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )

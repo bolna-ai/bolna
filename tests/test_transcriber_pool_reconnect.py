@@ -98,7 +98,8 @@ async def test_switch_does_not_reconnect_dropped_target_after_eos():
     pool.call_ended = True
     await pool.switch("hi")
     transcribers["hi"].run.assert_not_awaited()
-    assert pool.active_label == "hi"
+    # Nor does it switch: eos went to the active leg, and only that leg can deliver the close that ends the call.
+    assert pool.active_label == "ta"
 
 
 async def test_reconnect_clears_a_stale_connection_error():

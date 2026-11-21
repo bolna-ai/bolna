@@ -135,8 +135,9 @@ def test_sender_does_not_close_when_not_end_of_stream():
     synth.context_id = "ctx-live"
     synth.websocket = FakeWS([])
 
-    asyncio.run(synth.sender("some words", sequence_id=1, end_of_llm_stream=False))
+    asyncio.run(synth.sender("Some words that finish a sentence. And more", sequence_id=1, end_of_llm_stream=False))
 
+    assert synth.websocket.sent
     assert not any(m.get("close_context") for m in synth.websocket.sent)
     assert synth.context_id == "ctx-live"
 

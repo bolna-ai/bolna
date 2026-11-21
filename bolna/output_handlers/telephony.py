@@ -50,6 +50,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
     async def handle(self, ws_data_packet):
         if self._closed:
             return
+        sent = False
         try:
             audio_chunk = ws_data_packet.get("data")
             meta_info = ws_data_packet.get("meta_info")
@@ -62,7 +63,9 @@ class TelephonyOutputHandler(DefaultOutputHandler):
 
             try:
                 if len(audio_chunk) == 1:
-                    audio_chunk += b"\x00"
+                    # A lone mu-law sample is repeated: a 0x00 pad decodes to full-scale negative, a click.
+                    is_mulaw_sample = audio_chunk != b"\x00" and meta_info.get("format") == "mulaw"
+                    audio_chunk += audio_chunk if is_mulaw_sample else b"\x00"
 
                 if audio_chunk and self.stream_sid and len(audio_chunk) != 1:
                     if audio_chunk != b"\x00\x00":
@@ -97,6 +100,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                             audio_format = "wav"
                         media_message = await self.form_media_message(audio_chunk, audio_format)
                         await self._send_text(json.dumps(media_message))
+                        sent = True
                         if (
                             meta_info.get("message_category", "") == "agent_welcome_message"
                             and not self.welcome_message_sent_ts
@@ -144,3 +148,4 @@ class TelephonyOutputHandler(DefaultOutputHandler):
         except Exception as e:
             self._closed = True
             logger.debug(f"WebSocket handling failed (client disconnected): {e}")
+        return sent

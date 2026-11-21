@@ -11,7 +11,7 @@ from bolna.helpers.rag_service_client import RAGServiceClientSingleton
 from bolna.helpers.function_calling_helpers import guard_llm_base_url
 from bolna.helpers.utils import format_messages
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
-from bolna.llms import OpenAiLLM
+from bolna.llms import AzureLLM, OpenAiLLM
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 
 logger = configure_logger(__name__)
@@ -40,7 +40,10 @@ class KnowledgeBaseAgent(BaseAgent):
 
         # Separate LLM for checking if call should end
         self.conversation_completion_llm = OpenAiLLM(model=os.getenv("CHECK_FOR_COMPLETION_LLM", self.llm_model))
-        self.voicemail_llm = OpenAiLLM(model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"))
+        self.voicemail_llm = AzureLLM(
+            model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"),
+            base_url=os.getenv("AZURE_OPENAI_BASE_URL") or os.getenv("AZURE_OPENAI_ENDPOINT"),
+        )
         # RAG configuration
         self.rag_config = self._initialize_rag_config()
         self.rag_server_url = os.getenv("RAG_SERVER_URL", "http://localhost:8000")
@@ -61,6 +64,7 @@ class KnowledgeBaseAgent(BaseAgent):
                 "temperature": self.config.get("temperature", 0.7),
                 "max_tokens": self.config.get("max_tokens", 150),
                 "provider": provider,
+                "run_id": self.config.get("execution_id"),
             }
 
             for key in [
@@ -78,6 +82,7 @@ class KnowledgeBaseAgent(BaseAgent):
                 "compact_threshold",
                 "overflow_llm",
                 "extra_body",
+                "openai_model_endpoints",
             ]:
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]

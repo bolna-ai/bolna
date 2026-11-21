@@ -170,6 +170,7 @@ async def test_an_empty_turn_names_the_finish_reason():
     tm.tools = {"input": MagicMock(reset_response_heard_by_user=MagicMock())}
     tm._stamp_llm_latency_dict = MagicMock()
     tm._inject_language_instruction = lambda messages: messages
+    tm.prompt_transcript_due = lambda speculative=False: False
     tm._handle_llm_output = AsyncMock()
     tm._TaskManager__process_stop_words = lambda data, meta_info: data
     tm._TaskManager__store_into_history = MagicMock()
@@ -234,6 +235,7 @@ async def test_openai_chat_stream_stashes_the_finish_reason():
 async def test_azure_chat_stream_stashes_the_finish_reason():
     llm = stub_chat_llm()
     llm._create_completion = AsyncMock(return_value=(stream_of([chat_chunk(), chat_chunk("length")]), False))
+    llm._overflow_on_early_drop = AzureLLM._overflow_on_early_drop.__get__(llm)
     meta_info = {"sequence_id": 4}
     await drain(AzureLLM._generate_stream_chat(llm, [{"role": "user", "content": "hi"}], meta_info=meta_info))
     assert meta_info["llm_finish_reason"] == "length"

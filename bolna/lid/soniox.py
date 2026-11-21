@@ -50,7 +50,6 @@ class SonioxLID(LIDBackend):
 
     def _build_config(self) -> dict:
         return build_soniox_config(
-            self._api_key,
             self._MODEL,
             self._audio_format,
             self._input_sr,
@@ -128,7 +127,11 @@ class SonioxLID(LIDBackend):
 
         url = soniox_ws_url(self._host)
         logger.info(f"SonioxLID: connecting to {url}")
-        self._ws = await ws_lib.connect(url, ssl=get_ssl_context(url))
+        self._ws = await ws_lib.connect(
+            url,
+            additional_headers={"Authorization": f"Bearer {self._api_key}"},
+            ssl=get_ssl_context(url),
+        )
         await self._ws.send(json.dumps(self._build_config()))
         self._sender_task = asyncio.create_task(self._sender_loop())
         self._receiver_task = asyncio.create_task(self._receiver_loop())

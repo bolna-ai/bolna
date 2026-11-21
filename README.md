@@ -282,7 +282,6 @@ For LLMs hosted via VLLM, add the following to the `.env` file:<br>
 
 For Atlas Cloud, set `provider="atlascloud"` in the LLM configuration and add:<br>
 `ATLASCLOUD_API_KEY`: Atlas Cloud API key<br>
-`ATLASCLOUD_API_BASE`: Optional API base URL (defaults to `https://api.atlascloud.ai/v1`)<br>
 If no model is specified, the provider uses `qwen/qwen3.5-397b-a17b`.
 
 </details>
@@ -304,6 +303,8 @@ https://github.com/bolna-ai/bolna/blob/c8a0d1428793d4df29133119e354bc2f85a7ca76/
 | Smallest   | `SMALLEST_API_KEY`                            |
 | Maya       | `MAYA_API_KEY`                            |
 | Kalpa      | `KALPA_API_KEY`                            |
+| Navana     | `NAVANA_API_KEY`                            |
+| Custom (the customer's own server, OpenAI speech API) | None: the platform injects the endpoint (`synthesizer_base_url`) and key (`synthesizer_key`) per call |
 
 </details>
 &nbsp;<br>

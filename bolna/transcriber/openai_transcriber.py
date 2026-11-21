@@ -294,6 +294,7 @@ class OpenAITranscriber(BaseTranscriber):
                                 }
                             )
                         )
+                        self.count_audio_sent(len(silent_pcm), 24000)
                     continue
 
                 if not self.audio_submitted:
@@ -335,6 +336,8 @@ class OpenAITranscriber(BaseTranscriber):
                         self._turn_start_epoch_ms = timestamp_ms()
                         self.current_turn_interim_details = []
                         self.is_transcript_sent_for_processing = False
+                        # Speech onset on the same clock as the commit time used for the speech end.
+                        self.meta_info["user_start_ts_wall"] = self.audio_submission_time
                         logger.info(f"Speech detected, starting turn {self.current_turn_id}")
                         await self.push_to_transcriber_queue(create_ws_data_packet("speech_started", self.meta_info))
                 else:
@@ -357,6 +360,7 @@ class OpenAITranscriber(BaseTranscriber):
                             }
                         )
                     )
+                    self.count_audio_sent(len(pcm_24k), 24000)
 
         except asyncio.CancelledError:
             logger.info("OpenAI sender_stream task cancelled")
@@ -475,6 +479,7 @@ class OpenAITranscriber(BaseTranscriber):
                         self._final_transcript_event.clear()
                         self._audio_appended_since_commit = False
                         self.audio_submission_time = time.time()
+                        self.meta_info["user_start_ts_wall"] = self.audio_submission_time
                         logger.info(f"Speech detected (server VAD), starting turn {self.current_turn_id}")
                         yield create_ws_data_packet("speech_started", self.meta_info)
 
@@ -597,6 +602,7 @@ class OpenAITranscriber(BaseTranscriber):
 
     async def transcribe(self):
         ws = None
+        self.reset_billed_audio()
         try:
             start_time = time.perf_counter()
             try:
@@ -604,9 +610,6 @@ class OpenAITranscriber(BaseTranscriber):
             except (ValueError, ConnectionError) as e:
                 self.connection_error = str(e)
                 await self.toggle_connection()
-                meta = dict(self.meta_info or {})
-                meta["connection_error"] = self.connection_error
-                await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
                 return
 
             if not self.connection_time:
@@ -651,7 +654,6 @@ class OpenAITranscriber(BaseTranscriber):
                 if task is not None:
                     task.cancel()
 
-            meta = dict(self.meta_info or {})
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )

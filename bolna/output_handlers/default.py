@@ -98,6 +98,7 @@ class DefaultOutputHandler:
     async def handle(self, packet):
         if self._closed:
             return
+        sent = False
         try:
             logger.info(f"Packet received:")
             # if (self.is_web_based_call and packet["meta_info"].get("message_category", "") == "agent_welcome_message" and
@@ -132,6 +133,7 @@ class DefaultOutputHandler:
 
                 response = {"data": data, "type": packet["meta_info"]["type"]}
                 await self.websocket.send_json(response)
+                sent = True
 
                 # sending of post-mark message
                 if packet["meta_info"]["type"] == "audio":
@@ -163,3 +165,4 @@ class DefaultOutputHandler:
         except Exception as e:
             self._closed = True  # Prevent further send attempts
             logger.debug(f"WebSocket send failed (client disconnected): {e}")
+        return sent

@@ -141,6 +141,7 @@ class RealtimeTranscriber(BaseTranscriber):
                 continue
             self.record_audio_frame(self._frame_seconds(len(data)), timestamp_ms())
             await ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": base64.b64encode(data).decode()}))
+            self.count_audio_sent(len(data), self.sampling_rate, mulaw=self.encoding == "mulaw")
 
     def _audio_position_wall_s(self, position_s: float):
         """Wall time the audio at `position_s` was spoken: its frame's send time less the audio after it."""
@@ -307,6 +308,7 @@ class RealtimeTranscriber(BaseTranscriber):
     async def transcribe(self):
         ws = None
         self.reset_audio_frame_state()
+        self.reset_billed_audio()
         # A pool reconnect re-runs this; the dead session's turns never settle.
         self.items.clear()
         self.settled.clear()
@@ -341,11 +343,9 @@ class RealtimeTranscriber(BaseTranscriber):
             self.websocket_connection = None
             if self.connection_error:
                 logger.error(f"Realtime transcriber connection error: {self.connection_error}")
-            meta = dict(self.meta_info or {})
-            meta["transcriber_duration"] = self.audio_cursor_s
-            if self.connection_error:
-                meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+            )
 
     async def toggle_connection(self):
         self.connection_on = False

@@ -14,6 +14,7 @@ from .synthesizer import (
     KalpaSynthesizer,
     GeminiSynthesizer,
     SonioxSynthesizer,
+    NavanaSynthesizer,
 )
 from .transcriber import (
     DeepgramTranscriber,
@@ -48,7 +49,7 @@ from .output_handlers import (
     SipTrunkOutputHandler,
     FreeSwitchOutputHandler,
 )
-from .llms import AtlasCloudLLM, OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
+from .llms import AtlasCloudLLM, OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM, BedrockLLM
 from .s2s import GeminiLiveS2S, OpenAIRealtimeS2S
 from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider, S2SProvider
 from .constants import ELEVENLABS_DIALOGUE_MODEL_PREFIXES
@@ -60,6 +61,17 @@ def elevenlabs_synthesizer(**kwargs):
     is_dialogue_model = (kwargs.get("model") or "").startswith(ELEVENLABS_DIALOGUE_MODEL_PREFIXES)
     cls = ElevenlabsV3Synthesizer if is_dialogue_model else ElevenlabsSynthesizer
     return cls(**kwargs)
+
+
+def custom_synthesizer(**kwargs):
+    """A customer's own TTS on the OpenAI synthesizer, at the endpoint the platform injects per call."""
+    # Handed over as `endpoint` so an OpenAI leg in the same multilingual pool never picks up this URL.
+    endpoint = kwargs.pop("synthesizer_base_url", None)
+    if not endpoint:
+        raise ValueError("custom TTS needs synthesizer_base_url")
+    # An endpoint without auth still needs a key for the SDK; an explicit one keeps it off OPENAI_API_KEY.
+    kwargs["synthesizer_key"] = kwargs.get("synthesizer_key") or "none"
+    return OPENAISynthesizer(endpoint=endpoint, **kwargs)
 
 
 SUPPORTED_SYNTHESIZER_MODELS = {
@@ -77,6 +89,8 @@ SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.KALPA.value: KalpaSynthesizer,
     SynthesizerProvider.GEMINI.value: GeminiSynthesizer,
     SynthesizerProvider.SONIOX.value: SonioxSynthesizer,
+    SynthesizerProvider.NAVANA.value: NavanaSynthesizer,
+    SynthesizerProvider.CUSTOM.value: custom_synthesizer,
 }
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
@@ -100,7 +114,6 @@ SUPPORTED_TRANSCRIBER_MODELS = {"deepgram": DeepgramTranscriber}
 
 SUPPORTED_LLM_PROVIDERS = {
     LLMProvider.OPENAI.value: OpenAiLLM,
-    LLMProvider.ATLASCLOUD.value: AtlasCloudLLM,
     LLMProvider.COHERE.value: LiteLLM,
     LLMProvider.OLLAMA.value: LiteLLM,
     LLMProvider.DEEPINFRA.value: LiteLLM,
@@ -119,6 +132,9 @@ SUPPORTED_LLM_PROVIDERS = {
     LLMProvider.AZURE.value: AzureLLM,
     LLMProvider.GOOGLE.value: GeminiLLM,
     LLMProvider.BOLNA.value: OpenAiLLM,
+    LLMProvider.SARVAM.value: OpenAiLLM,
+    LLMProvider.ATLASCLOUD.value: AtlasCloudLLM,
+    LLMProvider.BEDROCK.value: BedrockLLM,
 }
 SUPPORTED_INPUT_HANDLERS = {
     TelephonyProvider.DEFAULT.value: DefaultInputHandler,

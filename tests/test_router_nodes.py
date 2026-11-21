@@ -802,6 +802,81 @@ class TestFirstDeliveryHold:
         mock_llm.assert_called_once()
         assert agent.current_node_id == "C"
 
+    async def test_held_input_is_not_a_node_turn(self):
+        # The tail of the previous answer, held before the node's question was heard, must not
+        # use up one of the node's attempts.
+        nodes = self._nodes()
+        nodes[1]["edges"].append(
+            {"to_node_id": "C", "condition_type": "expression", "expression": _expr("_node_turns", "gte", 2)}
+        )
+        agent = _make_agent(_base_config(nodes, "A"))
+        head = {"role": "user", "content": "current technical skills are"}
+        tail = {"role": "user", "content": "c c plus plus aws devops"}
+        agent._advance_to_node("B", entry_index=1)
+
+        await _collect(agent.generate([head, tail]))
+        agent.mark_first_response_delivered()
+
+        stay = (None, {}, 1.0, [], [], "unclear", 0.9, None)
+        history = [head, tail, {"role": "assistant", "content": "Ask Q1."}, {"role": "user", "content": "book"}]
+        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=stay) as mock_llm:
+            await _collect(agent.generate(history))
+
+        assert agent.context_data["_node_turns"] == 1
+        assert mock_llm.call_args.kwargs["default_edge"] is None
+        assert agent.current_node_id == "B"
+
+    async def test_split_reply_is_one_node_turn(self):
+        # One reply the transcriber split in two, with no agent speech between the parts, is one attempt.
+        nodes = self._nodes()
+        nodes[1]["edges"].append(
+            {"to_node_id": "C", "condition_type": "expression", "expression": _expr("_node_turns", "gte", 2)}
+        )
+        agent = _make_agent(_base_config(nodes, "A"))
+        agent._advance_to_node("B", entry_index=1)
+        agent.mark_first_response_delivered()
+
+        history = [
+            {"role": "user", "content": "tech mahindra"},
+            {"role": "assistant", "content": "Ask Q1."},
+            {"role": "user", "content": "bookings on"},
+            {"role": "user", "content": "book is on the table"},
+        ]
+        stay = (None, {}, 1.0, [], [], "unclear", 0.9, None)
+        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=stay) as mock_llm:
+            await _collect(agent.generate(history))
+
+        assert agent.context_data["_node_turns"] == 1
+        assert mock_llm.call_args.kwargs["default_edge"] is None
+        assert agent.current_node_id == "B"
+
+    async def test_answer_to_partly_heard_question_is_a_node_turn(self):
+        nodes = self._nodes()
+        cap = {"to_node_id": "C", "condition_type": "expression", "expression": _expr("_node_turns", "gte", 2)}
+        nodes[1]["edges"].append(cap)
+        agent = _make_agent(_base_config(nodes, "A"))
+        previous = {"role": "user", "content": "tech mahindra"}
+        heard = {"role": "assistant", "content": "Could you share your skills?"}
+        answer = {"role": "user", "content": "java and python"}
+        agent._advance_to_node("B", entry_index=1)
+
+        await _collect(agent.generate([previous, heard, answer]))
+        agent.mark_first_response_delivered()
+
+        stay = (None, {}, 1.0, [], [], "unclear", 0.9, None)
+        history = [
+            previous,
+            heard,
+            answer,
+            {"role": "assistant", "content": "Ask Q1."},
+            {"role": "user", "content": "book"},
+        ]
+        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=stay):
+            await _collect(agent.generate(history))
+
+        assert agent.context_data["_node_turns"] == 2
+        assert agent.current_node_id == "C"
+
     async def test_advance_resets_delivered_flag(self):
         agent = _make_agent(_base_config(self._nodes(), "B"))
         assert agent._active_node_first_response_delivered is True
@@ -821,6 +896,44 @@ class TestFirstDeliveryHold:
 
         mock_llm.assert_called_once()
         assert agent.current_node_id == "C"
+
+    async def test_static_node_holds_and_replays_when_first_response_undelivered(self):
+        # BOLNA-3043: the caller's tail of the previous answer must not be routed as the answer
+        # to a mid-flow static question that was never played.
+        agent = _static_extract_agent()
+        agent._advance_to_node("avail_ask", 0)
+
+        with patch.object(
+            agent,
+            "_decide_next_node_llm",
+            new_callable=AsyncMock,
+            return_value=_extraction("avail_check", {"availability": "Yes"}),
+        ) as mock_llm:
+            out = await _collect(agent.generate([{"role": "user", "content": "I am speaking candidate."}]))
+
+        mock_llm.assert_not_called()
+        assert agent.current_node_id == "avail_ask"
+        assert agent.node_extracted_data == {}
+        routing = [o["routing_info"] for o in out if isinstance(o, dict) and "routing_info" in o]
+        assert routing[-1]["routing_type"] == "hold"
+        assert routing[-1]["transitioned"] is False
+        static = [o for o in out if isinstance(o, dict) and "static_message" in o]
+        assert static and static[0]["static_message"] == "Are you available to speak right now?"
+
+    async def test_static_node_routes_after_first_response_delivered(self):
+        agent = _static_extract_agent()
+        agent._advance_to_node("avail_ask", 0)
+        agent.mark_first_response_delivered()
+
+        with patch.object(
+            agent,
+            "_decide_next_node_llm",
+            new_callable=AsyncMock,
+            return_value=_extraction("avail_check", {"availability": "Yes"}),
+        ):
+            await _collect(agent.generate([{"role": "user", "content": "yes"}]))
+
+        assert agent.current_node_id == "edu_ask"
 
 
 def _static_extract_agent():

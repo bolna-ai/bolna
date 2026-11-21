@@ -29,8 +29,9 @@ from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 load_dotenv()
 logger = configure_logger(__name__)
 
-# saaras models that transcribe directly on /speech-to-text; older ones need the translate endpoint.
+# saaras models that transcribe directly; older ones translate via saaras:v4.
 SAARAS_TRANSCRIBE_MODELS = {"saaras:v3", "saaras:v4"}
+SAARAS_TRANSLATE_MODEL = "saaras:v4"
 # Sarvam accepts `keyterms` only on these models.
 SARVAM_KEYTERM_MODELS = {"saaras:v4"}
 
@@ -68,6 +69,8 @@ class SarvamTranscriber(BaseTranscriber):
         self.disable_sdk = disable_sdk
         self.context = (context or "").strip()
         self.keyterms = self._resolve_keyterms(keywords)
+        self.hinglish_mode = kwargs.get("hinglish_mode")
+        self.translate = self.model.startswith("saaras") and self.model not in SAARAS_TRANSCRIBE_MODELS
 
         self.api_key = kwargs.get("transcriber_key", os.getenv("SARVAM_API_KEY"))
         self.api_host = os.getenv("SARVAM_HOST", "api.sarvam.ai")
@@ -141,21 +144,17 @@ class SarvamTranscriber(BaseTranscriber):
         return keyterms
 
     def _set_endpoints(self):
-        params = {"model": self.model}
-        ws_url = ""
-
-        # old saaras models use translate endpoint, saarika models use transcription endpoint
-        # saaras:v3 supports direct transcription
-        if self.model.startswith("saaras") and self.model not in SAARAS_TRANSCRIBE_MODELS:
-            self.api_url = f"https://{self.api_host}/speech-to-text-translate"
-            ws_url = f"wss://{self.api_host}/speech-to-text-translate/ws"
-
+        if self.translate:
+            params = {"model": SAARAS_TRANSLATE_MODEL, "mode": "translate"}
         else:
-            self.api_url = f"https://{self.api_host}/speech-to-text"
-            ws_url = f"wss://{self.api_host}/speech-to-text/ws"
-            params["language-code"] = self.language
+            params = {"model": self.model, "language-code": self.language}
+        self.api_url = f"https://{self.api_host}/speech-to-text"
+        ws_url = f"wss://{self.api_host}/speech-to-text/ws"
 
-        if self.model == "saaras:v3":
+        is_hindi = (self.language or "").split("-")[0] == "hi"
+        if self.hinglish_mode and is_hindi and self.model in SAARAS_TRANSCRIBE_MODELS:
+            params["mode"] = "codemix"
+        elif self.model == "saaras:v3":
             params["mode"] = "transcribe"  # saaras:v3 supports direct transcription
 
         if self.high_vad_sensitivity:
@@ -182,7 +181,9 @@ class SarvamTranscriber(BaseTranscriber):
         try:
             data = aiohttp.FormData()
             data.add_field("file", io.BytesIO(wav_data), filename="audio.wav", content_type="audio/wav")
-            data.add_field("model", self.model)
+            data.add_field("model", SAARAS_TRANSLATE_MODEL if self.translate else self.model)
+            if self.translate:
+                data.add_field("mode", "translate")
             data.add_field("language_code", self.language)
             if self.keyterms:
                 data.add_field("keyterms", json.dumps(self.keyterms))
@@ -354,6 +355,8 @@ class SarvamTranscriber(BaseTranscriber):
                     audio_b64 = base64.b64encode(wav_bytes).decode("utf-8")
                     message = {"audio": {"data": audio_b64, "encoding": "audio/wav", "sample_rate": self.sampling_rate}}
                     await ws.send(json.dumps(message))
+                    if isinstance(audio_data, (bytes, bytearray)):
+                        self.count_audio_sent(len(audio_data), self.input_sampling_rate, mulaw=self.encoding == "mulaw")
         except asyncio.CancelledError:
             pass
 
@@ -369,7 +372,6 @@ class SarvamTranscriber(BaseTranscriber):
                     if isinstance(data, dict) and data.get("type") == "data":
                         payload = data.get("data", {})
                         transcript = payload.get("transcript", "")
-                        metrics = payload.get("metrics", {})
                         sarvam_request_id = payload.get("request_id")
                         if sarvam_request_id:
                             logger.info(f"Sarvam request_id: {sarvam_request_id}")
@@ -399,7 +401,6 @@ class SarvamTranscriber(BaseTranscriber):
                                 self.meta_info["transcriber_latency"] = turn_latency_seconds
 
                             transcript_data = {"type": "transcript", "content": transcript.strip()}
-                            self.meta_info["transcriber_duration"] = metrics.get("audio_duration", 0)
 
                             # Accumulate the turn's text so END_SPEECH can record it in
                             # turn_latencies (observability/eval). Each Sarvam "data" message
@@ -437,6 +438,8 @@ class SarvamTranscriber(BaseTranscriber):
                             self.final_transcript = ""
                             # New turn: drop the previous turn's speech-end stamp so it can't leak.
                             self.meta_info.pop("user_stop_ts_wall", None)
+                            # Onset on the same clock as END_SPEECH; the transcript only arrives after it.
+                            self.meta_info["user_start_ts_wall"] = time.time()
                             yield create_ws_data_packet("speech_started", self.meta_info)
 
                         elif vad.get("signal_type") == "END_SPEECH":
@@ -482,8 +485,8 @@ class SarvamTranscriber(BaseTranscriber):
                             yield create_ws_data_packet("speech_ended", self.meta_info)
 
                     elif isinstance(data, dict) and data.get("type") == "connection_closed":
-                        self.meta_info["transcriber_duration"] = data.get("duration", 0)
-                        yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
+                        # transcribe() emits the single closing packet; a second one here was billed twice.
+                        self.provider_audio_duration_s = data.get("duration")
                         return
 
                     elif isinstance(data, dict) and data.get("type") == "error":
@@ -629,6 +632,7 @@ class SarvamTranscriber(BaseTranscriber):
             pass
 
     async def transcribe(self):
+        self.reset_billed_audio()
         try:
             start_time = time.perf_counter()
             try:
@@ -637,9 +641,9 @@ class SarvamTranscriber(BaseTranscriber):
                 self.connection_error = str(e)
                 await self.toggle_connection()
                 try:
-                    meta = dict(self.meta_info or {})
-                    meta["connection_error"] = self.connection_error
-                    await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+                    await self.push_to_transcriber_queue(
+                        create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+                    )
                 except Exception:
                     logger.error(f"Sarvam failed to emit connection_closed: {traceback.format_exc()}")
                 return
@@ -673,10 +677,9 @@ class SarvamTranscriber(BaseTranscriber):
                 self.meta_info["total_stream_duration_ms"] = self.total_stream_duration_ms
 
             try:
-                meta = dict(self.meta_info or {})
-                if self.connection_error:
-                    meta["connection_error"] = self.connection_error
-                await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+                await self.push_to_transcriber_queue(
+                    create_ws_data_packet("transcriber_connection_closed", self.closing_meta())
+                )
             except Exception:
                 logger.error(f"Sarvam failed to emit connection_closed: {traceback.format_exc()}")
         finally:

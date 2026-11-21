@@ -5,7 +5,7 @@ from typing import Optional
 
 from openai import BadRequestError, APIError
 
-from bolna.constants import is_reasoning_model
+from bolna.constants import IS_USER_ONLINE_MESSAGE, is_reasoning_model
 from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
 from bolna.helpers.utils import (
     convert_to_request_log,
@@ -16,6 +16,7 @@ from bolna.helpers.utils import (
 from .llm import BaseLLM
 from .message_models import MessageFormatAdapter, strip_internal_keys
 from .routing_stream import read_routing_stream
+from .schema_forced_tool_call import force_tools_by_schema
 from .types import APIParams, LLMStreamChunk, LatencyData, FunctionCallPayload
 from bolna.helpers.function_calling_helpers import record_unresolved_tool_call, redacted_url, resolve_tool_name
 from bolna.helpers.logger_config import configure_logger
@@ -51,9 +52,17 @@ def _strip_server_injected_params(tools):
 def _new_items_start(messages):
     """Index of the first message after the last assistant message, where a chained request begins."""
     for i in range(len(messages) - 1, -1, -1):
-        if messages[i].get("role") == ChatRole.ASSISTANT:
+        # The "are you still there" nudge never went through the model, so it is not on the chain.
+        if (
+            messages[i].get("role") == ChatRole.ASSISTANT
+            and messages[i].get("message_category") != IS_USER_ONLINE_MESSAGE
+        ):
             return i + 1
     return 0
+
+
+def _system_prompt(messages):
+    return messages[0].get("content") if messages and messages[0].get("role") == ChatRole.SYSTEM else None
 
 
 def _last_assistant_turn_end(messages):
@@ -75,6 +84,12 @@ class OpenAICompatibleLLM(BaseLLM):
     # Both are set by subclasses whose self.model is a deployment name rather than the model itself.
     _request_log_model = None
     _model_family = None
+
+    # Set by subclasses whose backend cannot force tool_choice (SCHEMA_FORCED_TOOL_PROVIDERS).
+    _forces_tools_by_schema = False
+
+    # The system prompt the Responses chain was built on; None until a request records one.
+    _chain_system_prompt = None
 
     # A reasoning summary streams ahead of the answer text, so it is opt-in: requesting one costs
     # time to first spoken token on a live call. Set from config by subclasses; None omits it.
@@ -320,6 +335,14 @@ class OpenAICompatibleLLM(BaseLLM):
                 logger.info("Pending tool call outputs missing, sending full context")
                 self.previous_response_id = None
                 chained = False
+        system_prompt = _system_prompt(messages)
+        if chained and self._chain_system_prompt is not None and system_prompt != self._chain_system_prompt:
+            # A chained request does not resend the system prompt, so a changed one needs the full context.
+            logger.info("System prompt changed since the chain began, sending full context")
+            self.previous_response_id = None
+            self._pending_call_ids = set()
+            chained = False
+        self._chain_system_prompt = system_prompt
         if chained:
             instructions, new_items = self._extract_new_input(messages)
             history_items = []
@@ -396,7 +419,10 @@ class OpenAICompatibleLLM(BaseLLM):
             model_args.pop("temperature", None)
         else:
             model_args["temperature"] = 0.0
+        forced = force_tools_by_schema(model_args) if self._forces_tools_by_schema else None
         stream, overflowed = await self._route_completion(model_args)
+        if forced:
+            stream = forced.stream(stream)
         return await read_routing_stream(stream, parsed_tools, overflowed)
 
     def invalidate_response_chain(self):

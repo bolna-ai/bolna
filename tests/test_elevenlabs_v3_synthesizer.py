@@ -4,10 +4,12 @@ import asyncio
 import base64
 import json
 
+import pytest
 from websockets.exceptions import ConnectionClosed
 from websockets.protocol import State
 
 from bolna.providers import SUPPORTED_SYNTHESIZER_MODELS
+from bolna.synthesizer import elevenlabs_synthesizer
 from bolna.synthesizer.elevenlabs_synthesizer import (
     DEFAULT_STABILITY,
     STABILITY_PRESETS,
@@ -180,6 +182,66 @@ def test_v3_snaps_stability_to_a_preset():
 def test_v1_leaves_temperature_untouched():
     assert _make("eleven_turbo_v2_5", temperature=0.3).temperature == 0.3
     assert _make("eleven_turbo_v2_5", temperature=None).temperature is None
+
+
+# ---------------------------------------------------------------------------
+# clone_strength, which only v4 takes
+# ---------------------------------------------------------------------------
+
+
+class _RecordingSession:
+    """Stands in for aiohttp.ClientSession: keeps each posted JSON body and answers 200."""
+
+    status = 200
+
+    def __init__(self, bodies):
+        self.bodies = bodies
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def post(self, url, headers=None, json=None):
+        self.bodies.append(json)
+        return self
+
+    async def read(self):
+        return b"audio"
+
+
+async def _sent_voice_settings(monkeypatch, model, **kwargs):
+    """voice_settings from the socket's first message and from a one-shot HTTP render."""
+    sockets, bodies = [], []
+
+    async def connect(url, **_):
+        sockets.append(FakeWS())
+        return sockets[-1]
+
+    monkeypatch.setattr(elevenlabs_synthesizer.websockets, "connect", connect)
+    monkeypatch.setattr(elevenlabs_synthesizer.aiohttp, "ClientSession", lambda *a, **k: _RecordingSession(bodies))
+    synth = _make(model, **kwargs)
+    await synth.establish_connection()
+    await synth.synthesize("Welcome")
+    return sockets[0].sent[0]["voice_settings"], bodies[0]["voice_settings"]
+
+
+@pytest.mark.parametrize("model", ["eleven_v4", "eleven_v4_turbo"])
+async def test_v4_sends_clone_strength_on_the_socket_and_the_http_render(monkeypatch, model):
+    socket_settings, http_settings = await _sent_voice_settings(monkeypatch, model, clone_strength=0.4)
+    assert socket_settings == {"stability": 0.5, "clone_strength": 0.4}
+    assert http_settings["clone_strength"] == 0.4
+
+
+@pytest.mark.parametrize(
+    "model,clone_strength",
+    [("eleven_v4", None), ("eleven_v3_conversational", 0.4), ("eleven_turbo_v2_5", 0.4)],
+)
+async def test_clone_strength_stays_off_the_wire_when_unset_or_not_v4(monkeypatch, model, clone_strength):
+    socket_settings, http_settings = await _sent_voice_settings(monkeypatch, model, clone_strength=clone_strength)
+    assert "clone_strength" not in socket_settings
+    assert "clone_strength" not in http_settings
 
 
 # ---------------------------------------------------------------------------

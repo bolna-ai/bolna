@@ -1,3 +1,4 @@
+import bisect
 import json
 import time
 import uuid
@@ -10,6 +11,10 @@ logger = configure_logger(__name__)
 
 
 class BaseTranscriber:
+    # A multilingual pool with lazy legs closes and reopens a leg mid-call (toggle_connection, then run());
+    # a provider whose connect or close blocks the event loop sets this False to keep its legs connected.
+    reopens_mid_call = True
+
     def __init__(self, input_queue=None):
         self.input_queue = input_queue
         self.connection_on = True
@@ -26,6 +31,40 @@ class BaseTranscriber:
         self.is_transcript_sent_for_processing = False
         self.agent_context_source = None
         self.reset_audio_frame_state()
+        self.closed_connections_billed_s = 0.0
+        self.audio_sent_s = 0.0
+        self.provider_audio_duration_s = None
+
+    def reset_billed_audio(self) -> None:
+        """Start a connection's billing window. A pool reconnect reuses the instance, so the window
+        that ends here moves into the call total rather than carrying into the next connection."""
+        self.closed_connections_billed_s += self._connection_billed_s()
+        self.audio_sent_s = 0.0
+        self.provider_audio_duration_s = None
+
+    def count_audio_sent(self, num_bytes: int, sample_rate: int, mulaw: bool = False) -> None:
+        self.audio_sent_s += num_bytes / ((1 if mulaw else 2) * sample_rate)
+
+    def _connection_billed_s(self) -> float:
+        """The provider's own billed duration when it reports one, else the audio actually sent."""
+        if self.provider_audio_duration_s is not None:
+            return self.provider_audio_duration_s
+        return self.audio_sent_s
+
+    def billed_audio_s(self) -> float:
+        """The call's ASR usage: every closed connection plus the one still open. task_manager reads
+        this at teardown because after a hangup it stops reading closing packets after the first."""
+        return self.closed_connections_billed_s + self._connection_billed_s()
+
+    def closing_meta(self) -> dict:
+        """Meta for the connection's transcriber_connection_closed packet. Closes the billing window, so
+        a second packet for the same connection reports 0 and the call total counts it once."""
+        meta = dict(getattr(self, "meta_info", None) or {})
+        meta["transcriber_duration"] = round(self._connection_billed_s(), 4)
+        self.reset_billed_audio()
+        if self.connection_error:
+            meta["connection_error"] = self.connection_error
+        return meta
 
     def set_agent_context_source(self, source: Callable[[], str | None]) -> None:
         """Point at the agent's latest spoken reply, for providers that bias the caller's next turn with it."""
@@ -47,6 +86,23 @@ class BaseTranscriber:
         self.audio_cursor_s += frame_seconds
         self.audio_frame_timestamps.append((frame_start, self.audio_cursor_s, send_timestamp))
         self.num_frames += 1
+
+    def audio_position_wall_time(self, audio_position_s):
+        """Wall-clock seconds the caller spoke this stream position, or None if no frame holds it.
+
+        Each frame is sent as it fills, so its last sample is heard at its send time. Mapping through
+        the frame keeps standby gaps and keepalive bursts out of it, unlike one stream-start anchor."""
+        if audio_position_s is None or not self.audio_frame_timestamps:
+            return None
+        # Frames tile the stream in order, so the first one ending at or after the position holds it.
+        index = bisect.bisect_left(self.audio_frame_timestamps, audio_position_s, key=lambda frame: frame[1])
+        if index == len(self.audio_frame_timestamps):
+            last_start, last_end, last_send = self.audio_frame_timestamps[-1]
+            return last_send / 1000 + (audio_position_s - last_end)
+        frame_start, frame_end, send_timestamp = self.audio_frame_timestamps[index]
+        if audio_position_s < frame_start:
+            return None
+        return send_timestamp / 1000 - (frame_end - audio_position_s)
 
     def _upsert_turn_latency(self, entry: dict) -> None:
         """Replace existing turn_latencies entry with matching turn_id, or append if new."""
@@ -103,6 +159,13 @@ class BaseTranscriber:
 
     async def cleanup(self):
         """Clean up transcriber resources. Override in subclasses."""
+        pass
+
+    async def discard_open_turn(self):
+        """Close the turn in progress without delivering it, as a multilingual call switches away.
+
+        Override where the provider can leave a turn open; the default has nothing to close.
+        """
         pass
 
     def is_connected(self):

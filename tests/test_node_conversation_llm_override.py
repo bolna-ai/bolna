@@ -8,13 +8,19 @@ Unset fields inherit; a node that overrides nothing reuses the agent's own LLM i
 
 import os
 from contextlib import contextmanager
+
+import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bolna.agent_types.graph_agent import GraphAgent
 from bolna.llms import LiteLLM
 from bolna.models import GraphNode
 
-ENV = {"OPENAI_API_KEY": "platform-openai-key"}
+ENV = {
+    "OPENAI_API_KEY": "platform-openai-key",
+    "AZURE_OPENAI_BASE_URL": "https://platform.azure.example",
+    "AZURE_OPENAI_API_KEY": "platform-azure-key",
+}
 PROVIDERS = ["openai", "azure", "google", "groq"]
 
 
@@ -100,6 +106,28 @@ def test_a_model_override_builds_a_separate_llm_inheriting_agent_credentials():
         assert kwargs["max_tokens"] == 150
 
 
+def test_switching_clients_drops_the_chain_of_the_one_taking_over():
+    with _agent() as agent:
+        override_node = {"id": "n1", "llm_config": {"model": "gpt-5"}}
+        override = agent._conversation_llm_for(override_node)
+        agent._conversation_llm_for(override_node)
+        override.invalidate_response_chain.reset_mock()
+
+        agent._conversation_llm_for({"id": "start"})
+        agent.llm.invalidate_response_chain.assert_called_once()
+
+        agent._conversation_llm_for(override_node)
+        override.invalidate_response_chain.assert_called_once()
+
+
+def test_staying_on_one_client_keeps_its_chain():
+    with _agent() as agent:
+        agent._conversation_llm_for({"id": "start"})
+        agent.llm.invalidate_response_chain.reset_mock()
+        agent._conversation_llm_for({"id": "start"})
+        agent.llm.invalidate_response_chain.assert_not_called()
+
+
 def test_temperature_and_max_tokens_override_independently():
     with _agent() as agent:
         llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"temperature": 0.0, "max_tokens": 900}})
@@ -146,12 +174,72 @@ def test_an_effort_enum_is_serialized_to_its_value():
 
 
 def test_a_provider_switch_is_refused_rather_than_silently_rekeyed():
-    # A node carries no credentials, so the only options are the agent's key against the wrong
-    # provider, or the platform env default — which would move a BYOK customer onto our account.
+    # With no credentials resolved for the node, the only options are the agent's key against the wrong
+    # provider, or the platform env default, which would move a BYOK customer onto our account.
     with _agent() as agent:
         llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"provider": "groq", "model": "llama-3.3"}})
         assert llm is agent.llm
         assert agent._conversation_llm_cache == {}
+
+
+def test_a_provider_switch_runs_on_the_credentials_resolved_for_that_node():
+    with _agent(
+        provider="google",
+        model="gemini-3.7-flash",
+        extra_body={"top_k": 0},
+        service_tier="priority",
+        overflow_llm={"api_key": "o", "base_url": "https://o.example", "model": "m"},
+        node_llm_credentials={
+            "n1": {"llm_key": "node-azure-key", "base_url": "https://node.azure.example", "api_version": "2024-12-01"}
+        },
+    ) as agent:
+        llm = agent._conversation_llm_for(
+            {"id": "n1", "llm_config": {"provider": "azure", "model": "azure/gpt-4.1-mini"}}
+        )
+    assert llm is not agent.llm
+    kwargs = llm.captured_kwargs
+    assert kwargs["provider"] == "azure"
+    assert kwargs["model"] == "azure/gpt-4.1-mini"
+    assert (kwargs["llm_key"], kwargs["base_url"], kwargs["api_version"]) == (
+        "node-azure-key",
+        "https://node.azure.example",
+        "2024-12-01",
+    )
+    # Settings of the agent's own backend do not follow the node onto another provider.
+    assert not {"extra_body", "service_tier", "overflow_llm"} & kwargs.keys()
+
+
+def test_a_provider_switch_with_an_empty_entry_takes_the_providers_platform_default():
+    with _agent(node_llm_credentials={"n1": {}}) as agent:
+        llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"provider": "groq", "model": "llama-3.3"}})
+    assert llm is not agent.llm
+    assert "llm_key" not in llm.captured_kwargs
+    assert "base_url" not in llm.captured_kwargs
+
+
+def test_credentials_resolved_for_another_node_do_not_unlock_this_one():
+    with _agent(node_llm_credentials={"other": {"llm_key": "k"}}) as agent:
+        llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"provider": "groq", "model": "llama-3.3"}})
+    assert llm is agent.llm
+
+
+def test_a_node_switched_to_azure_builds_a_real_client_on_the_resolved_endpoint():
+    from bolna.llms import AzureLLM
+
+    with _agent(
+        real_registry={"azure": AzureLLM},
+        provider="google",
+        model="gemini-3.7-flash",
+        node_llm_credentials={
+            "n1": {"llm_key": "k", "base_url": "https://node.azure.example", "api_version": "2024-12-01-preview"}
+        },
+    ) as agent:
+        llm = agent._conversation_llm_for(
+            {"id": "n1", "llm_config": {"provider": "azure", "model": "azure/gpt-4.1-mini"}}
+        )
+    assert isinstance(llm, AzureLLM)
+    assert llm.model == "gpt-4.1-mini"
+    assert llm.llm_host == "node.azure.example"
 
 
 def test_a_model_override_on_the_agents_own_provider_is_served():
@@ -417,7 +505,7 @@ def _real_agent(**overrides):
         "nodes": [{"id": "start", "prompt": "hi", "edges": []}],
     }
     config.update(overrides)
-    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True):
+    with patch.dict(os.environ, {**ENV, "OPENAI_API_KEY": "sk-test"}, clear=True):
         yield GraphAgent(config)
 
 
@@ -434,3 +522,27 @@ async def test_a_real_override_client_picks_the_transport_from_its_own_model():
         assert getattr(responses, "use_responses_api", False) is True
         # And the agent's own client is untouched by either.
         assert getattr(agent.llm, "use_responses_api", False) is False
+
+
+AZURE_OVERRIDE = {"provider": "azure", "model": "azure/gpt-4.1-mini"}
+NODE_AZURE = {"llm_key": "k", "base_url": "https://node.azure.example", "api_version": "2024-12-01"}
+
+
+@pytest.mark.parametrize("first", ["with_credentials", "without_credentials"])
+def test_a_node_without_credentials_never_borrows_another_nodes_client(first):
+    nodes = {
+        "with_credentials": {"id": "a", "llm_config": AZURE_OVERRIDE},
+        "without_credentials": {"id": "b", "llm_config": AZURE_OVERRIDE},
+    }
+    second = "without_credentials" if first == "with_credentials" else "with_credentials"
+    with _agent(node_llm_credentials={"a": NODE_AZURE}) as agent:
+        served = {name: agent._conversation_llm_for(nodes[name]) for name in (first, second)}
+    assert served["without_credentials"] is agent.llm
+    assert served["with_credentials"] is not agent.llm
+
+
+def test_nodes_with_the_same_override_and_credentials_share_one_client():
+    with _agent(node_llm_credentials={"a": NODE_AZURE, "b": dict(NODE_AZURE)}) as agent:
+        a = agent._conversation_llm_for({"id": "a", "llm_config": AZURE_OVERRIDE})
+        b = agent._conversation_llm_for({"id": "b", "llm_config": AZURE_OVERRIDE})
+    assert a is b and a is not agent.llm

@@ -98,8 +98,8 @@ class TestPassthrough:
             GraphAgent(config)
 
         built = [call.kwargs for call in conversation.call_args_list + openai_llm.call_args_list]
-        # conversation, routing, completion check, voicemail
-        assert len(built) == 4
+        # conversation, routing, completion check (voicemail runs on the platform Azure deployment)
+        assert len(built) == 3
         assert all(kwargs["extra_body"] == EXTRA_BODY for kwargs in built)
         assert all(kwargs["provider"] == "custom" for kwargs in built)
 

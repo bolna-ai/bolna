@@ -22,7 +22,7 @@ class SmallestSynthesizer(StreamSynthesizer):
     def __init__(
         self,
         voice_id,
-        model="lightning_v3.1",
+        model="lightning_v3.1_pro",
         language="en",
         audio_format="mp3",
         sampling_rate="8000",
@@ -58,6 +58,9 @@ class SmallestSynthesizer(StreamSynthesizer):
 
     def _get_audio_format(self):
         return "wav"
+
+    def get_sleep_time(self):
+        return 0.01 if self.stream else super().get_sleep_time()
 
     def form_payload(self, text):
         return {

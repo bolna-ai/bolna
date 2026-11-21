@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timezone
-from bolna.enums import ReasoningEffort as RE, SynthesizerProvider, TelephonyProvider
+from bolna.enums import LLMProvider, ReasoningEffort as RE, SynthesizerProvider, TelephonyProvider
 
 PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
@@ -87,6 +87,11 @@ REDELIVERED_TRANSCRIPT_WINDOW_MS = 2000
 # made no forward progress at all, e.g. a hung LLM call or an s2s tool task that never
 # completes. BOLNA-2563.
 STALL_HANGUP_HARD_CAP_S = 60.0
+# [silence] re-prompts allowed per silence period (reset only when the user speaks; past it a node
+# still gets what its own _silence_repeats exit edge needs). Each re-prompt counts as agent
+# speech and restarts the silence clock, so without a cap a node re-prompt shorter than
+# hangup_after_silence keeps a silent caller on the line until the max call duration.
+DEFAULT_MAX_SILENCE_REPEATS = 2
 # Max time to wait for one LLM reply (_run_llm_task). If the LLM never comes back - no reply,
 # no error, it just hangs - force it to fail after this many seconds and hang up, instead of
 # leaving the call stuck forever. BOLNA-2563.
@@ -137,7 +142,17 @@ S2S_GOODBYE_TIMEOUT_S = 10.0
 
 # Soniox real-time STT
 SONIOX_WEBSOCKET_HOST = "stt-rt.soniox.com"
+# Regional real-time hosts; a region's key is read from SONIOX_<REGION>_API_KEY, since keys are region-bound.
+SONIOX_REGION_HOSTS = {
+    "us": "stt-rt.soniox.com",
+    "eu": "stt-rt.eu.soniox.com",
+    "in": "stt-rt.in.soniox.com",
+    "jp": "stt-rt.jp.soniox.com",
+}
 SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops
+SONIOX_FINALIZE_TOKEN = "<fin>"  # closes the tokens a {"type": "finalize"} request flushed
+# Ceiling on dropping a finalized turn's leftovers, in case its <fin> never comes back.
+SONIOX_FINALIZE_DISCARD_S = 3.0
 # Hinted for multilingual auto-detect: Soniox identifies and code-switches across these in one
 # stream; hinting the relevant set sharpens accuracy over fully-open auto. No real-time as/od.
 SONIOX_DEFAULT_MULTILINGUAL_HINTS = ["en", "hi", "ta", "te", "kn", "ml", "mr", "bn", "gu", "pa", "ur"]
@@ -150,6 +165,11 @@ CONTENT_POLICY_ERROR_MARKERS = ("content policy", "content_policy", "content_fil
 # Pre-generated clips sent as one mark for the whole message. Not event_proactive: on
 # sequence_id -1 the handlers blank text_synthesized, so its mark never carries text.
 CACHED_SINGLE_MARK_CATEGORIES = ("static_node",)
+
+# OpenAI models on AWS Bedrock's OpenAI-compatible API, by the inference profile Bedrock serves each as.
+# The in. profiles keep requests in India (ap-south-1 / ap-south-2).
+BEDROCK_DEFAULT_BASE_URL = "https://bedrock-runtime.ap-south-1.amazonaws.com/openai/v1"
+BEDROCK_MODEL_IDS = {"gpt-5.6-luna": "in.openai.gpt-5.6-luna"}
 
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
@@ -301,6 +321,13 @@ LANGUAGE_NAMES = {
 RESERVED_LLM_REQUEST_KEYS = frozenset(
     {"model", "messages", "stream", "stream_options", "tools", "tool_choice", "parallel_tool_calls", "response_format"}
 )
+# OpenAI-compatible LLM vendors: (base URL, env var holding the platform key).
+LLM_VENDOR_ENDPOINTS = {
+    LLMProvider.SARVAM.value: ("https://api.sarvam.ai/v1", "SARVAM_API_KEY"),
+    LLMProvider.ATLASCLOUD.value: ("https://api.atlascloud.ai/v1", "ATLASCLOUD_API_KEY"),
+}
+# Speech request fields that shape what bolna sends and gets back; a custom TTS's extra_body may not set them.
+RESERVED_TTS_REQUEST_KEYS = frozenset({"model", "voice", "input", "response_format", "stream_format"})
 
 LLM_DEFAULT_CONFIGS = {
     "summarization": {"model": "gpt-4.1-mini", "provider": "openai"},
@@ -343,6 +370,8 @@ UNCOMPRESSED_AUDIO_FORMATS = ("pcm", "wav", "mulaw", "ulaw")
 AUDIO_STREAM_END_SENTINELS = (b"\x00", b"\x00\x00")
 
 END_CALL_FUNCTION_PREFIX = "end_call"
+# meta_info flag a graph end node sets so the task manager hangs up once its reply has played.
+HANGUP_AFTER_REPLY = "hangup_after_reply"
 WEB_SEARCH_FUNCTION_NAME = "web_search"
 
 END_CALL_TOOL_DEFINITION = {
@@ -422,6 +451,8 @@ AZURE_TTS_SPEED_MAX = 2.0
 SARVAM_LOUDNESS_MODELS = frozenset({"bulbul:v2"})
 RIME_TIME_SCALE_MODELS = frozenset({"coda", "mistv3"})
 ELEVENLABS_STYLE_MODELS = frozenset({"eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2"})
+# ElevenLabs applies clone_strength only to professional voice clones fine-tuned for a v4 model.
+ELEVENLABS_CLONE_STRENGTH_MODEL_PREFIXES = ("eleven_v4",)
 
 TTS_CONTROL_MODELS = {
     SynthesizerProvider.CARTESIA: {"volume": CARTESIA_VOLUME_MODELS},
@@ -429,28 +460,44 @@ TTS_CONTROL_MODELS = {
     SynthesizerProvider.RIME: {"time_scale_factor": RIME_TIME_SCALE_MODELS},
     SynthesizerProvider.SARVAM: {"loudness": SARVAM_LOUDNESS_MODELS},
 }
-# Deepgram model ids can carry the voice ("aura-2-thalia-en"), so its controls match on the family prefix.
+# Controls that follow a model family match on its prefix: Deepgram ids carry the voice ("aura-2-thalia-en"),
+# and ElevenLabs v4 spans several ids.
 TTS_CONTROL_MODEL_PREFIXES = {
     SynthesizerProvider.DEEPGRAM: {"speed": ("aura-2",)},
+    SynthesizerProvider.ELEVENLABS: {"clone_strength": ELEVENLABS_CLONE_STRENGTH_MODEL_PREFIXES},
 }
 TTS_MODEL_CONTROL_LIMITS = {
-    SynthesizerProvider.SARVAM: {"bulbul:v3": {"speed": (0.5, 2.0)}},
+    SynthesizerProvider.SARVAM: {
+        "bulbul:v3": {"speed": (0.5, 2.0)},
+        "bulbul:v4-flash": {"speed": (0.5, 2.0)},
+    },
 }
 # provider_config keys that change how the audio sounds, so cached audio (welcome, static-node clips) keys on them.
 TTS_AUDIO_SETTINGS = {
     SynthesizerProvider.AZURETTS: frozenset({"speed"}),
     SynthesizerProvider.CARTESIA: frozenset({"speed", "volume"}),
     SynthesizerProvider.DEEPGRAM: frozenset({"speed"}),
-    SynthesizerProvider.ELEVENLABS: frozenset({"speed", "similarity_boost", "temperature", "style"}),
+    SynthesizerProvider.ELEVENLABS: frozenset({"speed", "similarity_boost", "temperature", "style", "clone_strength"}),
     SynthesizerProvider.GEMINI: frozenset({"style"}),
-    SynthesizerProvider.KALPA: frozenset({"temperature", "acoustic_temperature", "audio_quality", "max_new_tokens"}),
+    SynthesizerProvider.KALPA: frozenset({"temperature", "acoustic_temperature", "audio_quality"}),
     SynthesizerProvider.OPENAI: frozenset({"speed"}),
     SynthesizerProvider.PIXA: frozenset({"top_p", "repetition_penalty"}),
     SynthesizerProvider.RIME: frozenset({"time_scale_factor"}),
     SynthesizerProvider.SARVAM: frozenset({"speed", "loudness"}),
     SynthesizerProvider.SMALLEST: frozenset({"speed"}),
     SynthesizerProvider.SONIOX: frozenset({"speed", "reduce_silence"}),
+    SynthesizerProvider.CUSTOM: frozenset({"speed", "extra_body"}),
 }
+
+# Provider pronunciation dictionaries, referenced by ID and applied by the provider. A dictionary
+# lives in one provider account, so it only works with that account's API key.
+ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES = 3
+# Cartesia honours pronunciation_dict_id on sonic-3 and newer, dated snapshots included.
+CARTESIA_PRONUNCIATION_DICT_MODEL_PREFIXES = ("sonic-3", "sonic-preview", "sonic-latest")
+# Limits for a synthesizer's word -> say-as pronunciation rules.
+PRONUNCIATION_RULES_MAX = 100
+PRONUNCIATION_RULE_WORD_MAX_LENGTH = 50
+PRONUNCIATION_RULE_SAY_AS_MAX_LENGTH = 100
 
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,

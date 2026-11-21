@@ -172,6 +172,47 @@ def test_routing_forwards_service_tier_and_reasoning_effort():
     assert kw["reasoning_effort"] == "low"
 
 
+OVERFLOW = {"provider": "openai", "model": "gpt-4.1-mini", "llm_key": "eu-key"}
+
+
+def test_routing_following_the_conversation_takes_its_tier_and_overflow():
+    agent, _ = _build(
+        provider="azure",
+        base_url="https://ptu.azure.example",
+        route_routing_to_conversation=True,
+        service_tier="priority",
+        overflow_llm=OVERFLOW,
+    )
+    kw = _routing_kwargs(agent)
+    assert kw["service_tier"] == "priority"
+    assert kw["overflow_llm"] == OVERFLOW
+
+
+def test_azure_routing_on_its_own_deployment_takes_no_conversation_tier_or_overflow():
+    # A swap kept routing on the agent's Azure deployment (explicit creds); the conversation's priority
+    # tier and PTU overflow belong to the conversation's backend, not this one.
+    agent, _ = _build(
+        provider="openai",
+        service_tier="priority",
+        overflow_llm=OVERFLOW,
+        routing_provider="azure",
+        routing_model="azure/gpt-4.1-mini",
+        routing_llm_key="standard-azure-key",
+        routing_base_url="https://standard.azure.example",
+    )
+    kw = _routing_kwargs(agent)
+    assert kw["llm_key"] == "standard-azure-key"
+    assert "service_tier" not in kw
+    assert "overflow_llm" not in kw
+
+
+def test_routing_on_another_provider_takes_no_conversation_tier_or_overflow():
+    agent, _ = _build(provider="azure", service_tier="priority", overflow_llm=OVERFLOW, routing_provider="google")
+    kw = _routing_kwargs(agent)
+    assert "service_tier" not in kw
+    assert "overflow_llm" not in kw
+
+
 def test_gemini_conversation_aux_llm_uses_platform_openai_key():
     _, aux_calls = _build(provider="google", model="gemini-3.5-flash-lite")
     assert aux_calls, "aux OpenAiLLM was never constructed"
@@ -184,6 +225,14 @@ def test_openai_conversation_aux_llm_reuses_its_own_key():
 
 
 # Real construction (no registry mock) for the paths whose behavior depends on the concrete LLM class.
+REAL_AGENT_ENV = {
+    "OPENAI_API_KEY": "plat",
+    "GOOGLE_API_KEY": "gg",
+    "AZURE_OPENAI_BASE_URL": "https://platform.azure.example",
+    "AZURE_OPENAI_API_KEY": "platform-azure-key",
+}
+
+
 def _real_agent(env=None, **overrides):
     config = {
         "agent_information": "Test agent",
@@ -194,9 +243,7 @@ def _real_agent(env=None, **overrides):
         "nodes": [{"id": "start", "prompt": "hi", "edges": []}],
     }
     config.update(overrides)
-    with patch.dict(
-        os.environ, env if env is not None else {"OPENAI_API_KEY": "plat", "GOOGLE_API_KEY": "gg"}, clear=True
-    ):
+    with patch.dict(os.environ, env if env is not None else REAL_AGENT_ENV, clear=True):
         return GraphAgent(config)
 
 
@@ -224,7 +271,12 @@ def test_already_prefixed_litellm_model_not_doubled():
 
 AZURE_ROUTING = {"routing_provider": "azure", "routing_model": "azure/gpt-4.1-mini"}
 # What the runtime carries: an Azure key, and no endpoint to spend it against.
-AZURE_KEY_ONLY_ENV = {"OPENAI_API_KEY": "plat", "GOOGLE_API_KEY": "gg", "AZURE_OPENAI_API_KEY": "platform-azure-key"}
+AZURE_KEY_ONLY_ENV = {
+    "OPENAI_API_KEY": "plat",
+    "GOOGLE_API_KEY": "gg",
+    "AZURE_OPENAI_API_KEY": "platform-azure-key",
+    "AZURE_OPENAI_BASE_URL": "https://platform.azure.example",
+}
 
 
 def test_injected_azure_routing_creds_build_the_real_client_without_a_platform_endpoint():

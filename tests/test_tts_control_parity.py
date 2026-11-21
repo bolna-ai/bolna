@@ -67,6 +67,7 @@ async def test_openai_passes_speed_to_the_sdk(monkeypatch):
         response_format="mp3",
         input="hello",
         speed=1.75,
+        extra_body=None,
     )
 
 
