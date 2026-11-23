@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Speech-to-text configuration · Bolna</title>
+  <style>
+    body { font: 1rem/1.5 system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; color: #192e29; }
+    h1 { font-size: 1.6rem; margin: 0 0 1rem; }
+    fieldset { display: flex; flex-wrap: wrap; gap: 1rem; border: 0; padding: 0; margin: 0; }
+    label { flex: 1 1 12rem; font-weight: 600; }
+    input, select { display: block; box-sizing: border-box; width: 100%; padding: .5rem; font: inherit; }
+    [hidden] { display: none; }
+    pre { padding: .75rem; background: #f2f5f4; white-space: pre-wrap; overflow-wrap: anywhere; }
+    a { color: #125648; }
+  </style>
+</head>
+<body>
+  <h1>Speech-to-text configuration</h1>
+  <fieldset disabled>
+    <label>Search providers
+      <input id="provider" list="providers" placeholder="Provider name" autocomplete="off">
+      <datalist id="providers"></datalist>
+    </label>
+    <label id="custom-model">Model
+      <input id="model" placeholder="Model ID" autocomplete="off">
+    </label>
+    <label id="known-model" hidden>Model
+      <select id="model-options"></select>
+    </label>
+  </fieldset>
+  <p>Use this configuration in <code>tools_config.transcriber</code> when <a href="/docs#/default/create_agent_agent_post">creating an agent</a>.</p>
+  <pre id="config" aria-live="polite">Loading providers…</pre>
+  <script type="module">
+    const provider = document.querySelector('#provider');
+    const model = document.querySelector('#model');
+    const select = document.querySelector('#model-options');
+    const output = document.querySelector('#config');
+    try {
+      const response = await fetch('/openapi.json');
+      if (!response.ok) throw new Error('Schema unavailable');
+      const schema = (await response.json()).components.schemas.Transcriber;
+      const providers = schema.properties.provider.enum;
+      const options = schema['x-provider-options'] ?? {};
+      document.querySelector('#providers').replaceChildren(...providers.map(id => new Option(options[id]?.title ?? id, id)));
+      document.querySelector('fieldset').disabled = false;
+
+      function showConfig() {
+        if (!providers.includes(provider.value)) {
+          output.textContent = 'Select a provider.';
+          return;
+        }
+        const config = {provider: provider.value};
+        const selectedModel = options[provider.value]?.models ? select.value : model.value.trim();
+        if (selectedModel) config.model = selectedModel;
+        output.textContent = JSON.stringify(config, null, 2);
+      }
+
+      provider.addEventListener('input', () => {
+        const choice = options[provider.value];
+        document.querySelector('#known-model').hidden = !choice?.models;
+        document.querySelector('#custom-model').hidden = Boolean(choice?.models);
+        select.replaceChildren(...(choice?.models ?? []).map(id => new Option(id, id)));
+        if (choice?.default_model) select.value = choice.default_model;
+        model.value = '';
+        showConfig();
+      });
+      model.addEventListener('input', showConfig);
+      select.addEventListener('change', showConfig);
+      showConfig();
+    } catch {
+      output.textContent = 'Could not load the agent schema. Reload to try again.';
+    }
+  </script>
+</body>
+</html>

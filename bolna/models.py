@@ -15,6 +15,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 from .providers import *
+from .transcriber.gnani_transcriber import GNANI_DEFAULT_MODEL, GNANI_MODELS, validate_prisma_config
 from .enums import (
     TelephonyProvider,
     SynthesizerProvider,
@@ -389,6 +390,18 @@ class AssemblyAITranscriberConfig(BaseModel):
 
 
 class Transcriber(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "x-provider-options": {
+                TranscriberProvider.GNANI.value: {
+                    "title": "Gnani AI",
+                    "models": list(GNANI_MODELS),
+                    "default_model": GNANI_DEFAULT_MODEL,
+                },
+            }
+        }
+    )
+
     model: Optional[str] = "nova-2"
     language: Optional[str] = None
     stream: bool = False
@@ -399,7 +412,7 @@ class Transcriber(BaseModel):
     # Free-form ASR biasing text.
     context: Optional[str] = None
     task: Optional[str] = "transcribe"
-    provider: Optional[str] = "deepgram"
+    provider: Optional[str] = Field(default="deepgram", json_schema_extra={"enum": TranscriberProvider.all_values()})
     multilingual: Optional[Dict[str, Any]] = None
     active: Optional[str] = None
     # Per-call self-hosted Deepgram endpoint override; unset falls back to DEEPGRAM_HOST* env.
@@ -419,6 +432,17 @@ class Transcriber(BaseModel):
     vad_threshold: Optional[float] = 0.5
     vad_prefix_padding_ms: Optional[int] = 300
     assemblyai_config: Optional[AssemblyAITranscriberConfig] = None
+
+    @model_validator(mode="after")
+    def validate_gnani(self):
+        if self.provider == TranscriberProvider.GNANI:
+            if "model" not in self.model_fields_set or self.model is None:
+                self.model = GNANI_DEFAULT_MODEL
+            if self.language is None:
+                self.language = "en-IN"
+            # The task manager chooses the transport when starting the call.
+            validate_prisma_config(self.model, self.language)
+        return self
 
     @field_validator("provider")
     def validate_model(cls, value):

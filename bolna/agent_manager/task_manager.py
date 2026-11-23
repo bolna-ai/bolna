@@ -2008,7 +2008,7 @@ class TaskManager(BaseManager):
 
                 # Checking models for backwards compatibility
                 if (
-                    transcriber_config["model"] in SUPPORTED_TRANSCRIBER_MODELS.keys()
+                    transcriber_config.get("model") in SUPPORTED_TRANSCRIBER_MODELS
                     or transcriber_config["provider"] in SUPPORTED_TRANSCRIBER_PROVIDERS.keys()
                 ):
                     transcriber_config["stream"] = streams_pipeline(

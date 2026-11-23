@@ -19,6 +19,7 @@ from .synthesizer import (
 from .transcriber import (
     DeepgramTranscriber,
     AzureTranscriber,
+    GnaniTranscriber,
     SarvamTranscriber,
     AssemblyAITranscriber,
     GoogleTranscriber,
@@ -96,6 +97,7 @@ SUPPORTED_SYNTHESIZER_MODELS = {
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
     TranscriberProvider.DEEPGRAM.value: DeepgramTranscriber,
     TranscriberProvider.AZURE.value: AzureTranscriber,
+    TranscriberProvider.GNANI.value: GnaniTranscriber,
     TranscriberProvider.SARVAM.value: SarvamTranscriber,
     TranscriberProvider.ASSEMBLY.value: AssemblyAITranscriber,
     TranscriberProvider.GOOGLE.value: GoogleTranscriber,
