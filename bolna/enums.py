@@ -178,7 +178,6 @@ class ResponseStreamEvent(str, Enum):
 
     # WebSocket client commands
     CREATE = "response.create"
-    CANCEL = "response.cancel"
 
     @classmethod
     def terminal_events(cls):
