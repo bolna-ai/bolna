@@ -374,9 +374,10 @@ HANGUP_AFTER_REPLY = "hangup_after_reply"
 WEB_SEARCH_FUNCTION_NAME = "web_search"
 # What the model sees for a run_async tool until its real result replaces it in history.
 ASYNC_TOOL_SUBMITTED_RESULT = (
-    '{"status": "submitted", "message": "This request is running in the background and its result will '
-    "replace this message when it finishes. Do not call this tool again for the same request, and do not "
-    'assume or tell the user its outcome until the result is here."}'
+    '{"status": "submitted", "message": "The request was sent and is still running in the background, so its '
+    "outcome is not known yet. You may tell the user it has been submitted, but do not say it succeeded or "
+    "failed, and do not call this tool again for the same request. Its result will replace this message when "
+    'it finishes."}'
 )
 
 END_CALL_TOOL_DEFINITION = {
