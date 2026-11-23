@@ -14,6 +14,8 @@ class APIParams(BaseModel):
     pre_call_message: Optional[Union[str, dict]] = None
     pre_call_webhook_url: Optional[str] = None
     pre_call_webhook_param: Optional[Union[str, dict]] = None
+    # The turn carries on without waiting for the response, which replaces a placeholder result when it lands.
+    run_async: bool = False
     # Graph-agent tool scope; None == GLOBAL. NODE limits visibility to ``nodes``.
     scope: Optional[ToolScope] = None
     nodes: Optional[List[str]] = None
