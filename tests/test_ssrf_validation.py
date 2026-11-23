@@ -13,6 +13,7 @@ import ipaddress
 import socket
 
 import aiohttp
+import httpcore
 import httpx
 import openai
 import pytest
@@ -339,3 +340,27 @@ async def test_guarded_transport_reaches_a_host_whose_nameserver_skips_aaaa(monk
         response = await asyncio.wait_for(client.get(f"http://no-aaaa.example:{port}/"), timeout=1)
     assert response.status_code == 200
     assert paths == ["/"]
+
+
+async def test_private_aaaa_beside_a_public_a_is_never_dialed(monkeypatch):
+    """IPv4 first means the AAAA answer is never used, so no unchecked address can be dialed."""
+
+    async def fake_getaddrinfo(host, port, *args, family=socket.AF_UNSPEC, **kwargs):
+        v4 = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        v6 = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0))
+        return {socket.AF_INET: [v4], socket.AF_INET6: [v6]}.get(family, [v4, v6])
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", fake_getaddrinfo)
+    hosts = await fch._IPv4FirstResolver().resolve("dual-stack.example", 443, socket.AF_UNSPEC)
+    assert [host["host"] for host in hosts] == ["93.184.216.34"]
+
+    dialed = []
+
+    class RecordingBackend:
+        async def connect_tcp(self, host, port, **options):
+            dialed.append(host)
+            raise httpcore.ConnectError("not connecting in a test")
+
+    with pytest.raises(httpcore.ConnectError):
+        await fch._GuardedNetworkBackend(RecordingBackend()).connect_tcp("dual-stack.example", 443)
+    assert dialed == ["93.184.216.34"]
