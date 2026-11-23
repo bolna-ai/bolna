@@ -1,8 +1,11 @@
 """Barge-in hints on the Responses API path: what gets injected, and cancelling the in-flight response."""
 
+import asyncio
 from unittest.mock import patch, AsyncMock, MagicMock
 
-from bolna.llms.openai_llm import OpenAiLLM
+from websockets.protocol import State as WSState
+
+from bolna.llms.openai_llm import OpenAiLLM, OpenAIWSConnection
 
 
 def _make_llm(**overrides):
@@ -201,35 +204,33 @@ class TestCancelInFlightResponse:
         assert llm.previous_response_id == "resp_1"
 
     def test_cancel_in_flight_no_response_id_is_noop(self):
-        llm = _make_llm(previous_response_id=None)
+        llm = _make_llm(previous_response_id=None, _pending_call_ids={"call_1"})
         llm._ws_transport = MagicMock()
         llm.cancel_in_flight_response()
-        llm._ws_transport.cancel_response.assert_not_called()
+        assert llm._pending_call_ids == {"call_1"}
 
     def test_cancel_in_flight_drops_chain_but_keeps_hint(self):
-        # a lost cancel race can leave a server-committed fc — drop the chain, keep the hint
-        import asyncio
-
         llm = _make_llm(previous_response_id="resp_1", _pending_call_ids={"call_ghost"})
         llm._in_flight_response_id = "resp_1"
         llm.set_interruption_hint("hello th")
         llm._ws_transport = MagicMock()
-        llm._ws_transport.cancel_response = AsyncMock()
 
-        loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(loop)
-            llm.cancel_in_flight_response()
-            pending = asyncio.all_tasks(loop)
-            loop.run_until_complete(asyncio.gather(*pending))
-        finally:
-            loop.close()
-            asyncio.set_event_loop(None)
+        llm.cancel_in_flight_response()
 
-        llm._ws_transport.cancel_response.assert_awaited_once_with("resp_1")
         assert llm.previous_response_id is None
         assert llm._in_flight_response_id is None
         assert llm._pending_call_ids == set()
         assert llm._interruption_hint == "hello th"
-        assert llm._pending_call_ids == set()
-        llm._ws_transport.cancel_response.assert_called_once_with("resp_1")
+
+    async def test_cancel_in_flight_sends_nothing_on_the_socket(self):
+        llm = _make_llm(previous_response_id="resp_1")
+        transport = OpenAIWSConnection(api_key="k", url="wss://api.openai.com/v1/responses")
+        transport._ws = MagicMock(state=WSState.OPEN)
+        transport._ws.send = AsyncMock()
+        llm._ws_transport = transport
+
+        llm.cancel_in_flight_response()
+        await asyncio.sleep(0)
+
+        transport._ws.send.assert_not_called()
+        assert llm.previous_response_id is None

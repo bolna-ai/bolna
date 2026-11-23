@@ -154,19 +154,6 @@ class OpenAIWSConnection:
                 if self._needs_reset:
                     self.discard_socket()
 
-    async def cancel_response(self, response_id: str):
-        """Best-effort cancel: signal the server to terminate the in-flight
-        response. We do not drain events here — the concurrent stream_response
-        loop is the sole recv consumer and will see the resulting terminal
-        event itself. Holding the lock would block the cancel until the
-        stream completes naturally, defeating its purpose."""
-        if self._ws is None or self._ws.state is not WSState.OPEN:
-            return
-        try:
-            await self._ws.send(json.dumps({"type": ResponseStreamEvent.CANCEL, "response_id": response_id}))
-        except Exception:
-            pass
-
     async def disconnect(self):
         # Settle any in-flight pre-warm first: it assigns _ws after the fact, so closing
         # before it lands would leave a live socket nobody owns.
@@ -894,11 +881,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.started_streaming = False
 
     def cancel_in_flight_response(self):
-        """Cancel the in-flight WS response and drop the chain — a lost cancel race can leave a
-        server-committed function_call this client never saw, poisoning every later chained
-        request. Chain state only: the hint sync_history sets right after this must survive."""
+        """Drop the WS chain, keeping the hint. No response.cancel: OpenAI answers it with an error frame."""
         if self._ws_transport and self.previous_response_id:
-            asyncio.ensure_future(self._ws_transport.cancel_response(self.previous_response_id))
             self.previous_response_id = None
             self._in_flight_response_id = None
             self._pending_call_ids = set()
