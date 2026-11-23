@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from bolna.constants import DEFAULT_LANGUAGE_CODE
 from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
+from .aws_credentials import bedrock_credentials
 from .llm import BaseLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
@@ -23,6 +24,14 @@ load_dotenv()
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 logging.getLogger("LiteLLM Router").setLevel(logging.WARNING)
 logging.getLogger("LiteLLM Proxy").setLevel(logging.WARNING)
+
+
+async def _aws_credentials(model, model_args):
+    # Bedrock on IAM auth: litellm would otherwise refresh expiring credentials with a blocking STS call.
+    # Passed to acompletion only, so they never ride along in model_args (e.g. into tool-call payloads).
+    if model.startswith("bedrock/") and "api_key" not in model_args:
+        return await bedrock_credentials()
+    return {}
 
 
 class LiteLLM(BaseLLM):
@@ -96,7 +105,8 @@ class LiteLLM(BaseLLM):
         )
 
         try:
-            completion_stream = await acompletion(**model_args)
+            aws_credentials = await _aws_credentials(self.model, model_args)
+            completion_stream = await acompletion(**model_args, **aws_credentials)
         except ContentPolicyViolationError as e:
             logger.error(f"LiteLLM content policy violation: {e}")
             raise
@@ -192,7 +202,8 @@ class LiteLLM(BaseLLM):
                 "temperature": 0.0,
             }
         )
-        stream = await acompletion(**model_args)
+        aws_credentials = await _aws_credentials(self.model, model_args)
+        stream = await acompletion(**model_args, **aws_credentials)
         return await read_routing_stream(stream, parsed_tools)
 
     async def generate(self, messages, stream=False, request_json=False, meta_info=None, ret_metadata=False):
@@ -216,7 +227,8 @@ class LiteLLM(BaseLLM):
             stream,
         )
         try:
-            completion = await acompletion(**model_args)
+            aws_credentials = await _aws_credentials(self.model, model_args)
+            completion = await acompletion(**model_args, **aws_credentials)
             text = completion.choices[0].message.content
         except ContentPolicyViolationError as e:
             logger.error(f"LiteLLM content policy violation: {e}")
