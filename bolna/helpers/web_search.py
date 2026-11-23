@@ -20,12 +20,16 @@ NO_RESULTS = json.dumps({"status": "success", "message": "The search returned no
 FIRECRAWL_SEARCH_URL = "https://api.firecrawl.dev/v2/search"
 EXA_SEARCH_URL = "https://api.exa.ai/search"
 PARALLEL_SEARCH_URL = "https://api.parallel.ai/v1/search"
+KEENABLE_SEARCH_URL = "https://api.keenable.ai/v1/search"
+# Keenable's snippet_max_length accepts 180-10000 characters.
+KEENABLE_MIN_SNIPPET_CHARS = 180
 
 PROVIDER_KEY_ENV = {
     "openai": "OPENAI_API_KEY",
     "firecrawl": "FIRECRAWL_API_KEY",
     "exa": "EXA_API_KEY",
     "parallel": "PARALLEL_API_KEY",
+    "keenable": "KEENABLE_API_KEY",
 }
 
 
@@ -140,6 +144,32 @@ async def _search_parallel(query, api_key, cfg, timeout_s) -> list[SearchHit]:
     ]
 
 
+async def _search_keenable(query, api_key, cfg, timeout_s) -> list[SearchHit]:
+    # mode "realtime" is Keenable's low-latency mode; the default "pro" retrieves deeper but slower.
+    # Cards (instant answers) are disabled: their cards.keenable.ai URLs expire after a day.
+    data = await _post_json(
+        KEENABLE_SEARCH_URL,
+        {"X-API-Key": api_key, "X-Keenable-Title": "bolna"},
+        {
+            "query": query,
+            "mode": "realtime",
+            "max_results": cfg.max_results,
+            "snippet_max_length": max(cfg.max_snippet_chars, KEENABLE_MIN_SNIPPET_CHARS),
+            "disable_cards": True,
+        },
+        timeout_s,
+    )
+    return [
+        SearchHit(
+            title=r.get("title") or "",
+            url=r.get("url") or "",
+            snippet=r.get("snippet") or r.get("description") or "",
+        )
+        for r in (data.get("results") or [])
+        if isinstance(r, dict)
+    ]
+
+
 def _openai_citations(response) -> list[str]:
     urls: list[str] = []
     for item in getattr(response, "output", None) or []:
@@ -182,6 +212,7 @@ _ADAPTERS = {
     "firecrawl": _search_firecrawl,
     "exa": _search_exa,
     "parallel": _search_parallel,
+    "keenable": _search_keenable,
 }
 
 
