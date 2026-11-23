@@ -1,0 +1,486 @@
+"""An agent's fallbacks are wired at call setup: a single-provider transcriber or voice with fallbacks runs as a
+one-language pool, each entry is built only when needed and never with the primary provider's key, and a switch
+is recorded against the provider that failed."""
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
+import bolna.agent_manager.task_manager as tmmod
+from bolna.agent_manager.task_manager import TaskManager
+from bolna.helpers.fallbacks import FallbackRecorder
+from bolna.llms.fallback_llm import FallbackLLM
+
+
+def bind(tm, *names):
+    for name in names:
+        setattr(tm, name, getattr(TaskManager, name).__get__(tm, TaskManager))
+
+
+def recorder(calls, provider):
+    def factory(*args, **kwargs):
+        calls.append((provider, kwargs))
+        return MagicMock(model=kwargs.get("model"))
+
+    return factory
+
+
+def setup_tm(task_config, kwargs=None, provider_api_keys=None):
+    tm = MagicMock()
+    tm.task_config = task_config
+    tm.turn_based_conversation = False
+    tm.is_web_based_call = False
+    tm.enforce_streaming = True
+    tm.language = None
+    tm.language_switcher = None
+    tm.kwargs = kwargs or {}
+    tm.provider_api_keys = provider_api_keys or {}
+    tm.unhealthy_providers = {}
+    tm.llm_latencies = MagicMock(turn_latencies=[])
+    tm.fallback_recorder = FallbackRecorder(0, lambda: tm.llm_latencies.turn_latencies)
+    bind(
+        tm,
+        "_TaskManager__pool_leg_kwargs",
+        "_TaskManager__setup_transcriber_with_fallbacks",
+        "_TaskManager__start_on_healthy",
+        "_TaskManager__build_transcriber_leg",
+        "_TaskManager__transcriber_fallback_entries",
+        "_TaskManager__add_synthesizer_fallbacks",
+        "_TaskManager__build_synthesizer_leg",
+        "_TaskManager__synthesizer_fallback_entries",
+        "_TaskManager__set_synthesizer_identity",
+    )
+    return tm
+
+
+def test_a_single_transcriber_with_fallbacks_runs_as_a_one_language_pool_with_no_language_detector(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tmmod,
+        "SUPPORTED_TRANSCRIBER_PROVIDERS",
+        {"deepgram": recorder(calls, "deepgram"), "sarvam": recorder(calls, "sarvam")},
+    )
+    pool = MagicMock()
+    monkeypatch.setattr(tmmod, "TranscriberPool", pool)
+    tm = setup_tm(
+        {
+            "tools_config": {
+                "input": {"provider": "plivo"},
+                "transcriber": {
+                    "provider": "deepgram",
+                    "model": "nova-3",
+                    "language": "hi",
+                    "fallbacks": [{"provider": "sarvam", "model": "saaras:v3", "language": None}],
+                },
+            }
+        },
+        kwargs={"transcriber_key": "customer-deepgram-key"},
+    )
+
+    TaskManager._TaskManager__setup_transcriber.__get__(tm, TaskManager)()
+
+    pool_kwargs = pool.call_args.kwargs
+    assert pool_kwargs["active_label"] == "hi"
+    assert pool_kwargs.get("lid_provider") is None
+    assert [provider for provider, _ in calls] == ["deepgram"]
+    assert calls[0][1]["transcriber_key"] == "customer-deepgram-key"
+
+    (entry,) = pool_kwargs["fallbacks"]["hi"]
+    assert (entry.provider, entry.model) == ("sarvam", "saaras:v3")
+    entry.build()
+    provider, built = calls[1]
+    assert provider == "sarvam"
+    assert built["language"] == "hi"
+    assert "transcriber_key" not in built
+    assert "fallbacks" not in calls[0][1]
+
+
+def test_a_single_voice_with_fallbacks_runs_as_a_one_voice_pool(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tmmod,
+        "SUPPORTED_SYNTHESIZER_MODELS",
+        {"cartesia": recorder(calls, "cartesia"), "sarvam": recorder(calls, "sarvam")},
+    )
+    pool = MagicMock()
+    monkeypatch.setattr(tmmod, "SynthesizerPool", pool)
+    sarvam = {
+        "provider": "sarvam",
+        "provider_config": {"voice": "Anushka", "voice_id": "anushka", "model": "bulbul:v3", "language": "hi"},
+    }
+    tm = setup_tm(
+        {
+            "tools_config": {
+                "transcriber": {"language": "hi"},
+                "synthesizer": {
+                    "provider": "cartesia",
+                    "provider_config": {"voice": "Riya", "voice_id": "riya-id", "model": "sonic-3", "language": "hi"},
+                    "stream": True,
+                    "fallbacks": [sarvam],
+                },
+                "output": {"provider": "plivo"},
+                "llm_agent": None,
+            }
+        },
+        kwargs={"synthesizer_key": "customer-cartesia-key"},
+    )
+    tm.language = "hi"
+
+    TaskManager._TaskManager__setup_synthesizer.__get__(tm, TaskManager)()
+
+    pool_kwargs = pool.call_args.kwargs
+    assert list(pool_kwargs["synthesizers"]) == ["hi"]
+    assert [provider for provider, _ in calls] == ["cartesia"]
+    assert "fallbacks" not in calls[0][1]
+
+    (entry,) = pool_kwargs["fallbacks"]["hi"]
+    entry.build()
+    provider, built = calls[1]
+    assert (provider, built["voice_id"], built["use_mulaw"]) == ("sarvam", "anushka", True)
+    assert "synthesizer_key" not in built
+
+
+def test_a_fallback_voice_on_a_web_call_plays_at_the_web_rate(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tmmod,
+        "SUPPORTED_SYNTHESIZER_MODELS",
+        {"cartesia": recorder(calls, "cartesia"), "sarvam": recorder(calls, "sarvam")},
+    )
+    pool = MagicMock()
+    monkeypatch.setattr(tmmod, "SynthesizerPool", pool)
+    sarvam = {
+        "provider": "sarvam",
+        "provider_config": {"voice": "Anushka", "voice_id": "anushka", "model": "bulbul:v3", "language": "hi"},
+    }
+    cartesia_voice = {"voice": "Riya", "voice_id": "riya-id", "model": "sonic-3", "language": "hi"}
+    tm = setup_tm(
+        {
+            "tools_config": {
+                "transcriber": {"language": "hi"},
+                "synthesizer": {
+                    "provider": "cartesia",
+                    "provider_config": {**cartesia_voice, "sampling_rate": tmmod.WEBCALL_TTS_SAMPLE_RATE},
+                    "stream": True,
+                    "fallbacks": [sarvam],
+                },
+                "output": {"provider": "default"},
+                "llm_agent": None,
+            }
+        }
+    )
+    tm.is_web_based_call = True
+    tm.language = "hi"
+
+    TaskManager._TaskManager__setup_synthesizer.__get__(tm, TaskManager)()
+
+    (entry,) = pool.call_args.kwargs["fallbacks"]["hi"]
+    entry.build()
+    _, built = calls[1]
+    assert (built["sampling_rate"], built["use_mulaw"]) == (tmmod.WEBCALL_TTS_SAMPLE_RATE, False)
+
+
+def test_a_fallback_takes_its_own_providers_key_when_the_call_has_one():
+    tm = setup_tm({}, kwargs={"transcriber_key": "deepgram-key"}, provider_api_keys={"sarvam": "sarvam-key"})
+    leg_kwargs = TaskManager._TaskManager__pool_leg_kwargs.__get__(tm, TaskManager)
+    assert leg_kwargs(tm.kwargs, "transcriber_key", "sarvam", fallback=True)["transcriber_key"] == "sarvam-key"
+
+
+async def test_an_llm_switch_is_recorded_and_the_call_follows_the_model_now_serving(monkeypatch):
+    tm = setup_tm({})
+    tm.llm_agent_config = {"fallbacks": [{"provider": "openai", "model": "gpt-4.1-mini", "reasoning_effort": None}]}
+    tm.llm_config = {"provider": "azure", "model": "azure/gpt-4.1-mini", "max_tokens": 200, "temperature": 0.1}
+    tm.kwargs = {"llm_key": "azure-key", "llm_fallback_credentials": [{"llm_key": "openai-eu-key"}]}
+    tm.on_turn_usage = tm.on_overflow = AsyncMock()
+    tm._report_provider_health = AsyncMock()
+    tm._cb_tasks = set()
+    bind(
+        tm,
+        "_TaskManager__on_llm_fallback",
+        "_TaskManager__on_llm_retry",
+        "_TaskManager__spawn_health_report",
+    )
+    built = []
+    monkeypatch.setitem(tmmod.SUPPORTED_LLM_PROVIDERS, "openai", lambda **kwargs: built.append(kwargs) or MagicMock())
+
+    chain = TaskManager._TaskManager__with_llm_fallbacks.__get__(tm, TaskManager)(MagicMock())
+    assert isinstance(chain, FallbackLLM)
+    (entry,) = chain._pending
+    entry.build()
+    assert built[0]["llm_key"] == "openai-eu-key"
+    assert built[0]["max_tokens"] == 200
+
+    error = type("RateLimitError", (Exception,), {"status_code": 429})("no capacity")
+    tm._TaskManager__on_llm_fallback(error, entry, {"sequence_id": 3, "turn_id": 2})
+    await asyncio.sleep(0)
+
+    (event,) = tm.fallback_recorder.events
+    assert event["component"] == "llm"
+    assert event["from"] == {"provider": "azure", "model": "azure/gpt-4.1-mini"}
+    assert event["to"] == {"provider": "openai", "model": "gpt-4.1-mini"}
+    assert (event["reason"], event["sequence_id"]) == ("http_429", 3)
+    tm._report_provider_health.assert_awaited_once_with("llm", "azure", "azure/gpt-4.1-mini", False)
+    assert (tm.llm_config["provider"], tm.llm_config["model"]) == ("openai", "gpt-4.1-mini")
+    assert tm.on_turn_usage is None and tm.on_overflow is None
+    # The agent's Azure key is never offered as the key of the OpenAI model now serving.
+    tm.s2s_provider_name = None
+    assert TaskManager._web_search_openai_fallback_key.__get__(tm, TaskManager)() is None
+
+
+async def test_an_asr_switch_is_recorded_with_what_the_new_provider_served_and_the_call_follows_it():
+    tm = setup_tm({})
+    tm.transcriber_provider = "deepgram"
+    tm._cb_transcriber_connect_reported = True
+    tm._report_provider_health = AsyncMock()
+    tm._cb_tasks = set()
+    bind(tm, "_TaskManager__on_transcriber_fallback", "_TaskManager__spawn_health_report")
+    replacement = MagicMock()
+    entry = MagicMock(provider="sarvam", model="saaras:v3")
+
+    tm._TaskManager__on_transcriber_fallback("hi", MagicMock(model="nova-3"), replacement, entry, "HTTP 429")
+    await asyncio.sleep(0)
+    replacement.billed_audio_s.return_value = 41.25
+
+    (event,) = tm.fallback_recorder.with_usage()
+    assert (event["from"], event["to"]) == (
+        {"provider": "deepgram", "model": "nova-3"},
+        {"provider": "sarvam", "model": "saaras:v3"},
+    )
+    assert event["served_usage"] == {"audio_s": 41.25}
+    assert tm.transcriber_provider == "sarvam"
+    assert tm._cb_transcriber_connect_reported is False
+    tm._report_provider_health.assert_awaited_once_with("transcriber", "deepgram", "nova-3", False)
+
+
+def test_each_llm_fallback_is_credited_with_the_turns_logged_after_it_took_over():
+    turns = []
+    recorder = FallbackRecorder(0, lambda: turns)
+
+    def answer(sequence_id):
+        turns.append({"sequence_id": sequence_id, "input_tokens": 100, "output_tokens": 1, "cached_tokens": 0})
+
+    answer(1)
+    # A switch made outside a caller turn carries no turn of its own.
+    recorder.record("llm", {}, {"model": "second"}, "http_429", "", meta_info={"sequence_id": -1})
+    answer(2)
+    answer(3)
+    # This turn's row was opened before it failed; the model taking over finishes it.
+    turns.append({"sequence_id": 4})
+    recorder.record("llm", {}, {"model": "third"}, "http_503", "", meta_info={"sequence_id": 4})
+    turns[-1] = {"sequence_id": 4, "input_tokens": 100, "output_tokens": 1, "cached_tokens": 0}
+    answer(5)
+
+    second, third = recorder.with_usage()
+    assert second["served_usage"] == {"input_tokens": 200, "output_tokens": 2, "cached_tokens": 0, "turns": 2}
+    assert third["served_usage"] == {"input_tokens": 200, "output_tokens": 2, "cached_tokens": 0, "turns": 2}
+
+
+async def test_a_tts_switch_names_both_voices_as_request_logs_do_and_the_call_speaks_as_the_new_one():
+    tm = setup_tm({})
+    tm.synthesizer_provider = "cartesia"
+    tm._report_provider_health = AsyncMock()
+    tm._cb_tasks = set()
+    bind(tm, "_TaskManager__on_synthesizer_fallback", "_TaskManager__spawn_health_report")
+    failed, replacement = MagicMock(), MagicMock()
+    failed.get_engine.return_value = "sonic-3"
+    replacement.get_engine.return_value = "bulbul:v3"
+    config = {"provider": "sarvam", "provider_config": {"voice": "Priya", "voice_id": "priya", "model": "bulbul:v3"}}
+    entry = MagicMock(provider="sarvam", model="bulbul:v3", config=config)
+
+    tm._TaskManager__on_synthesizer_fallback("hi", failed, replacement, entry, RuntimeError("HTTP 429"))
+    await asyncio.sleep(0)
+    replacement.get_synthesized_characters.return_value = 310
+
+    (event,) = tm.fallback_recorder.with_usage()
+    assert (event["from"], event["to"]) == (
+        {"provider": "cartesia", "model": "sonic-3"},
+        {"provider": "sarvam", "model": "bulbul:v3"},
+    )
+    assert event["served_usage"] == {"characters": 310}
+    assert (tm.synthesizer_provider, tm.synthesizer_voice_id) == ("sarvam", "priya")
+
+
+async def test_a_one_language_pool_is_left_alone_when_the_other_side_switches_language():
+    from bolna.synthesizer.synthesizer_pool import SynthesizerPool
+    from bolna.transcriber.transcriber_pool import TranscriberPool
+
+    transcriber = TranscriberPool.__new__(TranscriberPool)
+    transcriber.transcribers = {"hi": MagicMock()}
+    transcriber.switch = AsyncMock(side_effect=ValueError("no such label"))
+    synthesizer = SynthesizerPool.__new__(SynthesizerPool)
+    synthesizer.synthesizers = {"hi": MagicMock(), "ta": MagicMock()}
+    synthesizer.switch = AsyncMock()
+    tm = MagicMock()
+    tm.tools = {"transcriber": transcriber, "synthesizer": synthesizer}
+    tm.language_switch_events = []
+
+    try:
+        await TaskManager.switch_language.__get__(tm, TaskManager)("ta")
+    except Exception:
+        # Everything after the pools flip reads call state this harness does not build.
+        pass
+
+    transcriber.switch.assert_not_awaited()
+    synthesizer.switch.assert_awaited_once_with("ta")
+
+
+def test_validating_a_voice_and_its_fallbacks_leaves_the_config_it_was_given_untouched():
+    import copy
+    import json
+
+    from bolna.models import Synthesizer
+
+    def voice(provider, voice_id, model):
+        provider_config = {"voice": voice_id, "voice_id": voice_id, "model": model, "language": "hi"}
+        return {"provider": provider, "provider_config": provider_config}
+
+    config = {**voice("cartesia", "riya", "sonic-3"), "fallbacks": [voice("elevenlabs", "anika", "eleven_turbo_v2_5")]}
+    given = copy.deepcopy(config)
+
+    Synthesizer(**config)
+
+    assert config == given
+    json.dumps(config)
+
+
+def test_a_transcriber_marked_unhealthy_is_passed_over_and_kept_as_the_last_to_try(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tmmod,
+        "SUPPORTED_TRANSCRIBER_PROVIDERS",
+        {"deepgram": recorder(calls, "deepgram"), "sarvam": recorder(calls, "sarvam")},
+    )
+    pool = MagicMock()
+    monkeypatch.setattr(tmmod, "TranscriberPool", pool)
+    transcriber = {
+        "provider": "deepgram",
+        "model": "nova-3",
+        "language": "hi",
+        "fallbacks": [{"provider": "sarvam", "model": "saaras:v3", "language": None}],
+    }
+    tm = setup_tm({"tools_config": {"input": {"provider": "plivo"}, "transcriber": transcriber}})
+    tm.unhealthy_providers = {"transcriber": {("deepgram", "nova-3")}}
+
+    TaskManager._TaskManager__setup_transcriber.__get__(tm, TaskManager)()
+
+    pool_kwargs = pool.call_args.kwargs
+    assert [provider for provider, _ in calls] == ["deepgram", "sarvam"]
+    assert pool_kwargs["transcribers"]["hi"].model == "saaras:v3"
+    assert pool_kwargs["multilingual_config"]["hi"]["provider"] == "sarvam"
+    assert tm.transcriber_provider == "sarvam"
+    (last_resort,) = pool_kwargs["fallbacks"]["hi"]
+    assert (last_resort.provider, last_resort.build().model) == ("deepgram", "nova-3")
+    (event,) = tm.fallback_recorder.events
+    assert (event["from"]["provider"], event["to"]["provider"], event["reason"]) == (
+        "deepgram",
+        "sarvam",
+        "provider_unhealthy",
+    )
+
+
+def test_a_voice_marked_unhealthy_is_passed_over_and_the_call_speaks_as_its_fallback(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tmmod,
+        "SUPPORTED_SYNTHESIZER_MODELS",
+        {"cartesia": recorder(calls, "cartesia"), "sarvam": recorder(calls, "sarvam")},
+    )
+    pool = MagicMock()
+    monkeypatch.setattr(tmmod, "SynthesizerPool", pool)
+    sarvam = {
+        "provider": "sarvam",
+        "provider_config": {"voice": "Anushka", "voice_id": "anushka", "model": "bulbul:v3", "language": "hi"},
+    }
+    tm = setup_tm(
+        {
+            "tools_config": {
+                "transcriber": {"language": "hi"},
+                "synthesizer": {
+                    "provider": "cartesia",
+                    "provider_config": {"voice": "Riya", "voice_id": "riya-id", "model": "sonic-3", "language": "hi"},
+                    "stream": True,
+                    "fallbacks": [sarvam],
+                },
+                "output": {"provider": "plivo"},
+                "llm_agent": None,
+            }
+        }
+    )
+    tm.language = "hi"
+    tm.unhealthy_providers = {"synthesizer": {("cartesia", "sonic-3")}}
+
+    TaskManager._TaskManager__setup_synthesizer.__get__(tm, TaskManager)()
+
+    pool_kwargs = pool.call_args.kwargs
+    assert pool_kwargs["synthesizers"]["hi"].model == "bulbul:v3"
+    assert pool_kwargs["multilingual_config"]["hi"]["provider"] == "sarvam"
+    assert (tm.synthesizer_provider, tm.synthesizer_voice_id) == ("sarvam", "anushka")
+    (last_resort,) = pool_kwargs["fallbacks"]["hi"]
+    assert last_resort.provider == "cartesia"
+    assert [event["reason"] for event in tm.fallback_recorder.events] == ["provider_unhealthy"]
+
+
+async def test_an_llm_marked_unhealthy_is_passed_over_without_counting_against_it(monkeypatch):
+    tm = setup_tm({})
+    tm.llm_agent_config = {"fallbacks": [{"provider": "openai", "model": "gpt-4.1-mini", "reasoning_effort": None}]}
+    tm.llm_config = {"provider": "azure", "model": "azure/gpt-4.1-mini", "max_tokens": 200, "temperature": 0.1}
+    tm.kwargs = {"llm_key": "azure-key"}
+    tm.unhealthy_providers = {"llm": {("azure", "azure/gpt-4.1-mini")}}
+    tm._report_provider_health = AsyncMock()
+    tm._cb_tasks = set()
+    meter = tm.on_turn_usage = tm.on_overflow = AsyncMock()
+    bind(
+        tm,
+        "_TaskManager__on_llm_fallback",
+        "_TaskManager__on_llm_retry",
+        "_TaskManager__spawn_health_report",
+    )
+    backup = MagicMock()
+    monkeypatch.setitem(tmmod.SUPPORTED_LLM_PROVIDERS, "openai", lambda **kwargs: backup)
+    own = MagicMock()
+
+    chain = TaskManager._TaskManager__with_llm_fallbacks.__get__(tm, TaskManager)(own)
+    await asyncio.sleep(0)
+
+    assert chain.active is backup
+    own.fail_fast.assert_not_called()
+    (event,) = tm.fallback_recorder.events
+    assert (event["to"]["model"], event["reason"], event["error"]) == ("gpt-4.1-mini", "provider_unhealthy", None)
+    tm._report_provider_health.assert_not_awaited()
+    assert (tm.llm_config["provider"], tm.llm_config["model"]) == ("openai", "gpt-4.1-mini")
+    assert tm.on_turn_usage is None
+
+    # The fallback fails too, so the call lands on the agent's own model with its settings back in force.
+    (last_resort,) = chain._pending
+    assert last_resort.build() is own
+    tm._TaskManager__on_llm_fallback(RuntimeError("down"), last_resort, {"sequence_id": 2})
+    assert (tm.llm_config["provider"], tm.llm_config["model"]) == ("azure", "azure/gpt-4.1-mini")
+    assert (tm.on_turn_usage, tm.kwargs["llm_key"]) == (meter, "azure-key")
+
+
+def test_a_language_that_began_on_a_fallback_but_never_carried_the_call_is_not_reported():
+    recorder = FallbackRecorder(0, lambda: [])
+    spoken, silent = MagicMock(), MagicMock()
+    spoken.get_synthesized_characters.return_value = 120
+    silent.get_synthesized_characters.return_value = 0
+    for replacement in (spoken, silent):
+        recorder.record("synthesizer", {}, {"provider": "sarvam"}, "provider_unhealthy", None, replacement=replacement)
+
+    (event,) = recorder.with_usage()
+    assert event["served_usage"] == {"characters": 120}
+
+
+async def test_a_request_the_model_refused_moves_the_call_without_counting_against_the_provider():
+    tm = setup_tm({})
+    tm.llm_config = {"provider": "azure", "model": "azure/gpt-4.1-mini"}
+    tm._report_provider_health = AsyncMock()
+    tm._cb_tasks = set()
+    bind(tm, "_TaskManager__on_llm_fallback", "_TaskManager__spawn_health_report")
+    entry = MagicMock(provider="openai", model="gpt-4.1-mini", config=None)
+    too_long = type("BadRequestError", (Exception,), {"status_code": 400})("context_length_exceeded")
+
+    tm._TaskManager__on_llm_fallback(too_long, entry, {"sequence_id": 3})
+    await asyncio.sleep(0)
+
+    (event,) = tm.fallback_recorder.events
+    assert (event["reason"], event["to"]["model"]) == ("http_400", "gpt-4.1-mini")
+    tm._report_provider_health.assert_not_awaited()

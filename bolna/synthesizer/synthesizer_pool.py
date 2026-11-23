@@ -1,5 +1,6 @@
 import asyncio
 import time
+from bolna.helpers.fallbacks import next_built
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import process_task_cancellation
 
@@ -7,6 +8,13 @@ logger = configure_logger(__name__)
 
 # Sentinel pushed into _output_queue to unblock generate() on switch
 _SWITCH_SENTINEL = object()
+
+
+class _GenerateFailed:
+    """Carries a synthesizer failure with no fallback left through _output_queue, so generate() raises it."""
+
+    def __init__(self, error):
+        self.error = error
 
 
 class SynthesizerPool:
@@ -28,9 +36,21 @@ class SynthesizerPool:
     With lazy_legs only the active synth connects at call start. Another leg
     connects when open() is called (the detector heard its language) or when
     the call switches to it, and closes again once nothing needs it.
+
+    A label with fallbacks moves to its next provider when its synth fails, and the turn in progress is sent to
+    the new one.
     """
 
-    def __init__(self, synthesizers, active_label, multilingual_config, lazy_legs=False, record_event=None):
+    def __init__(
+        self,
+        synthesizers,
+        active_label,
+        multilingual_config,
+        lazy_legs=False,
+        record_event=None,
+        fallbacks=None,
+        on_fallback=None,
+    ):
         """
         Args:
             synthesizers: dict mapping label -> synthesizer instance.
@@ -38,6 +58,8 @@ class SynthesizerPool:
             multilingual_config: raw multilingual config dict from task_config
             lazy_legs: connect only the legs in use instead of every leg for the whole call.
             record_event: optional callback taking a telemetry dict (leg opens, switches, closes).
+            fallbacks: label -> FallbackEntry list, the providers to try in order when that label's synth fails.
+            on_fallback: callback(label, failed, replacement, entry, error) run as a label moves to its next provider.
         """
         self.synthesizers = synthesizers
 
@@ -61,6 +83,18 @@ class SynthesizerPool:
         # Set by cleanup(): from then on nothing opens or closes a leg underneath it.
         self.cleaning_up = False
 
+        self.fallbacks = {label: list(builders) for label, builders in (fallbacks or {}).items() if builders}
+        self.on_fallback = on_fallback
+        # Synths a label has moved off; they still count toward the call's usage and turn order.
+        self.retired = []
+        self.retire_tasks = set()
+        # What the current turn has pushed, resent to a fallback that takes over mid-turn.
+        self.open_turn = []
+        # The serving synth's character count when the open turn began.
+        self.open_turn_counted_from = 0
+        # Characters a failed synth counted for a turn its fallback then spoke whole; the call's usage leaves them out.
+        self.resent_characters = 0
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -73,7 +107,7 @@ class SynthesizerPool:
     def turn_latencies(self):
         # Per-synth turns are spread across instances after a switch; sort by tts_start_ms for true order.
         all_latencies = []
-        for s in self.synthesizers.values():
+        for s in (*self.retired, *self.synthesizers.values()):
             all_latencies.extend(s.turn_latencies)
         all_latencies.sort(key=lambda d: d.get("tts_start_ms") if d.get("tts_start_ms") is not None else 0)
         return all_latencies
@@ -87,9 +121,17 @@ class SynthesizerPool:
     # ------------------------------------------------------------------
 
     async def push(self, message):
-        await self.synthesizers[self.active_label].push(message)
+        meta_info = message.get("meta_info") or {}
+        if self.open_turn and self.open_turn[0]["meta_info"].get("sequence_id") != meta_info.get("sequence_id"):
+            self.open_turn.clear()
+        synth = self.synthesizers[self.active_label]
+        if not self.open_turn:
+            self.open_turn_counted_from = synth.get_synthesized_characters()
+        self.open_turn.append({**message, "meta_info": dict(meta_info)})
+        await synth.push(message)
 
     async def handle_interruption(self):
+        self.open_turn.clear()
         await self.synthesizers[self.active_label].handle_interruption()
 
     def abandon_open_turn(self):
@@ -109,9 +151,9 @@ class SynthesizerPool:
 
     def get_synthesized_characters(self):
         total = 0
-        for s in self.synthesizers.values():
+        for s in (*self.retired, *self.synthesizers.values()):
             total += s.get_synthesized_characters()
-        return total
+        return total - self.resent_characters
 
     # ------------------------------------------------------------------
     # Connection management
@@ -135,15 +177,85 @@ class SynthesizerPool:
         logger.info(f"SynthesizerPool: generate task started for active='{self.active_label}'")
 
     async def _run_generate(self, label):
-        """Iterate synth.generate() and forward results into the shared _output_queue."""
+        """Iterate synth.generate() and forward results into the shared _output_queue.
+
+        A failure moves the label to its next fallback; with none left it reaches generate() and ends the call.
+        """
+        synth = self.synthesizers[label]
         try:
-            synth = self.synthesizers[label]
-            async for message in synth.generate():
-                self._output_queue.put_nowait(message)
+            # generate() returns when the provider's socket drops: entered again, it resumes once the synth has
+            # reconnected and raises if it could not.
+            while not self.cleaning_up and self.synthesizers.get(label) is synth:
+                async for message in synth.generate():
+                    self.settle_open_turn(message)
+                    self._output_queue.put_nowait(message)
+                await asyncio.sleep(0)
         except asyncio.CancelledError:
             logger.info(f"SynthesizerPool: _run_generate cancelled for '{label}'")
         except Exception as e:
             logger.error(f"SynthesizerPool: error in _run_generate for '{label}': {e}", exc_info=True)
+            if self.synthesizers.get(label) is not synth:
+                return
+            try:
+                recovered = await self.fail_over(label, e)
+            except Exception as fallback_error:
+                logger.error(f"SynthesizerPool: moving '{label}' to its fallback failed: {fallback_error}")
+                recovered = False
+            if not recovered:
+                self._output_queue.put_nowait(_GenerateFailed(e))
+
+    def settle_open_turn(self, message):
+        """The turn's last audio has come back, so nothing of it is left to resend."""
+        meta_info = message.get("meta_info") or {} if isinstance(message, dict) else {}
+        if not (meta_info.get("end_of_synthesizer_stream") and meta_info.get("end_of_llm_stream")):
+            return
+        if self.open_turn and self.open_turn[0]["meta_info"].get("sequence_id") == meta_info.get("sequence_id"):
+            self.open_turn.clear()
+
+    async def fail_over(self, label, error):
+        """Serve the label from its next fallback synth and resend the open turn; False when none is left."""
+        async with self._switch_lock:
+            if self.cleaning_up or label != self.active_label:
+                return False
+            built = next_built(self.fallbacks.get(label) or [])
+            if built is None:
+                return False
+            entry, replacement = built
+            failed = self.synthesizers[label]
+            self.synthesizers[label] = replacement
+            if entry.config is not None:
+                self._multilingual_config = {**self._multilingual_config, label: entry.config}
+            self.retire(failed, self._monitor_tasks.pop(label, None))
+            self._monitor_tasks[label] = asyncio.create_task(replacement.monitor_connection())
+            self._gen_task = asyncio.create_task(self._run_generate(label))
+            logger.warning(f"SynthesizerPool: '{label}' moved to its next provider after: {error}")
+            if self.on_fallback is not None:
+                try:
+                    self.on_fallback(label, failed, replacement, entry, error)
+                except Exception as e:
+                    logger.error(f"SynthesizerPool: fallback callback failed: {e}")
+            if self.open_turn:
+                # The fallback speaks the whole turn, so only it bills the turn. What the failed synth counted
+                # depends on the synth: a socket voice counts text as it is pushed, an HTTP voice as it renders.
+                self.resent_characters += failed.get_synthesized_characters() - self.open_turn_counted_from
+                self.open_turn_counted_from = replacement.get_synthesized_characters()
+            for message in self.open_turn:
+                await replacement.push({**message, "meta_info": dict(message["meta_info"])})
+            return True
+
+    def retire(self, synth, monitor):
+        self.retired.append(synth)
+        task = asyncio.create_task(self.stop_retired(synth, monitor))
+        self.retire_tasks.add(task)
+        task.add_done_callback(self.retire_tasks.discard)
+
+    async def stop_retired(self, synth, monitor):
+        if monitor is not None:
+            await process_task_cancellation(monitor, "failed synthesizer monitor")
+        try:
+            await synth.cleanup()
+        except Exception as e:
+            logger.warning(f"SynthesizerPool: cleaning up a failed synthesizer raised: {e}")
 
     async def generate(self):
         """Async generator that yields audio packets from the active synthesizer.
@@ -156,6 +268,8 @@ class SynthesizerPool:
             if message is _SWITCH_SENTINEL:
                 logger.info("SynthesizerPool: generate() received SWITCH_SENTINEL, returning")
                 return
+            if isinstance(message, _GenerateFailed):
+                raise message.error
             yield message
 
     # ------------------------------------------------------------------
@@ -332,6 +446,8 @@ class SynthesizerPool:
         self.cleaning_up = True
         for task in list(self.leg_close_tasks):
             await process_task_cancellation(task, "SynthesizerPool leg close")
+        # A synth the call moved off still has its connection to close.
+        await asyncio.gather(*self.retire_tasks, return_exceptions=True)
 
         # Cancel generate task
         if self._gen_task and not self._gen_task.done():

@@ -1,7 +1,7 @@
 import asyncio
 import audioop
 from collections import defaultdict
-from functools import lru_cache
+from functools import lru_cache, partial
 from datetime import datetime
 import io
 import math
@@ -77,9 +77,19 @@ from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
 from bolna.providers import *
 from bolna.s2s import events as s2s_events
+from bolna.helpers.fallbacks import FallbackEntry, FallbackRecorder, ProviderUnhealthy, start_on_healthy
+from bolna.llms.fallback_llm import (
+    REASONING_SETTINGS,
+    FallbackLLM,
+    fallback_llm_arguments,
+    is_provider_fault,
+    status_of,
+)
 from bolna.llms.routing_stream import CONFIDENCE_KEY, REASONING_KEY
 from bolna.enums import (
     AudioPlaybackReason,
+    FallbackComponent,
+    FallbackReason,
     TelephonyProvider,
     LogComponent,
     LogDirection,
@@ -383,6 +393,12 @@ class TaskManager(BaseManager):
         self.kwargs = kwargs
         self.kwargs["task_manager_instance"] = self
         self.provider_api_keys = self.kwargs.pop("provider_api_keys", None) or {}
+        # Per component, the (provider, model) pairs the caller has seen failing; a call with a fallback for one
+        # starts on the fallback.
+        self.unhealthy_providers = {
+            component: {tuple(pair) for pair in pairs}
+            for component, pairs in (self.kwargs.pop("unhealthy_providers", None) or {}).items()
+        }
         # Optional load-signal callback (set by the caller only for PTU-served calls).
         self.on_turn_usage = kwargs.get("on_turn_usage")
         # Fired instead of on_turn_usage when another backend served the turn.
@@ -406,6 +422,10 @@ class TaskManager(BaseManager):
         self.stream_sid_ts = None
         self.welcome_message_duration_ms = None
         self.transcriber_error_events: list[dict] = []
+        # Each time a component moved to its next configured fallback.
+        self.fallback_recorder = FallbackRecorder(
+            self.conversation_start_init_ts, lambda: self.llm_latencies.turn_latencies
+        )
         self.blocked_audio_events: list[dict] = []
         self._blocked_sequences: set = set()  # dedup: only record first block per sequence
         self._sent_audio_sequences: set = set()
@@ -714,7 +734,7 @@ class TaskManager(BaseManager):
                         "temperature": self.llm_agent_config["temperature"],
                     }
 
-                for key in ("reasoning_effort", "verbosity", "reasoning_summary", "thinking_budget", "extra_body"):
+                for key in REASONING_SETTINGS:
                     if key in self.llm_agent_config:
                         self.llm_config[key] = self.llm_agent_config[key]
 
@@ -1049,6 +1069,8 @@ class TaskManager(BaseManager):
                 "knowledgebase_agent",
             )
             llm = None if builds_own_llm else self.__setup_llm(self.llm_config, task_id)
+            if agent_type == "simple_llm_agent" and self._is_conversation_task():
+                llm = self.__with_llm_fallbacks(llm)
             # Setup tasks
             agent_params = {"llm": llm, "agent_type": agent_type}
             self.__setup_tasks(**agent_params)
@@ -1789,6 +1811,9 @@ class TaskManager(BaseManager):
             labels.update(self.tools["transcriber"].labels)
         if isinstance(self.tools.get("synthesizer"), SynthesizerPool):
             labels.update(self.tools["synthesizer"].labels)
+        # A one-language pool only holds fallbacks; there is no language to switch to.
+        if len(labels) < 2:
+            return
 
         # Enrich the tool schema with available labels in the description
         tool_def = copy.deepcopy(SWITCH_LANGUAGE_TOOL_DEFINITION)
@@ -1873,10 +1898,11 @@ class TaskManager(BaseManager):
         if self.task_config["tools_config"].get("llm_agent") is not None and llm_config is not None:
             llm_config["buffer_size"] = (self.task_config["tools_config"].get("synthesizer") or {}).get("buffer_size")
 
-    def __pool_leg_kwargs(self, base_kwargs, key_name, provider):
+    def __pool_leg_kwargs(self, base_kwargs, key_name, provider, fallback=False):
         """Swap in this leg's own provider key; dropping it leaves the provider's env fallback."""
-        # Without a map the caller cannot resolve per-leg keys, so the base key stands.
-        if not provider or not self.provider_api_keys:
+        # Without a map the caller cannot resolve per-leg keys, so the base key stands; a fallback, which may be
+        # another provider, never takes it.
+        if not provider or (not self.provider_api_keys and not fallback):
             return base_kwargs
         leg_kwargs = dict(base_kwargs)
         leg_kwargs.pop(key_name, None)
@@ -1908,38 +1934,21 @@ class TaskManager(BaseManager):
                     else:
                         provider = self.task_config["tools_config"]["input"]["provider"]
 
-                    is_sip = provider == TelephonyProvider.SIP_TRUNK.value
-
-                    transcribers = {}
-                    for label, cfg in multilingual.items():
-                        private_queue = asyncio.Queue()
-                        cfg["input_queue"] = private_queue
-                        # Private too: the pool forwards only the active leg's events to the call.
-                        cfg["output_queue"] = asyncio.Queue()
-                        # Per-call Deepgram host override arrives per-label on cfg itself (the caller
-                        # stamps only the legs a chosen endpoint can serve); do not inherit from the
-                        # top-level config, or an unsupported leg would be forced onto that endpoint.
-                        # Data-retention opt-out is agent-wide, so legs do inherit it.
-                        if cfg.get("mip_opt_out") is None and transcriber_config.get("mip_opt_out") is not None:
-                            cfg["mip_opt_out"] = transcriber_config["mip_opt_out"]
-                        if is_sip:
-                            cfg["encoding"] = "mulaw"
-                            cfg["sampling_rate"] = 8000
-                        elif provider in (WEB_BASED_CALL_PROVIDER, TelephonyProvider.FREESWITCH.value):
-                            cfg["encoding"] = "linear16"
-                            cfg["sampling_rate"] = 16000
-                        cfg["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
-
-                        if "provider" in cfg:
-                            cls = SUPPORTED_TRANSCRIBER_PROVIDERS.get(cfg["provider"])
-                        else:
-                            cls = SUPPORTED_TRANSCRIBER_MODELS.get(cfg["model"])
-                        leg_kwargs = self.__pool_leg_kwargs(self.kwargs, "transcriber_key", cfg.get("provider"))
-                        # Runtime kwargs win over the saved config, which may carry the same key.
-                        transcribers[label] = cls(provider, **{**cfg, **leg_kwargs})
-
-                        if label == active_label:
-                            self.transcriber_provider = cfg.get("provider", cfg.get("model"))
+                    starts = {
+                        label: self.__start_on_healthy(
+                            FallbackComponent.TRANSCRIBER,
+                            cfg,
+                            self.__build_transcriber_leg(cfg, provider, transcriber_config),
+                            self.__transcriber_fallback_entries(cfg, provider, transcriber_config),
+                        )
+                        for label, cfg in multilingual.items()
+                    }
+                    transcribers = {label: start.instance for label, start in starts.items()}
+                    fallbacks = {label: start.fallbacks for label, start in starts.items()}
+                    multilingual = {label: start.entry.config for label, start in starts.items()}
+                    if active_label in multilingual:
+                        serving = multilingual[active_label]
+                        self.transcriber_provider = serving.get("provider", serving.get("model"))
 
                     # Detector tap: enabled → per-turn buffer feeds the Switch LLM; disabled → legacy heuristic.
                     LID_PROVIDER = self.task_config.get("tools_config", {}).get(
@@ -1970,6 +1979,8 @@ class TaskManager(BaseManager):
                         lid_config=lid_config,
                         on_lid_switch=None if switch_enabled else self.switch_language,
                         lazy_legs=True,
+                        fallbacks=fallbacks,
+                        on_fallback=self.__on_transcriber_fallback,
                     )
                     logger.info(
                         f"TranscriberPool created with labels={list(transcribers.keys())}, "
@@ -2017,6 +2028,9 @@ class TaskManager(BaseManager):
                     logger.info(
                         f"transcriber stream={transcriber_config['stream']} enforce_streaming={self.enforce_streaming}"
                     )
+                    if transcriber_config.get("fallbacks"):
+                        self.__setup_transcriber_with_fallbacks(transcriber_config, provider)
+                        return
                     if "provider" in transcriber_config:
                         transcriber_class = SUPPORTED_TRANSCRIBER_PROVIDERS.get(transcriber_config["provider"])
                     else:
@@ -2024,6 +2038,105 @@ class TaskManager(BaseManager):
                     self.tools["transcriber"] = transcriber_class(provider, **{**transcriber_config, **self.kwargs})
         except Exception as e:
             logger.error(f"Something went wrong with starting transcriber {e}")
+
+    def __setup_transcriber_with_fallbacks(self, transcriber_config, telephony_provider):
+        """A single-language transcriber with fallbacks runs as a one-language pool, which moves it between providers."""
+        label = self.language or DEFAULT_LANGUAGE_CODE
+        start = self.__start_on_healthy(
+            FallbackComponent.TRANSCRIBER,
+            transcriber_config,
+            self.__build_transcriber_leg(transcriber_config, telephony_provider, transcriber_config),
+            self.__transcriber_fallback_entries(transcriber_config, telephony_provider, transcriber_config),
+        )
+        serving = start.entry.config
+        self.transcriber_provider = serving.get("provider", serving.get("model"))
+        self.tools["transcriber"] = TranscriberPool(
+            transcribers={label: start.instance},
+            shared_input_queue=self.audio_queue,
+            output_queue=self.transcriber_output_queue,
+            active_label=label,
+            multilingual_config={label: serving},
+            lazy_legs=True,
+            fallbacks={label: start.fallbacks},
+            on_fallback=self.__on_transcriber_fallback,
+        )
+        logger.info(f"Transcriber {self.transcriber_provider} with fallbacks for '{label}'")
+
+    def __build_transcriber_leg(self, cfg, telephony_provider, agent_config, fallback=False):
+        """A transcriber on queues of its own, as a pool leg or fallback entry runs."""
+        cfg = {key: value for key, value in cfg.items() if key != "fallbacks"}
+        cfg["input_queue"] = asyncio.Queue()
+        # Private too: the pool forwards only the active leg's events to the call.
+        cfg["output_queue"] = asyncio.Queue()
+        # Per-call Deepgram host override arrives per-label on cfg itself (the caller
+        # stamps only the legs a chosen endpoint can serve); do not inherit from the
+        # top-level config, or an unsupported leg would be forced onto that endpoint.
+        # Data-retention opt-out is agent-wide, so legs do inherit it.
+        if cfg.get("mip_opt_out") is None and agent_config.get("mip_opt_out") is not None:
+            cfg["mip_opt_out"] = agent_config["mip_opt_out"]
+        if telephony_provider == TelephonyProvider.SIP_TRUNK.value:
+            cfg["encoding"] = "mulaw"
+            cfg["sampling_rate"] = 8000
+        elif telephony_provider in (WEB_BASED_CALL_PROVIDER, TelephonyProvider.FREESWITCH.value):
+            cfg["encoding"] = "linear16"
+            cfg["sampling_rate"] = 16000
+        cfg["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
+
+        if "provider" in cfg:
+            cls = SUPPORTED_TRANSCRIBER_PROVIDERS.get(cfg["provider"])
+        else:
+            cls = SUPPORTED_TRANSCRIBER_MODELS.get(cfg["model"])
+        leg_kwargs = self.__pool_leg_kwargs(self.kwargs, "transcriber_key", cfg.get("provider"), fallback=fallback)
+        # Runtime kwargs win over the saved config, which may carry the same key.
+        return cls(telephony_provider, **{**cfg, **leg_kwargs})
+
+    def __start_on_healthy(self, component, config, primary, entries):
+        """Where one language of a transcriber or voice starts; a provider passed over is recorded as a fallback."""
+        provider = config.get("provider") or config.get("model")
+        model = (config.get("provider_config") or config).get("model")
+        own = FallbackEntry(provider, model, lambda: primary, config=config)
+        start = start_on_healthy(own, entries, self.unhealthy_providers.get(component) or ())
+        if start.entry is not own:
+            if component == FallbackComponent.SYNTHESIZER:
+                # Engines, as request logs name each voice.
+                failed_model, served_model = primary.get_engine(), start.instance.get_engine()
+            else:
+                failed_model, served_model = getattr(primary, "model", None), start.entry.model
+            self.fallback_recorder.record(
+                component,
+                {"provider": provider, "model": failed_model},
+                {"provider": start.entry.provider, "model": served_model},
+                reason=FallbackReason.PROVIDER_UNHEALTHY,
+                error=None,
+                replacement=start.instance,
+            )
+        return start
+
+    def __transcriber_fallback_entries(self, leg_config, telephony_provider, agent_config):
+        """The leg's fallback providers, each serving the leg's own language."""
+        entries = []
+        for entry in leg_config.get("fallbacks") or []:
+            entry = {**entry, "language": entry.get("language") or leg_config.get("language")}
+            if leg_config.get("language_code") and not entry.get("language_code"):
+                entry["language_code"] = leg_config["language_code"]
+            build = partial(self.__build_transcriber_leg, entry, telephony_provider, agent_config, fallback=True)
+            provider = entry.get("provider") or entry.get("model")
+            entries.append(FallbackEntry(provider, entry.get("model"), build, config=entry))
+        return entries
+
+    def __on_transcriber_fallback(self, label, failed, replacement, entry, error):
+        failed_info = {"provider": self.transcriber_provider, "model": getattr(failed, "model", None)}
+        self.fallback_recorder.record(
+            FallbackComponent.TRANSCRIBER,
+            failed_info,
+            {"provider": entry.provider, "model": entry.model},
+            reason=FallbackReason.CONNECTION_ERROR,
+            error=str(error) if error else None,
+            replacement=replacement,
+        )
+        self.__spawn_health_report(FallbackComponent.TRANSCRIBER, failed_info["provider"], failed_info["model"])
+        self.transcriber_provider = entry.provider
+        self._cb_transcriber_connect_reported = False
 
     def __setup_synthesizer(self, llm_config=None):
         if self._is_conversation_task():
@@ -2053,29 +2166,18 @@ class TaskManager(BaseManager):
                     # mulaw@8k (telephony) which garbles when labeled 24k — force it off.
                     synthesizer_kwargs["use_mulaw"] = False
 
-                synthesizers = {}
-                for label, cfg in multilingual.items():
-                    cfg = dict(cfg)  # shallow copy so pops don't mutate original
-                    caching = cfg.pop("caching", True)
-                    provider_name = cfg.pop("provider")
-                    provider_config = cfg.pop("provider_config")
-
-                    # Web + FreeSWITCH play raw PCM at a fixed 24kHz; force every language synth to
-                    # match (telephony/chat untouched). Else non-24k languages drift (e.g. Hindi too slow).
-                    if self.is_web_based_call or (
-                        self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.FREESWITCH.value
-                    ):
-                        provider_config = dict(provider_config)  # don't mutate the cached agent config
-                        provider_config["sampling_rate"] = WEBCALL_TTS_SAMPLE_RATE
-                        cfg.pop("sampling_rate", None)  # avoid passing sampling_rate twice to the synth
-
-                    if self.turn_based_conversation:
-                        cfg["audio_format"] = "mp3"
-                    cfg["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
-
-                    cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
-                    leg_kwargs = self.__pool_leg_kwargs(synthesizer_kwargs, "synthesizer_key", provider_name)
-                    synthesizers[label] = cls(**cfg, **provider_config, **leg_kwargs, caching=caching)
+                starts = {
+                    label: self.__start_on_healthy(
+                        FallbackComponent.SYNTHESIZER,
+                        cfg,
+                        self.__build_synthesizer_leg(cfg, synthesizer_kwargs),
+                        self.__synthesizer_fallback_entries(cfg.get("fallbacks"), synthesizer_kwargs),
+                    )
+                    for label, cfg in multilingual.items()
+                }
+                synthesizers = {label: start.instance for label, start in starts.items()}
+                fallbacks = {label: start.fallbacks for label, start in starts.items()}
+                multilingual = {label: start.entry.config for label, start in starts.items()}
 
                 # Use active synth's provider/voice for logging metadata, and buffer_size
                 # Note that in the current state, buffer_size of other synth configs is ignored
@@ -2092,6 +2194,8 @@ class TaskManager(BaseManager):
                     multilingual_config=multilingual,
                     lazy_legs=True,
                     record_event=self.__record_lid_event,
+                    fallbacks=fallbacks,
+                    on_fallback=self.__on_synthesizer_fallback,
                 )
 
                 logger.info(f"SynthesizerPool created with labels={list(synthesizers.keys())}, active='{active_label}'")
@@ -2111,16 +2215,13 @@ class TaskManager(BaseManager):
                 caching = synth_config.pop("caching")
             else:
                 caching = True
+            fallbacks = synth_config.pop("fallbacks", None)
 
-            self.synthesizer_provider = synth_config.pop("provider")
-            synthesizer_class = SUPPORTED_SYNTHESIZER_MODELS.get(self.synthesizer_provider)
+            provider_name = synth_config.pop("provider")
+            synthesizer_class = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
             provider_config = synth_config.pop("provider_config")
-            self.synthesizer_voice = provider_config["voice"]
-            self.synthesizer_voice_id = provider_config.get("voice_id")
-            self.synthesizer_model = provider_config.get("model")
-            self.synthesizer_render_settings = tts_render_settings(self.synthesizer_provider, provider_config)
-            self.synthesizer_pronunciation_key = pronunciation_dictionary_key(
-                self.synthesizer_provider,
+            self.__set_synthesizer_identity(
+                provider_name,
                 provider_config,
                 synth_config.get("pronunciation_rules"),
                 on_platform_key=not self.kwargs.get("synthesizer_key"),
@@ -2145,10 +2246,110 @@ class TaskManager(BaseManager):
             self.tools["synthesizer"] = synthesizer_class(
                 **synth_config, **provider_config, **synthesizer_kwargs, caching=caching
             )
+            if fallbacks:
+                primary_config = {
+                    "provider": provider_name,
+                    "provider_config": provider_config,
+                    "pronunciation_rules": synth_config.get("pronunciation_rules"),
+                }
+                self.__add_synthesizer_fallbacks(primary_config, fallbacks, synthesizer_kwargs)
             # if not self.turn_based_conversation:
             #     self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
             if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
                 llm_config["buffer_size"] = synth_config.get("buffer_size")
+
+    def __set_synthesizer_identity(self, provider, provider_config, pronunciation_rules, on_platform_key):
+        """What the call reads about the voice serving it: logs, health reports and the static clip cache key."""
+        self.synthesizer_provider = provider
+        self.synthesizer_voice = provider_config["voice"]
+        self.synthesizer_voice_id = provider_config.get("voice_id")
+        self.synthesizer_model = provider_config.get("model")
+        self.synthesizer_render_settings = tts_render_settings(provider, provider_config)
+        self.synthesizer_pronunciation_key = pronunciation_dictionary_key(
+            provider, provider_config, pronunciation_rules, on_platform_key=on_platform_key
+        )
+
+    def __add_synthesizer_fallbacks(self, primary_config, fallbacks, synthesizer_kwargs):
+        """A single voice with fallbacks runs as a one-voice pool, which moves it between providers."""
+        label = self.language or DEFAULT_LANGUAGE_CODE
+        start = self.__start_on_healthy(
+            FallbackComponent.SYNTHESIZER,
+            primary_config,
+            self.tools["synthesizer"],
+            self.__synthesizer_fallback_entries(fallbacks, synthesizer_kwargs),
+        )
+        serving = start.entry.config
+        if serving is not primary_config:
+            self.__set_synthesizer_identity(
+                serving["provider"],
+                serving["provider_config"],
+                serving.get("pronunciation_rules"),
+                on_platform_key=not self.provider_api_keys.get(serving["provider"]),
+            )
+        self.tools["synthesizer"] = SynthesizerPool(
+            synthesizers={label: start.instance},
+            active_label=label,
+            multilingual_config={label: serving},
+            lazy_legs=True,
+            fallbacks={label: start.fallbacks},
+            on_fallback=self.__on_synthesizer_fallback,
+        )
+        logger.info(f"Synthesizer {self.synthesizer_provider} with fallbacks for '{label}'")
+
+    def __build_synthesizer_leg(self, cfg, synthesizer_kwargs, fallback=False):
+        """A synthesizer as a pool leg or fallback entry runs."""
+        cfg = {key: value for key, value in cfg.items() if key != "fallbacks"}
+        caching = cfg.pop("caching", True)
+        provider_name = cfg.pop("provider")
+        provider_config = cfg.pop("provider_config")
+
+        # Web + FreeSWITCH play raw PCM at a fixed 24kHz; force every language synth to
+        # match (telephony/chat untouched). Else non-24k languages drift (e.g. Hindi too slow).
+        if self.is_web_based_call or (
+            self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.FREESWITCH.value
+        ):
+            provider_config = dict(provider_config)  # don't mutate the cached agent config
+            provider_config["sampling_rate"] = WEBCALL_TTS_SAMPLE_RATE
+            cfg.pop("sampling_rate", None)  # avoid passing sampling_rate twice to the synth
+
+        if self.turn_based_conversation:
+            cfg["audio_format"] = "mp3"
+        cfg["stream"] = streams_pipeline(self.turn_based_conversation, self.enforce_streaming)
+
+        cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
+        leg_kwargs = self.__pool_leg_kwargs(synthesizer_kwargs, "synthesizer_key", provider_name, fallback=fallback)
+        return cls(**cfg, **provider_config, **leg_kwargs, caching=caching)
+
+    def __synthesizer_fallback_entries(self, fallbacks, synthesizer_kwargs):
+        entries = []
+        for entry in fallbacks or []:
+            build = partial(self.__build_synthesizer_leg, entry, synthesizer_kwargs, fallback=True)
+            model = (entry.get("provider_config") or {}).get("model")
+            entries.append(FallbackEntry(entry["provider"], model, build, config=entry))
+        return entries
+
+    def __on_synthesizer_fallback(self, label, failed, replacement, entry, error):
+        # The engine is what request logs name each voice by, so usage on either side of the switch matches them.
+        failed_info = {"provider": self.synthesizer_provider, "model": failed.get_engine()}
+        self.fallback_recorder.record(
+            FallbackComponent.SYNTHESIZER,
+            failed_info,
+            {"provider": entry.provider, "model": replacement.get_engine()},
+            reason=FallbackReason.CONNECTION_ERROR,
+            error=str(error) if error else None,
+            replacement=replacement,
+        )
+        # Health is kept under the model the voice's own turns report, which is not always its engine.
+        self.__spawn_health_report(
+            FallbackComponent.SYNTHESIZER, failed_info["provider"], getattr(failed, "model", None)
+        )
+        self.__set_synthesizer_identity(
+            entry.provider,
+            entry.config["provider_config"],
+            entry.config.get("pronunciation_rules"),
+            on_platform_key=not self.provider_api_keys.get(entry.provider),
+        )
+        self._cb_synthesizer_connect_reported = False
 
     def __setup_llm(self, llm_config, task_id=0):
         if self.task_config["tools_config"]["llm_agent"] is not None:
@@ -2168,6 +2369,91 @@ class TaskManager(BaseManager):
                 return llm
             else:
                 raise Exception(f"LLM {llm_config['provider']} not supported")
+
+    def __with_llm_fallbacks(self, llm):
+        """The conversation LLM followed by the agent's fallback models, each built only when a turn needs it."""
+        fallbacks = self.llm_agent_config.get("fallbacks") or []
+        if not fallbacks:
+            return llm
+        # Per-call backend for each entry, in the same order; a missing one leaves the provider's env defaults.
+        credentials = self.kwargs.get("llm_fallback_credentials") or []
+        entries = []
+        for index, entry in enumerate(fallbacks):
+            llm_class = SUPPORTED_LLM_PROVIDERS.get(entry["provider"])
+            if llm_class is None:
+                logger.warning(f"LLM fallback provider {entry['provider']!r} is not supported, skipping it")
+                continue
+            config, kwargs = fallback_llm_arguments(
+                self.llm_config, self.kwargs, entry, credentials[index] if index < len(credentials) else None
+            )
+            build = partial(llm_class, language=self.language, **config, **kwargs)
+            entries.append(FallbackEntry(entry["provider"], entry["model"], build))
+        logger.info(f"LLM fallbacks: {[f'{e.provider}/{e.model}' for e in entries]}")
+        # What comes back into force if the call starts past the agent's own model and ends up on it after all.
+        own_settings = {
+            "llm_config": dict(self.llm_config),
+            "meters": (self.on_turn_usage, self.on_overflow),
+            "llm_key": self.kwargs.get("llm_key"),
+        }
+        own = FallbackEntry(self.llm_config.get("provider"), self.llm_config.get("model"), lambda: llm, own_settings)
+        start = start_on_healthy(own, entries, self.unhealthy_providers.get(FallbackComponent.LLM) or ())
+        passed_over = None
+        if start.entry is not own:
+            self.__on_llm_fallback(ProviderUnhealthy(), start.entry, None)
+            passed_over = llm
+        return FallbackLLM(
+            start.instance,
+            start.fallbacks,
+            on_switch=self.__on_llm_fallback,
+            on_retry=self.__on_llm_retry,
+            passed_over=passed_over,
+        )
+
+    def __on_llm_retry(self, error):
+        """A failed attempt counts against the model even when its second try answers the turn."""
+        self.__spawn_health_report(FallbackComponent.LLM, self.llm_config.get("provider"), self.llm_config.get("model"))
+
+    def __on_llm_fallback(self, error, entry, meta_info):
+        failed = {"provider": self.llm_config.get("provider"), "model": self.llm_config.get("model")}
+        skipped = isinstance(error, ProviderUnhealthy)
+        if skipped:
+            reason = FallbackReason.PROVIDER_UNHEALTHY
+        else:
+            status = status_of(error)
+            reason = f"http_{status}" if status else type(error).__name__
+        self.fallback_recorder.record(
+            FallbackComponent.LLM,
+            failed,
+            {"provider": entry.provider, "model": entry.model},
+            reason=reason,
+            error=None if skipped else str(error),
+            meta_info=meta_info,
+        )
+        # A request the model refused (too long, filtered, malformed) still moves the call, but says nothing about
+        # the provider's health.
+        if is_provider_fault(error):
+            self.__spawn_health_report(FallbackComponent.LLM, failed["provider"], failed["model"])
+        if entry.config:
+            # Back on the agent's own model: its settings, key and load meters apply again.
+            self.llm_config.update(entry.config["llm_config"])
+            self.on_turn_usage, self.on_overflow = entry.config["meters"]
+            if entry.config["llm_key"] is not None:
+                self.kwargs["llm_key"] = entry.config["llm_key"]
+            return
+        # Logs, latency rows and error attribution follow the model now serving.
+        for key in REASONING_SETTINGS:
+            self.llm_config.pop(key, None)
+        self.llm_config["provider"], self.llm_config["model"] = entry.provider, entry.model
+        # The agent's own backend no longer serves this call, so its load meters stop and its key is not the
+        # serving provider's.
+        self.on_turn_usage = self.on_overflow = None
+        self.kwargs.pop("llm_key", None)
+
+    def __spawn_health_report(self, component, provider, model):
+        """A failure the call survived still counts against the provider that failed."""
+        task = asyncio.create_task(self._report_provider_health(component.value, provider, model, False))
+        self._cb_tasks.add(task)
+        task.add_done_callback(self._cb_tasks.discard)
 
     def __get_agent_object(self, llm, agent_type, assistant_config=None):
         self.agent_type = agent_type
@@ -5910,7 +6196,9 @@ class TaskManager(BaseManager):
             await self.__process_end_of_conversation()
 
     async def _log_transcriber_connection_error(self, connection_error):
-        provider = self.task_config["tools_config"]["transcriber"].get("provider", "unknown")
+        provider = self.transcriber_provider or self.task_config["tools_config"]["transcriber"].get(
+            "provider", "unknown"
+        )
         # Once the caller's audio has ended the transcriber is being torn down, so however its
         # socket closes (e.g. no close frame back from the provider) it is a drop, not a failure.
         is_failure = bool(connection_error) and not self.tools["input"].input_stream_ended
@@ -6304,9 +6592,10 @@ class TaskManager(BaseManager):
                             # within seconds — QA calls disconnected 3-9s after a language
                             # switch). Reconnect in place; end the call only when it is
                             # already over (real hangup) or the reconnect fails.
-                            if (
-                                not (self.conversation_ended or self.hangup_triggered)
-                                and await self.tools["transcriber"].reconnect_active()
+                            if not (self.conversation_ended or self.hangup_triggered) and await self.tools[
+                                "transcriber"
+                            ].recover_active(
+                                (message.get("meta_info") or {}).get("connection_error"), message.get("transcriber")
                             ):
                                 continue
                             logger.info(f"TranscriberPool: active transcriber closed, ending call")
@@ -6326,9 +6615,10 @@ class TaskManager(BaseManager):
                             # within seconds — QA calls disconnected 3-9s after a language
                             # switch). Reconnect in place; end the call only when it is
                             # already over (real hangup) or the reconnect fails.
-                            if (
-                                not (self.conversation_ended or self.hangup_triggered)
-                                and await self.tools["transcriber"].reconnect_active()
+                            if not (self.conversation_ended or self.hangup_triggered) and await self.tools[
+                                "transcriber"
+                            ].recover_active(
+                                (message.get("meta_info") or {}).get("connection_error"), message.get("transcriber")
                             ):
                                 continue
                             logger.info(f"TranscriberPool: active transcriber closed, ending call")
@@ -7908,10 +8198,12 @@ class TaskManager(BaseManager):
         # concurrently saved a little latency but removed the short-circuit, so a transcriber
         # switch that raised (label missing from that pool) still let the synthesizer flip —
         # leaving the agent listening in one language and speaking another.
-        if "transcriber" in components and isinstance(self.tools.get("transcriber"), TranscriberPool):
-            await self.tools["transcriber"].switch(label)
-        if "synthesizer" in components and isinstance(self.tools.get("synthesizer"), SynthesizerPool):
-            await self.tools["synthesizer"].switch(label)
+        # A one-language pool only holds that language's fallbacks, so it has nothing to switch.
+        transcriber, synthesizer = self.tools.get("transcriber"), self.tools.get("synthesizer")
+        if "transcriber" in components and isinstance(transcriber, TranscriberPool) and len(transcriber.labels) > 1:
+            await transcriber.switch(label)
+        if "synthesizer" in components and isinstance(synthesizer, SynthesizerPool) and len(synthesizer.labels) > 1:
+            await synthesizer.switch(label)
 
         # Update TaskManager state so silence detection, fillers, and LLM
         # language stay in sync with the active pools.
@@ -9929,6 +10221,7 @@ class TaskManager(BaseManager):
                     "lid_detection_events": list(self.__snapshot_lid_events()),
                     "asr_lid_events": self._collect_flux_lid_events(),
                     "transcriber_error_events": list(self.transcriber_error_events),
+                    "fallback_events": self.fallback_recorder.with_usage(),
                     "transcriber_reconnect_count": getattr(self.tools.get("transcriber"), "reconnect_count", 0),
                     "blocked_audio_events": list(self.blocked_audio_events),
                     "tts_audio_quality": self.__tts_audio_quality(output["latency_dict"]["synthesizer_chunk_marks"]),

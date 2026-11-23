@@ -309,6 +309,12 @@ class OpenAICompatibleLLM(BaseLLM):
         self.compact_threshold = compact_threshold
         self._interruption_hint: Optional[str] = None
 
+    def fail_fast(self):
+        for name in ("async_client", "_responses_api_client"):
+            client = getattr(self, name, None)
+            if client is not None:
+                setattr(self, name, client.with_options(max_retries=0))
+
     @property
     def _responses_client(self):
         """Return the async client for Responses API calls.

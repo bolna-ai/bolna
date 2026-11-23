@@ -196,6 +196,33 @@ async def test_receiver_still_gives_up_on_connection_error():
     assert await take(gen, 3) == []  # returns immediately
 
 
+async def test_a_sentence_with_nothing_to_speak_ends_the_turn_and_keeps_the_voice():
+    """Sarvam answers such a sentence with an error, then closes the socket; the voice serves the next turn."""
+    synth = make_synth()
+    rejected = (
+        '{"type": "error", "data": {"code": 422, '
+        '"message": "Text must contain at least one character from the allowed languages"}}'
+    )
+    dying = FakeSocket([rejected])
+    synth.websocket = dying
+    synth.current_turn_start_time = 1.0
+    synth.current_turn_socket = dying
+
+    gen = synth.receiver()
+    assert await gen.__anext__() == b"\x00"
+    assert synth.connection_error is None
+    await gen.aclose()
+
+
+async def test_any_other_error_from_sarvam_still_ends_the_voice():
+    synth = make_synth()
+    synth.websocket = FakeSocket(['{"type": "error", "data": {"code": 429, "message": "quota exceeded"}}'])
+
+    gen = synth.receiver()
+    assert await take(gen, 1) == []
+    assert "quota exceeded" in synth.connection_error
+
+
 async def test_receiver_returns_when_conversation_ended():
     synth = make_synth()
     synth.websocket = FakeSocket([])
