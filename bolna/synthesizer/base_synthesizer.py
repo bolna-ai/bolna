@@ -197,14 +197,24 @@ class BaseSynthesizer:
     # Text utilities
     # ------------------------------------------------------------------
 
+    def with_cut_space(self, text):
+        """Return `text` with the space the LLM stream dropped at its cut put back.
+
+        The streaming LLM wrappers end each piece at the last space in their buffer and drop that space.
+        A piece with no space at all is part of one long token (a URL or a long number) that the next
+        piece continues, so it gets no space."""
+        # shortcut: a one-word piece just before an over-long token loses its space exact once wrappers mark cuts.
+        return text + " " if text and " " in text else text
+
     def text_chunker(self, text):
-        """Split text into chunks, ensuring to not break sentences."""
+        """Split text into word-sized chunks, each ending in one space."""
         splitters = (".", ",", "?", "!", ";", ":", "—", "-", "(", ")", "[", "]", "}", " ")
 
         buffer = ""
-        for char in text:
+        for i, char in enumerate(text):
             buffer += char
-            if char in splitters:
+            # Punctuation breaks only at the end of a word, so "3.5", "2,50,000" and "i.e." stay whole.
+            if char in splitters and (char == " " or i + 1 == len(text) or text[i + 1].isspace()):
                 if buffer != " ":
                     yield buffer.strip() + " "
                 buffer = ""
