@@ -208,8 +208,9 @@ def guarded_transport(**kwargs):
     return transport
 
 
-# Special-use names that never reach a public host.
-_NON_PUBLIC_SUFFIXES = (".localhost", ".invalid", ".local", ".internal")
+# Special-use names that only ever reach an internal host. ".invalid" is left to DNS: it is the
+# reserved placeholder name, and integrations save it before they know the real URL.
+_NON_PUBLIC_SUFFIXES = (".localhost", ".local", ".internal")
 
 
 def _literal_ip(host):
@@ -228,8 +229,8 @@ def check_outbound_url(url):
     """The DNS-free half of the SSRF guard, also run when a URL is saved.
 
     Raises ``SSRFError`` for a URL that is blocked whatever its host resolves to: a non-http(s)
-    scheme, a missing host or invalid port, a non-public IP literal, or a host that is not a public
-    domain name. Returns ``(host, port)`` when the host still has to be resolved, else ``None``.
+    scheme, a missing host or invalid port, a non-public IP literal, or a name that can only reach an
+    internal host. Returns ``(host, port)`` when the host still has to be resolved, else ``None``.
     """
     if not isinstance(url, str) or not url.strip():
         raise SSRFError("Missing or invalid request URL")

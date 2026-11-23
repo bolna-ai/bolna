@@ -24,7 +24,6 @@ from bolna.helpers.function_calling_helpers import SSRFError, check_outbound_url
         "http://0x7f000001/",
         "https://YOUR-PUBLISHED-DOMAIN/api/public/send-payment-link",
         "http://redis:6379/",
-        "https://tools.invalid/lookup",
         "http://printer.local/",
         "http://ip-10-0-0-1.ec2.internal/",
         "http://api.localhost/",
@@ -38,6 +37,10 @@ def test_check_outbound_url_rejects_without_dns(url, monkeypatch):
 
 def test_check_outbound_url_leaves_a_public_hostname_to_dns():
     assert check_outbound_url("https://API.example.com:8443/v1?x=1") == ("api.example.com", 8443)
+
+
+def test_check_outbound_url_leaves_an_invalid_placeholder_host_to_dns():
+    assert check_outbound_url("https://tools.invalid/api/voice/bolna/0") == ("tools.invalid", None)
 
 
 @pytest.mark.parametrize("url", ["https://93.184.216.34/hook", "http://[2606:2800:220:1:248:1893:25c8:1946]/"])
