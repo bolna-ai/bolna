@@ -2,7 +2,9 @@ import os
 import asyncio
 import uuid
 import traceback
+from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Body
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import redis.asyncio as redis
 from dotenv import load_dotenv
@@ -142,6 +144,12 @@ async def delete_agent(agent_id: str):
     except Exception as e:
         logger.error(f"Error deleting agent {agent_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/synthesizers", response_class=HTMLResponse)
+async def synthesizer_selector():
+    """Look up TTS providers and build a Gnani Timbre voice configuration."""
+    return FileResponse(Path(__file__).with_name("synthesizers.html"), media_type="text/html")
 
 
 @app.get("/all")

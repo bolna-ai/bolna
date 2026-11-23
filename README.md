@@ -300,7 +300,21 @@ https://github.com/bolna-ai/bolna/blob/c8a0d1428793d4df29133119e354bc2f85a7ca76/
 | Maya       | `MAYA_API_KEY`                            |
 | Kalpa      | `KALPA_API_KEY`                            |
 | Navana     | `NAVANA_API_KEY`                            |
+| Gnani AI (Timbre v2.5 and v3.0) | `GNANI_API_KEY` |
 | Custom (the customer's own server, OpenAI speech API) | None: the platform injects the endpoint (`synthesizer_base_url`) and key (`synthesizer_key`) per call |
+
+In the local quickstart, [search TTS providers and select a Timbre voice](http://localhost:5001/synthesizers).
+Configure the agent's `tools_config.synthesizer` using the model's own voice catalog.
+
+```json
+{
+  "provider": "gnani",
+  "provider_config": {"model": "timbre-v3.0", "voice": "Shivani", "language": "hi-IN", "speed": 1.0}
+}
+```
+
+Timbre v2.5 supports voices such as `Kaveri` (English) and `Nalini` (Hindi). Both versions support `auto` for language selection. Live calls use WebSocket by default. Set `stream_transport` to `sse` in `provider_config` for HTTP streaming. One-shot clips use REST. A per-call `synthesizer_key` takes precedence over `GNANI_API_KEY`.
+See the [voice catalog](https://docs.gnani.ai/api/TTS/available-voices.md) and [v3.0 audio tags](https://docs.gnani.ai/api/TTS/tts-audio-tags.md).
 
 </details>
 &nbsp;<br>

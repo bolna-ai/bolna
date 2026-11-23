@@ -466,6 +466,10 @@ TTS_CONTROL_MODEL_PREFIXES = {
     SynthesizerProvider.ELEVENLABS: {"clone_strength": ELEVENLABS_CLONE_STRENGTH_MODEL_PREFIXES},
 }
 TTS_MODEL_CONTROL_LIMITS = {
+    SynthesizerProvider.GNANI: {
+        "timbre-v2.5": {"speed": (0.85, 1.15)},
+        "timbre-v3.0": {"speed": (0.8, 1.2)},
+    },
     SynthesizerProvider.SARVAM: {
         "bulbul:v3": {"speed": (0.5, 2.0)},
         "bulbul:v4-flash": {"speed": (0.5, 2.0)},
@@ -478,6 +482,7 @@ TTS_AUDIO_SETTINGS = {
     SynthesizerProvider.DEEPGRAM: frozenset({"speed"}),
     SynthesizerProvider.ELEVENLABS: frozenset({"speed", "similarity_boost", "temperature", "style", "clone_strength"}),
     SynthesizerProvider.GEMINI: frozenset({"style"}),
+    SynthesizerProvider.GNANI: frozenset({"speed", "language"}),
     SynthesizerProvider.KALPA: frozenset({"temperature", "acoustic_temperature", "audio_quality"}),
     SynthesizerProvider.OPENAI: frozenset({"speed"}),
     SynthesizerProvider.PIXA: frozenset({"top_p", "repetition_penalty"}),
