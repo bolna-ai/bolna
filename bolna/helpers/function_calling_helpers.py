@@ -208,22 +208,33 @@ def guarded_transport(**kwargs):
     return transport
 
 
-async def validate_outbound_url(url):
-    """SSRF guard for user-supplied URLs, run before the request.
+# Special-use names that never reach a public host.
+_NON_PUBLIC_SUFFIXES = (".localhost", ".invalid", ".local", ".internal")
 
-    Rejects non-http(s) schemes and any host that resolves to a non-public
-    address (loopback, RFC-1918, link-local incl. the 169.254.169.254 cloud
-    metadata endpoint, reserved, etc.) or into OUTBOUND_BLOCKED_CIDRS. Raises
-    ``SSRFError`` on a blocked URL. Pair it with ``outbound_connector``, which
-    repeats the check on the address actually dialed.
+
+def _literal_ip(host):
+    """The address a host names directly, including legacy IPv4 forms such as 127.1 or 2130706433."""
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    try:
+        return ipaddress.ip_address(socket.inet_aton(host))
+    except OSError:
+        return None
+
+
+def check_outbound_url(url):
+    """The DNS-free half of the SSRF guard, also run when a URL is saved.
+
+    Raises ``SSRFError`` for a URL that is blocked whatever its host resolves to: a non-http(s)
+    scheme, a missing host or invalid port, a non-public IP literal, or a host that is not a public
+    domain name. Returns ``(host, port)`` when the host still has to be resolved, else ``None``.
     """
-    if not isinstance(url, str):
-        raise SSRFError("Missing or invalid request URL")
-    url = url.strip()
-    if not url:
+    if not isinstance(url, str) or not url.strip():
         raise SSRFError("Missing or invalid request URL")
 
-    parsed = urlsplit(url)
+    parsed = urlsplit(url.strip())
     scheme = parsed.scheme.lower()
     if scheme not in ALLOWED_URL_SCHEMES:
         raise SSRFError(f"Blocked URL scheme {scheme!r}; only http/https are allowed")
@@ -233,12 +244,37 @@ async def validate_outbound_url(url):
         raise SSRFError("Request URL has no host")
 
     if host.lower() in _ALLOWLISTED_HOSTS:
-        return
+        return None
 
     try:
         port = parsed.port
     except ValueError:
         raise SSRFError("Request URL has an invalid port")
+
+    ip = _literal_ip(host)
+    if ip is not None:
+        if _is_disallowed_ip(ip):
+            raise SSRFError(f"Blocked request to non-public address {host}")
+        return None
+
+    name = host.lower().rstrip(".")
+    if "." not in name or name.endswith(_NON_PUBLIC_SUFFIXES):
+        raise SSRFError(f"Host {host!r} is not a public domain name")
+    return host, port
+
+
+async def validate_outbound_url(url):
+    """SSRF guard for user-supplied URLs, run before the request.
+
+    Runs ``check_outbound_url``, then rejects a host that resolves to a non-public address
+    (loopback, RFC-1918, link-local incl. the 169.254.169.254 cloud metadata endpoint, reserved,
+    etc.) or into OUTBOUND_BLOCKED_CIDRS. Raises ``SSRFError`` on a blocked URL. Pair it with
+    ``outbound_connector``, which repeats the check on the address actually dialed.
+    """
+    target = check_outbound_url(url)
+    if target is None:
+        return
+    host, port = target
 
     loop = asyncio.get_running_loop()
     try:
