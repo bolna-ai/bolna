@@ -37,7 +37,7 @@ class BaseLLM:
         pass
 
     def cancel_in_flight_response(self):
-        """Best-effort cancel of the in-flight response without resetting chain state."""
+        """Stop continuing from the response the caller interrupted. No-op by default."""
         pass
 
     async def close(self):

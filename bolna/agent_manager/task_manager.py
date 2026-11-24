@@ -36,7 +36,6 @@ from bolna.constants import (
     LANGUAGE_NAMES,
     LANGUAGE_SWITCH_AUDIO_GAP_S,
     LANGUAGE_SWITCH_DECIDE_TIMEOUT_S,
-    LANGUAGE_SWITCH_TRANSCRIPT_REPLIES,
     LANGUAGE_SWITCH_MAX_HOLD_S,
     LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S,
     LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S,
@@ -755,8 +754,6 @@ class TaskManager(BaseManager):
         # Dedicated LLM that decides language switches from the unbiased detector
         # transcript. Set up in __setup_transcriber only for gated multilingual agents.
         self.language_switcher = None
-        # History length at the last switch; None until one. The prompt transcript window counts agent replies after it.
-        self.language_switch_history_start = None
         # Serializes switch decisions so overlapping turns can't interleave two
         # switch+follow-up sequences. Background-only: the caller-facing pipeline
         # (ASR -> main LLM -> TTS) never waits on this lock.
@@ -943,7 +940,6 @@ class TaskManager(BaseManager):
                 if self.max_silence_repeats is None:
                     self.max_silence_repeats = DEFAULT_MAX_SILENCE_REPEATS
                 self._silence_repeats_sent = 0
-                self._silence_period = None
 
                 # Handling accidental interruption
                 self.number_of_words_for_interruption = self.conversation_config.get(
@@ -1012,7 +1008,7 @@ class TaskManager(BaseManager):
 
         # Language switching, gated per call by the LANGUAGE_SWITCH feature flag
         # (tools_config["llm_language_switch"], see __language_switch_enabled):
-        #   enabled  → dedicated Switch LLM driven by the unbiased Saaras v3
+        #   enabled  → dedicated Switch LLM driven by the unbiased Saaras v4
         #              detector (handle_language_switch); the main LLM carries
         #              no switch tool.
         #   disabled → legacy flow: switch_language tool on the main LLM + the
@@ -1950,10 +1946,6 @@ class TaskManager(BaseManager):
                         "language_switch_lid_provider"
                     ) or os.getenv("LID_PROVIDER", "sarvam")
                     lid_config = {"telephony_provider": provider}
-                    # Sarvam-only model override (language_switch_saaras_v4_lid flag).
-                    lid_model = self.task_config.get("tools_config", {}).get("language_switch_lid_model")
-                    if lid_model:
-                        lid_config["sarvam_model"] = lid_model
                     switch_enabled = self.__language_switch_enabled()
                     if switch_enabled:
                         # language_switch_llm (azure or jev flag) overrides the model; absent → default.
@@ -1982,7 +1974,7 @@ class TaskManager(BaseManager):
                     logger.info(
                         f"TranscriberPool created with labels={list(transcribers.keys())}, "
                         f"active='{active_label}', language_switch_enabled={switch_enabled}, "
-                        f"lid_provider={LID_PROVIDER!r}, lid_model={lid_model or 'default'}, "
+                        f"lid_provider={LID_PROVIDER!r}, "
                         f"legacy_lid_heuristic={not switch_enabled}, lazy_legs={self.tools['transcriber'].lazy_legs}"
                     )
                     if switch_enabled:
@@ -2629,6 +2621,24 @@ class TaskManager(BaseManager):
             or (self.execute_function_call_task is not None and not self.execute_function_call_task.done()),
         }
 
+    def raw_heard_text(self, response_uid, turn_id):
+        """The ACKed text accumulated for a reply, unstripped so a tail can be joined at the spoken boundary.
+        A None id falls back to that store's last heard id."""
+        input_handler = self.tools["input"]
+        sources = (
+            (input_handler, "response_heard_by_response", response_uid, "last_heard_response_uid"),
+            (input_handler, "response_heard_by_turn", turn_id, "last_heard_turn_id"),
+            (self.mark_event_meta_data, "heard_text_by_response", response_uid, "last_heard_response_uid"),
+            (self.mark_event_meta_data, "heard_text_by_turn", turn_id, "last_heard_turn_id"),
+        )
+        for owner, store_name, key, last_heard_name in sources:
+            if key is None:
+                key = getattr(owner, last_heard_name, None)
+            text = getattr(owner, store_name, {}).get(key) if key is not None else None
+            if text and text.strip():
+                return text
+        return ""
+
     def estimate_played_text_for_time(self, pending_chunks, actual_play_time):
         """Credit whole chunks that fit in actual_play_time, then a word-trimmed proportional
         slice of the chunk the clock lands in."""
@@ -2652,10 +2662,17 @@ class TaskManager(BaseManager):
             cumulative_duration += chunk_duration
         return "".join(played_text)
 
-    async def sync_history(self, mark_events_data, interruption_processed_at, extend_with_playback_estimate=False):
+    async def sync_history(
+        self, mark_events_data, interruption_processed_at, extend_with_playback_estimate=False, caller_onset=None
+    ):
         """Sync history to reflect only what was actually spoken. Uses confirmed text or falls back to pending marks.
-        extend_with_playback_estimate: end-of-call only — credit the unACKed tail proportionally
-        to the wall clock elapsed since the last ACK (marks can lag playback and get lost)."""
+        extend_with_playback_estimate: credit the unACKed tail proportionally to the wall clock
+        elapsed since the last ACK (marks can lag playback and get lost).
+        caller_onset: a barge-in's speech onset; nothing after it is credited, since the caller talked over it."""
+        # A barge-in is detected words after the caller starts; don't credit what they spoke over.
+        heard_until = (
+            interruption_processed_at if caller_onset is None else min(interruption_processed_at, caller_onset)
+        )
         try:
             mark_events_data = list(mark_events_data)
             target_turn_id = self._get_latest_turn_id_from_marks(mark_events_data)
@@ -2678,47 +2695,54 @@ class TaskManager(BaseManager):
                 f"mark_ids={[mid for mid, _ in mark_events_data]}"
             )
             input_handler = self.tools["input"]
-            response_heard = input_handler.get_response_heard_for_response(target_response_uid)
-            if not response_heard:
-                response_heard = input_handler.get_response_heard_for_turn(target_turn_id)
-            if not response_heard:
-                response_heard = self.mark_event_meta_data.get_heard_text_for_response(target_response_uid)
-            if not response_heard:
-                response_heard = self.mark_event_meta_data.get_heard_text_for_turn(target_turn_id)
-            if not response_heard:
+            raw_heard = self.raw_heard_text(target_response_uid, target_turn_id)
+            if not raw_heard.strip():
                 # Only fall back to global accumulator when target_turn_id is unknown.
                 # With a known target turn, the global can hold stale text from a
                 # previous turn (e.g. acked post-tool audio before reset), which
                 # would corrupt the wrong message.
                 if target_turn_id is None:
-                    response_heard = input_handler.response_heard_by_user
+                    raw_heard = input_handler.response_heard_by_user or ""
                     target_turn_id = getattr(input_handler, "last_heard_turn_id", None)
+            response_heard = raw_heard.strip()
             logger.info(f"sync_history: response_heard len={len(response_heard) if response_heard else 0}")
             if response_heard:
                 logger.info(f"response_heard (last 10 chars): {response_heard[-10:]}")
 
             if extend_with_playback_estimate and response_heard:
+                last_acked = self.mark_event_meta_data.get_last_acked_mark_for_turn(target_turn_id)
+                last_acked_sent_ts = (last_acked or {}).get("sent_ts") or 0
                 pending_tail = []
                 for mark_id, mark_data in mark_events_data:
-                    text = mark_data.get("text_synthesized", "")
-                    if mark_data.get("type") in NON_EVIDENCE_MARK_TYPES or not text:
+                    if mark_data.get("type") in NON_EVIDENCE_MARK_TYPES:
                         continue
                     if target_turn_id is not None and mark_data.get("turn_id") != target_turn_id:
                         continue
-                    pending_tail.append({"text": text, "duration": mark_data.get("duration", 0)})
-                last_ack_ts = self.mark_event_meta_data.get_last_ack_ts_for_turn(target_turn_id)
-                if pending_tail and last_ack_ts:
-                    # Proportional by the wall clock since the last ACK. The ACK itself lags true
-                    # playout end, so this window under-credits — it can't stamp unheard text.
-                    tail_play_time = max(0.0, interruption_processed_at - last_ack_ts)
+                    # A lost mark from before the last ACK isn't the tail; its text would land after later text.
+                    sent_ts = mark_data.get("sent_ts") or 0
+                    if sent_ts and sent_ts <= last_acked_sent_ts:
+                        continue
+                    # Text-less marks (Azure sets text on a sentence's last chunk only) still take playback time.
+                    pending_tail.append(
+                        {
+                            "text": mark_data.get("text_synthesized") or "",
+                            "duration": mark_data.get("duration", 0),
+                            "sent_ts": sent_ts,
+                        }
+                    )
+                if pending_tail and last_acked:
+                    # Proportional by the wall clock since playback of the tail could start: the last ACK,
+                    # or the tail's send if it was still being generated then. The ACK lags true playout end,
+                    # so this window under-credits — it can't stamp unheard text.
+                    tail_start = max(last_acked["ack_ts"], pending_tail[0]["sent_ts"])
+                    tail_play_time = max(0.0, heard_until - tail_start)
                     tail_text = self.estimate_played_text_for_time(pending_tail, tail_play_time)
                     if tail_text:
                         logger.info(
                             f"sync_history: crediting unacked tail ({tail_play_time:.2f}s elapsed, {len(tail_text)} chars)"
                         )
-                        # Restore the stripped chunk-boundary space or the exact-match trim drops the tail.
-                        joiner = "" if (response_heard[-1:].isspace() or tail_text[:1].isspace()) else " "
-                        response_heard += joiner + tail_text
+                        # The unstripped heard text keeps the chunk boundary as spoken; a guessed space can split a word.
+                        response_heard = (raw_heard + tail_text).strip()
 
             if not response_heard:
                 pending_marks = [{"mark_id": k, "mark_data": v} for k, v in mark_events_data]
@@ -2738,10 +2762,10 @@ class TaskManager(BaseManager):
                 if pending_chunks:
                     first_sent_ts = pending_chunks[0].get("sent_ts", 0)
                     if first_sent_ts > 0:
-                        time_since_first_send = interruption_processed_at - first_sent_ts
+                        time_since_first_send = heard_until - first_sent_ts
                         actual_play_time = max(0, time_since_first_send)
                     else:
-                        elapsed_time = interruption_processed_at - self.tools["input"].get_current_mark_started_time()
+                        elapsed_time = heard_until - self.tools["input"].get_current_mark_started_time()
                         actual_play_time = max(0, elapsed_time)
 
                     estimated = self.estimate_played_text_for_time(pending_chunks, actual_play_time)
@@ -2891,7 +2915,8 @@ class TaskManager(BaseManager):
 
             traceback.print_exc()
 
-    async def __cleanup_downstream_tasks(self):
+    async def __cleanup_downstream_tasks(self, caller_onset=None):
+        """caller_onset: when the caller began talking over the reply being cut, if this is a barge-in."""
         current_ts = time.time()
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
@@ -2916,7 +2941,13 @@ class TaskManager(BaseManager):
         if not self.tools["input"].welcome_message_played():
             self.tools["input"].is_welcome_message_played = True
 
-        await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
+        # Credit the chunk that was mid-playback, or the next reply re-asks what the caller already heard.
+        await self.sync_history(
+            self.mark_event_meta_data.fetch_cleared_mark_event_data().items(),
+            current_ts,
+            extend_with_playback_estimate=True,
+            caller_onset=caller_onset,
+        )
         self.tools["input"].reset_response_heard_by_user()
 
         self.interruption_manager.invalidate_pending_responses()
@@ -4307,10 +4338,7 @@ class TaskManager(BaseManager):
         # Pass detected language to LLM for pre_call_message selection
         meta_info["detected_language"] = self.language
 
-        transcript_due = self.prompt_transcript_due()
-        # Graph agents route on the full history, so their node prompt takes the transcript instead.
-        meta_info["prompt_transcript"] = transcript_due
-        llm_messages = with_prompt_transcript(messages) if transcript_due and not self.__is_graph_agent() else messages
+        llm_messages = with_prompt_transcript(messages) if self.prompt_transcript_due() else messages
 
         try:
             # The transcript goes to the LLM only: `messages` is written back into history below.
@@ -5723,7 +5751,8 @@ class TaskManager(BaseManager):
             if transcriber_message != original_message:
                 logger.info(f"Merged transcript with unheard response: {transcriber_message}")
             if any(activity.values()):
-                await self.__cleanup_downstream_tasks()
+                # A final over agent audio is a barge-in too; its interims were the ignored ones.
+                await self.__cleanup_downstream_tasks(caller_onset=self.interruption_manager.get_barge_in_onset())
             # Cleanup invalidated every pending seq id; without this _synthesize drops this turn.
             self.interruption_manager.revalidate_sequence_id(current_sequence_id)
             logger.info(
@@ -5946,7 +5975,7 @@ class TaskManager(BaseManager):
                         isinstance(message.get("data"), dict)
                         and message["data"].get("type", "") == "interim_transcript_received"
                     ):
-                        self.time_since_last_spoken_human_word = time.time()
+                        self._note_caller_speech()
                         # Before every early exit below: a changed interim is proof the caller is
                         # still talking, so it must refresh liveness even when this turn ignores it.
                         self.interruption_manager.note_user_liveness(message["data"].get("content", ""))
@@ -5999,6 +6028,9 @@ class TaskManager(BaseManager):
                             welcome_played=self.tools["input"].welcome_message_played(),
                         ):
                             logger.info(f"Condition for interruption hit")
+                            caller_onset = self.interruption_manager.get_barge_in_onset(
+                                meta_info.get("user_start_ts_wall")
+                            )
                             self.interruption_manager.on_user_speech_started(meta_info.get("user_start_ts_wall"))
                             _t = self.tools.get("transcriber")
                             if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
@@ -6008,7 +6040,7 @@ class TaskManager(BaseManager):
                             # Also record in the interrupted set for was_interrupted annotation
                             self.interruption_manager.record_interrupted_transcriber_turn(_asr_turn_id)
                             self.tools["input"].update_is_audio_being_played(False, AudioPlaybackReason.BARGE_IN)
-                            await self.__cleanup_downstream_tasks()
+                            await self.__cleanup_downstream_tasks(caller_onset=caller_onset)
                         # User continuation detection: cancel pending response if user continues within grace period
                         elif (
                             not self.tools["input"].is_audio_being_played_to_user()
@@ -6047,6 +6079,7 @@ class TaskManager(BaseManager):
                             and self.number_of_words_for_interruption != 0
                         ):
                             # Not enough words for interruption - ignore (don't set callee_speaking)
+                            self.interruption_manager.note_ignored_interim()
                             logger.info(f"Ignoring transcript: {transcript_content.strip()}")
                             continue
                         else:
@@ -7619,29 +7652,19 @@ class TaskManager(BaseManager):
     def prompt_transcript_due(self, speculative: bool = False) -> bool:
         """Whether this reply gets the earlier turns as prompt text (language_switch_prompt_transcript flag).
 
-        The speculative post-switch reply always does. Other replies do until the switch is followed by
-        LANGUAGE_SWITCH_TRANSCRIPT_REPLIES agent replies with text: those replies in the new language
-        are what flip the model, so tool follow-ups and replies dropped before they were stored don't count.
+        From the speculative post-switch reply to the end of the call: some models follow the language of
+        the chat history over every instruction, and go back to the old language as soon as the history is
+        sent as messages again, even after several replies in the new one. Simple LLM agents only: graph and
+        knowledge-base agents build their own request and get it unchanged.
         """
+        tools_config = self.task_config.get("tools_config", {})
         if (
-            not self.task_config.get("tools_config", {}).get("language_switch_prompt_transcript")
+            not tools_config.get("language_switch_prompt_transcript")
             or not self.language_switcher
+            or (tools_config.get("llm_agent") or {}).get("agent_type", "simple_llm_agent") != "simple_llm_agent"
         ):
             return False
-        if speculative:
-            return True
-        start = self.language_switch_history_start
-        history = self.conversation_history.messages
-        if start is None or start > len(history):
-            return False
-        replies = sum(
-            1
-            for message in history[start:]
-            if message.get("role") == ChatRole.ASSISTANT
-            and isinstance(message.get("content"), str)
-            and message["content"].strip()
-        )
-        return replies < LANGUAGE_SWITCH_TRANSCRIPT_REPLIES
+        return speculative or bool(self.language_switch_events)
 
     def __apply_language_directive(self, label: str, context_note: str = None) -> None:
         """Install or refresh the language directive at the end of the system prompt.
@@ -7893,7 +7916,6 @@ class TaskManager(BaseManager):
         # Update TaskManager state so silence detection, fillers, and LLM
         # language stay in sync with the active pools.
         self.language = label
-        self.language_switch_history_start = len(self.conversation_history.messages)
         # Reset silence timers to prevent __check_for_completion from
         # interpreting the switch gap as inactivity and hanging up.
         self.last_transmitted_timestamp = time.time()
@@ -8534,20 +8556,16 @@ class TaskManager(BaseManager):
             )
         return fires
 
-    def _silence_repeat_cap(self):
-        """[silence] re-prompts allowed in the current silence period. A period restarts when the user
-        speaks or the graph moves to another node, and the cap never drops below what the node's own
-        _silence_repeats exit edge needs, so that edge can still fire."""
+    def _note_caller_speech(self):
+        """Restart the silence clock and the [silence] re-prompt budget: the caller spoke."""
+        self.time_since_last_spoken_human_word = time.time()
+        self._silence_repeats_sent = 0
+
+    def _silence_reprompt_allowed(self):
+        """Whether another [silence] re-prompt may go out since the caller last spoke."""
         if self.hang_conversation_after <= 0:
-            return math.inf  # no silence hangup to hand over to: a cap would leave the caller in dead air
-        llm_agent = self.tools.get("llm_agent")
-        # time_since_last_spoken_human_word holds the user's last-speech timestamp, so a change means they spoke
-        period = (self.time_since_last_spoken_human_word, getattr(llm_agent, "current_node_id", None))
-        if period != self._silence_period:
-            self._silence_period = period
-            self._silence_repeats_sent = 0
-        exit_at = llm_agent.silence_exit_threshold() if hasattr(llm_agent, "silence_exit_threshold") else 0
-        return max(self.max_silence_repeats, exit_at)
+            return True  # no silence hangup to hand over to: a cap would leave the caller in dead air
+        return self._silence_repeats_sent < self.max_silence_repeats or self.tools["llm_agent"].silence_exit_pending()
 
     def _pipeline_busy(self, audio_playing):
         """True while the agent is speaking or about to: response_in_pipeline can read False in the gap between a response's synth push and its first audio chunk, so _synthesis_awaiting_first_audio covers it."""
@@ -8664,22 +8682,19 @@ class TaskManager(BaseManager):
             if self._pipeline_busy(self.tools["input"].is_audio_being_played_to_user()):
                 continue
 
-            silence_repeat_cap = self._silence_repeat_cap() if self.repeat_after_silence_seconds else 0
             if (
                 self.repeat_after_silence_seconds
                 # An opening node arms its re-prompt before its message has played.
                 and (self.opening_node is None or self.tools["input"].welcome_message_played())
-                and self._silence_repeats_sent < silence_repeat_cap
                 and time_since_last_spoken_ai_word > self.repeat_after_silence_seconds
                 and time_since_user_last_spoke > self.repeat_after_silence_seconds
                 and not self.response_in_pipeline
                 and not has_pending_generation
+                and self._silence_reprompt_allowed()
             ):
                 self._silence_repeats_sent += 1
-                if self._silence_repeats_sent == silence_repeat_cap:
-                    logger.info(
-                        f"Silence re-prompt cap reached ({silence_repeat_cap}), the silence hangup can now fire"
-                    )
+                if self._silence_repeats_sent == self.max_silence_repeats:
+                    logger.info(f"Silence re-prompt cap reached ({self.max_silence_repeats})")
                 await self._inject_and_run_llm(
                     f"[silence] User was silent for {self.repeat_after_silence_seconds} seconds"
                 )
@@ -9213,7 +9228,7 @@ class TaskManager(BaseManager):
                     logger.info(f"S2S caller: {event.content[:200]}")
                     self.user_spoke = True
                     self.conversation_history.append_user(event.content)
-                    self.time_since_last_spoken_human_word = time.time()
+                    self._note_caller_speech()
                     # Cleared here rather than in the output loop: the prompt's audio is not
                     # distinguishable from any other turn, but the caller answering is.
                     self.asked_if_user_is_still_there = False
@@ -9231,7 +9246,7 @@ class TaskManager(BaseManager):
                 # can give the agent the floor back. Barge-in sensitivity is tuned provider-side.
                 self.interruption_manager.on_user_speech_started()
                 # A speech start refreshes liveness, barge-in or not.
-                self.time_since_last_spoken_human_word = time.time()
+                self._note_caller_speech()
                 if self._s2s_agent_has_floor():
                     logger.info("S2S: caller barged in, dropping queued audio")
                     self.interruption_manager.on_interruption_triggered()

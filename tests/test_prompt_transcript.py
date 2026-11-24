@@ -1,16 +1,17 @@
-"""The language_switch_prompt_transcript flag sends the earlier turns as prompt text right after a switch.
+"""The language_switch_prompt_transcript flag sends the earlier turns as prompt text once a call has switched language.
 
 Some models keep the language of the chat history over every language instruction, so after a switch
 they reply in the old language. The earlier turns go into the system prompt as a transcript and only
-the caller's latest turn stays a message. The LLM request changes only: history is untouched, and
-graph agents keep routing on the full history."""
+the caller's latest turn stays a message. It applies to simple LLM agents only; graph and knowledge-base
+agents get their request unchanged. The LLM request changes only: history is untouched."""
 
 import types
+
+import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.agent_types.graph_agent import GraphAgent
-from bolna.constants import LANGUAGE_SWITCH_TRANSCRIPT_REPLIES
 from bolna.helpers.conversation_history import ConversationHistory
 from bolna.helpers.prompt_transcript import CONTINUE_LINE, with_prompt_transcript
 
@@ -104,17 +105,17 @@ def test_a_non_text_caller_turn_or_system_prompt_is_left_alone():
 # --- when a reply gets it ---
 
 
-def holder(flag=True, switcher=True):
+def holder(flag=True, switcher=True, agent_type="simple_llm_agent"):
     tm = MagicMock()
-    tm.task_config = {"tools_config": FLAG if flag else {}}
+    tm.task_config = {"tools_config": {**FLAG, "llm_agent": {"agent_type": agent_type}} if flag else {}}
     tm.language_switcher = MagicMock() if switcher else None
     tm.conversation_history = ConversationHistory(initial_history=history())
-    tm.language_switch_history_start = None
+    tm.language_switch_events = []
     return tm
 
 
 def switched(tm):
-    tm.language_switch_history_start = len(tm.conversation_history.messages)
+    tm.language_switch_events.append({"to_label": "en", "from_label": "hi"})
     return tm
 
 
@@ -128,31 +129,27 @@ def test_off_without_the_flag_a_switcher_or_a_switch():
     assert not due(holder())
 
 
+def test_only_simple_agents_get_it():
+    for agent_type in ("graph_agent", "knowledgebase_agent"):
+        assert not due(switched(holder(agent_type=agent_type)))
+        assert not due(holder(agent_type=agent_type), speculative=True)
+    assert due(switched(holder()))
+
+
 def test_the_speculative_reply_gets_it_before_the_switch_lands():
     assert due(holder(), speculative=True)
     assert not due(holder(flag=False), speculative=True)
 
 
-def test_it_lasts_until_the_switch_is_followed_by_enough_agent_replies():
+def test_it_stays_on_for_the_rest_of_the_call_after_a_switch():
     tm = switched(holder())
     h = tm.conversation_history
-    # A tool call and its result are not replies the caller heard in the new language.
-    h.append_assistant(None, tool_calls=[{"id": "t1", "function": {"name": "lookup"}}])
-    h.append_tool_result("t1", "{}")
-    assert due(tm)
-
-    for n in range(LANGUAGE_SWITCH_TRANSCRIPT_REPLIES):
-        assert due(tm)
+    # Neither the handoff clip nor later replies end the transcript.
+    h.append_assistant("Sure", message_category="handoff")
+    for n in range(10):
         h.append_assistant(f"Reply {n} in English.")
         h.append_user("ok")
-
-    assert not due(tm)
-
-
-def test_it_stops_if_the_history_shrank_below_the_switch_point():
-    tm = switched(holder())
-    tm.language_switch_history_start += 5
-    assert not due(tm)
+        assert due(tm)
 
 
 # --- the request that reaches the LLM ---
@@ -185,7 +182,7 @@ def generation_tm(agent, agent_type):
     tm.llm_config = {"model": "sarvam-105b-conversations", "provider": "sarvam"}
     tm.task_config = {"task_type": "conversation", "tools_config": {**FLAG, "llm_agent": {"agent_type": agent_type}}}
     tm.language_switcher = MagicMock()
-    tm.language_switch_history_start = 0
+    tm.language_switch_events = [{"to_label": "en", "from_label": "hi"}]
     tm._inject_language_instruction = lambda messages: messages
     tm._apply_node_interruption_threshold = lambda node: None
     tm._synthesize = AsyncMock()
@@ -230,35 +227,29 @@ def graph_agent():
     return agent
 
 
-async def test_a_graph_agent_routes_on_the_full_history_and_its_node_prompt_gets_the_transcript():
+@pytest.mark.parametrize("agent_type", ["graph_agent", "knowledgebase_agent"])
+async def test_graph_and_knowledge_base_agents_get_their_request_unchanged(agent_type):
     captured = {}
-    agent = graph_agent()
 
     async def generate(messages, synthesize=True, meta_info=None):
-        captured["routed_on"] = messages
-        captured["sent"] = await agent._build_messages(messages, meta_info=meta_info)
+        captured["messages"] = messages
         yield {"static_message": "Sure.", "static_audio_hash": "hash"}
 
+    agent = MagicMock()
     agent.generate = generate
-    tm = generation_tm(agent, "graph_agent")
+    tm = generation_tm(agent, agent_type)
+    tm.prompt_transcript_due = TaskManager.prompt_transcript_due.__get__(tm, TaskManager)
     messages = history()
 
-    meta_info = await generate_once(tm, messages)
+    await generate_once(tm, messages)
 
-    assert meta_info["prompt_transcript"] is True
-    assert captured["routed_on"][: len(history())] == history()
-    sent = captured["sent"]
-    assert [m["role"] for m in sent] == ["system", "user"]
-    prompt = sent[0]["content"]
-    assert "## Conversation History" not in prompt
-    assert "Agent: வணக்கம், நான் நவ்யா.\nCaller: ஆமாங்க.\n" in prompt
-    assert prompt.index("## Transcript:") < prompt.index("LANGUAGE GUIDELINES")
+    assert captured["messages"][: len(history())] == history()
 
 
-async def test_a_graph_agent_without_the_window_sends_the_history_as_messages():
+async def test_a_graph_agent_sends_the_history_as_messages_under_its_heading():
     agent = graph_agent()
 
-    sent = await agent._build_messages(history(), meta_info={"prompt_transcript": False})
+    sent = await agent._build_messages(history())
 
     assert sent[0]["content"].endswith("## Conversation History")
     assert [m["role"] for m in sent] == ["system", "assistant", "user", "assistant", "user"]

@@ -1669,3 +1669,25 @@ class TestChainedRequestRejectionRetry:
         assert len(seen_params) == 2
         assert "tools" in seen_params[0]
         assert "tools" in seen_params[1], "retry must carry the turn's tools"
+
+    async def test_native_lane_chain_rejection_retries_full_history(self):
+        # OpenAI refused to continue from a response its experimental lane served; that ended the call as llm_error
+        error_event = {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "param": "response_id",
+                "code": "unsupported_native_response_reference",
+                "message": "The experimental native turn lane cannot hand response_id resp_fc to Python.",
+            },
+        }
+        llm, seen_params = self._llm_with_flaky_ws(error_event)
+
+        chunks = []
+        async for chunk in llm.generate_stream(self.TOOL_HISTORY, synthesize=False, meta_info=_make_meta_info()):
+            chunks.append(chunk)
+
+        assert len(seen_params) == 2
+        assert seen_params[0].get("previous_response_id") == "resp_fc"
+        assert "previous_response_id" not in seen_params[1], "the retry must drop the rejected chain"
+        assert "aapka score 785 hai" in "".join(str(c.data) for c in chunks)
