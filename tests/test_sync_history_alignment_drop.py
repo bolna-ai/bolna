@@ -146,3 +146,9 @@ async def test_chunker_spaces_do_not_push_the_cut_past_playback():
     llm_text = "आपको 4,500 रुपये 05-11-2026 तक भरने हैं जी"
 
     assert await stored_after_sync(llm_text, "आपको 4, 500 रुपये 05- 11- 2026") == ["आपको 4,500 रुपये 05-11-2026"]
+
+
+async def test_heard_text_ending_in_a_space_keeps_its_last_word():
+    llm_text = "आपकी EMI pending है जी।"
+
+    assert await stored_after_sync(llm_text, "आपकी EMI pending ") == ["आपकी EMI pending"]

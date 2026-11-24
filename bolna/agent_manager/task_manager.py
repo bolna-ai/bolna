@@ -2860,10 +2860,11 @@ class TaskManager(BaseManager):
             # TTS alignment drops characters, so its text only says how far playback got; the words come from the LLM text.
             if target_response_uid is not None and response_heard:
                 sent_text = self.sent_text_for_response(target_response_uid)
+                # v3 sends "word " chunks; a trailing space would match past the word and trim it.
                 matched = [
                     block
                     for block in difflib.SequenceMatcher(
-                        None, sent_text, response_heard, autojunk=False
+                        None, sent_text, response_heard.rstrip(), autojunk=False
                     ).get_matching_blocks()
                     if block.size
                 ]
