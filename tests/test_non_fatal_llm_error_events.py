@@ -243,6 +243,7 @@ async def test_azure_chat_stream_stashes_the_finish_reason():
 
 async def test_litellm_stream_stashes_the_finish_reason():
     llm = stub_chat_llm()
+    llm._acompletion = LiteLLM._acompletion.__get__(llm)
     chunks = [
         {"choices": [{"delta": SimpleNamespace(content=None, tool_calls=None), "finish_reason": None}]},
         {"choices": [{"delta": SimpleNamespace(content=None, tool_calls=None), "finish_reason": "length"}]},
