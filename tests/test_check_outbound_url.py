@@ -27,6 +27,12 @@ from bolna.helpers.function_calling_helpers import SSRFError, check_outbound_url
         "http://printer.local/",
         "http://ip-10-0-0-1.ec2.internal/",
         "http://api.localhost/",
+        "http://[::1/x",
+        "http://exa\x00mple.com/",
+        "http://a..b.example.com/",
+        "http://%31%32%37.0.0.1/",
+        "http://127.0.0\u30021/",
+        "http://api.example\u3002localhost/",
     ],
 )
 def test_check_outbound_url_rejects_without_dns(url, monkeypatch):
@@ -51,6 +57,12 @@ def test_check_outbound_url_settles_a_public_ip_literal(url):
 def test_check_outbound_url_skips_an_allowlisted_host(monkeypatch):
     monkeypatch.setattr(fch, "_ALLOWLISTED_HOSTS", frozenset({"ws-server"}))
     assert check_outbound_url("http://ws-server:5001/x") is None
+    with pytest.raises(SSRFError, match="invalid port"):
+        check_outbound_url("http://ws-server:99999/x")
+
+
+def test_check_outbound_url_returns_the_host_as_clients_dial_it():
+    assert check_outbound_url("https://b\u00fccher.example.com/") == ("xn--bcher-kva.example.com", None)
 
 
 async def test_validate_rejects_a_single_label_host_before_resolving(monkeypatch):

@@ -3,6 +3,7 @@ import errno
 import ipaddress
 import json
 import os
+import re
 import socket
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
@@ -211,6 +212,21 @@ def guarded_transport(**kwargs):
 # Special-use names that only ever reach an internal host. ".invalid" is left to DNS: it is the
 # reserved placeholder name, and integrations save it before they know the real URL.
 _NON_PUBLIC_SUFFIXES = (".localhost", ".local", ".internal")
+_HOSTNAME = re.compile(r"[a-z0-9_-]+(\.[a-z0-9_-]+)*\.?")
+
+
+def _dialed_host(host):
+    """The host as an HTTP client dials it: IDNA-encoded and lower-cased, so look-alike dots such as U+3002
+    are already dots. Raises ``SSRFError`` for a host no client could dial."""
+    if ":" in host:
+        return host.lower()
+    try:
+        dialed = host.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        raise SSRFError(f"Request URL host {host!r} is not a valid hostname") from None
+    if not _HOSTNAME.fullmatch(dialed):
+        raise SSRFError(f"Request URL host {host!r} is not a valid hostname")
+    return dialed
 
 
 def _literal_ip(host):
@@ -229,28 +245,32 @@ def check_outbound_url(url):
     """The DNS-free half of the SSRF guard, also run when a URL is saved.
 
     Raises ``SSRFError`` for a URL that is blocked whatever its host resolves to: a non-http(s)
-    scheme, a missing host or invalid port, a non-public IP literal, or a name that can only reach an
-    internal host. Returns ``(host, port)`` when the host still has to be resolved, else ``None``.
+    scheme, a malformed URL, a missing or undialable host, an invalid port, a non-public IP literal, or a
+    name that can only reach an internal host. Returns ``(host, port)``, the host as clients dial it, when
+    it still has to be resolved, else ``None``.
     """
     if not isinstance(url, str) or not url.strip():
         raise SSRFError("Missing or invalid request URL")
 
-    parsed = urlsplit(url.strip())
+    try:
+        parsed = urlsplit(url.strip())
+    except ValueError:
+        raise SSRFError("Request URL is malformed") from None
     scheme = parsed.scheme.lower()
     if scheme not in ALLOWED_URL_SCHEMES:
         raise SSRFError(f"Blocked URL scheme {scheme!r}; only http/https are allowed")
 
-    host = parsed.hostname
-    if not host:
+    if not parsed.hostname:
         raise SSRFError("Request URL has no host")
-
-    if host.lower() in _ALLOWLISTED_HOSTS:
-        return None
 
     try:
         port = parsed.port
     except ValueError:
         raise SSRFError("Request URL has an invalid port")
+
+    host = _dialed_host(parsed.hostname)
+    if host in _ALLOWLISTED_HOSTS:
+        return None
 
     ip = _literal_ip(host)
     if ip is not None:
@@ -258,7 +278,7 @@ def check_outbound_url(url):
             raise SSRFError(f"Blocked request to non-public address {host}")
         return None
 
-    name = host.lower().rstrip(".")
+    name = host.rstrip(".")
     if "." not in name or name.endswith(_NON_PUBLIC_SUFFIXES):
         raise SSRFError(f"Host {host!r} is not a public domain name")
     return host, port
