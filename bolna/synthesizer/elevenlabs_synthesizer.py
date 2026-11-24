@@ -13,7 +13,7 @@ import aiohttp
 import websockets
 
 from .stream_synthesizer import StreamSynthesizer
-from bolna.constants import ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES
+from bolna.constants import ELEVENLABS_CLONE_STRENGTH_MODEL_PREFIXES, ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, resample
@@ -100,6 +100,7 @@ class ElevenlabsBase(StreamSynthesizer):
         similarity_boost=0.75,
         speed=1.0,
         style=0,
+        clone_strength=None,
         synthesizer_key=None,
         caching=True,
         pronunciation_dictionary_locators=None,
@@ -123,6 +124,9 @@ class ElevenlabsBase(StreamSynthesizer):
         self.use_mulaw = kwargs.get("use_mulaw", True)
         self.temperature = temperature
         self.similarity_boost = similarity_boost
+        # Only v4 takes it; left unset it stays off the wire, so ElevenLabs uses the strength saved on the voice.
+        takes_clone_strength = (model or "").startswith(ELEVENLABS_CLONE_STRENGTH_MODEL_PREFIXES)
+        self.clone_strength = clone_strength if takes_clone_strength else None
         self.caching = caching
         if self.caching:
             self.cache = InmemoryScalarCache()
@@ -182,6 +186,14 @@ class ElevenlabsBase(StreamSynthesizer):
             )
         return True
 
+    def _voice_settings(self):
+        return {
+            "stability": self.temperature,
+            "similarity_boost": self.similarity_boost,
+            "speed": self.speed,
+            "style": self.style,
+        }
+
     def _get_audio_format(self):
         return "mulaw" if self.wire_format == "ulaw_8000" else "wav"
 
@@ -221,14 +233,10 @@ class ElevenlabsBase(StreamSynthesizer):
         payload = {
             "text": text,
             "model_id": self.model,
-            "voice_settings": {
-                "stability": self.temperature,
-                "similarity_boost": self.similarity_boost,
-                "optimize_streaming_latency": 3,
-                "speed": self.speed,
-                "style": self.style,
-            },
+            "voice_settings": {**self._voice_settings(), "optimize_streaming_latency": 3},
         }
+        if self.clone_strength is not None:
+            payload["voice_settings"]["clone_strength"] = self.clone_strength
         if self.pronunciation_dictionary_locators:
             payload["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
         headers = {"xi-api-key": self.api_key}
@@ -266,7 +274,7 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
         self.current_turn_ttfb = None
         self.eos_accum_context_id = None  # context whose spoken chars are being accumulated
         self.eos_accum_text = ""  # spoken-so-far for that context (end-of-stream match)
-        self.dictionary_context_id = None  # last context whose first message carried the dictionaries
+        self.opened_context_id = None  # last context whose first message carried its voice settings
         self._reported_closed_ws = None  # socket whose close was already logged
         self.pending_text = ""
         self.pending_sequence_id = None
@@ -371,10 +379,13 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                     return
                 try:
                     message = {"text": f"{unit} ", "context_id": self.context_id, "flush": True}
-                    # ElevenLabs reads dictionaries only from a context's first message.
-                    if self.pronunciation_dictionary_locators and self.context_id != self.dictionary_context_id:
-                        message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
-                        self.dictionary_context_id = self.context_id
+                    # ElevenLabs reads voice settings and dictionaries only from a context's first
+                    # message; a context opened without them speaks with the voice's stored settings.
+                    if self.context_id != self.opened_context_id:
+                        message["voice_settings"] = self._voice_settings()
+                        if self.pronunciation_dictionary_locators:
+                            message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
+                        self.opened_context_id = self.context_id
                     # Claim before sending: text lost into a socket that dies mid-send is still this turn's.
                     self.current_turn_socket = self.websocket
                     await self.websocket.send(json.dumps(message))
@@ -393,7 +404,7 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                     await self.websocket.send(json.dumps({"text": "", "context_id": self.context_id, "flush": True}))
                     # Closing the context makes ElevenLabs emit isFinal, which the receiver uses
                     # as end-of-stream. The context's remaining frames are still delivered. The
-                    # next turn opens a fresh context; voice_settings carry over from the connection BOS.
+                    # next turn opens a fresh context with its own voice settings.
                     if self.context_id:
                         await self.websocket.send(json.dumps({"context_id": self.context_id, "close_context": True}))
                         self.context_id = None
@@ -574,20 +585,15 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                 logger.info(f"Elevenlabs WebSocket connected trace_id={self.ws_trace_id}")
             bos_message = {
                 "text": " ",
-                "voice_settings": {
-                    "stability": self.temperature,
-                    "similarity_boost": self.similarity_boost,
-                    "speed": self.speed,
-                    "style": self.style,
-                },
+                "voice_settings": self._voice_settings(),
                 "generation_config": {
                     "chunk_length_schedule": [50, 80, 120, 150],
                 },
                 "xi_api_key": self.api_key,
             }
             await websocket.send(json.dumps(bos_message))
-            # A new socket knows none of our contexts, so the next message must carry the dictionaries again.
-            self.dictionary_context_id = None
+            # A new socket knows none of our contexts, so the next message must open its context again.
+            self.opened_context_id = None
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
@@ -659,11 +665,14 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
                 self.ws_trace_id = websocket.response.headers.get("x-trace-id")
                 logger.info(f"Elevenlabs v3 WebSocket connected trace_id={self.ws_trace_id}")
-            # First message only. stability is the sole setting v3 honours; dictionaries apply to the whole socket.
+            # First message only. The socket takes stability and, on v4, clone_strength; dictionaries apply to the
+            # whole socket.
             first_message = {
                 "voices": [self.voice],
                 "voice_settings": {"stability": self.temperature},
             }
+            if self.clone_strength is not None:
+                first_message["voice_settings"]["clone_strength"] = self.clone_strength
             if self.pronunciation_dictionary_locators:
                 first_message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
             await websocket.send(json.dumps(first_message))

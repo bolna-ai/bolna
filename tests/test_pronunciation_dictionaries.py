@@ -224,21 +224,30 @@ async def test_each_turn_context_opens_with_the_dictionaries():
         "text": "Welcome to Bolna. ",
         "context_id": first_context,
         "flush": True,
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75, "speed": 1.0, "style": 0},
         "pronunciation_dictionary_locators": [LOCATOR],
     }
 
 
-async def test_turns_without_dictionaries_send_exactly_what_they_did_before():
-    synth = _elevenlabs()
+async def test_every_turn_context_opens_with_the_agents_voice_settings():
+    # A context opened without them speaks with the voice's stored settings, not the agent's.
+    synth = _elevenlabs(temperature=0.3, similarity_boost=0.2, speed=0.92, style=0.4)
     synth.websocket = FakeWS()
+    settings = {"stability": 0.3, "similarity_boost": 0.2, "speed": 0.92, "style": 0.4}
 
-    await _speak_turn(synth, "Hello there.", 1)
+    await _speak_turn(synth, "Hello there. How are you?", 1)
+    first = synth.current_turn_context_id
+    await _speak_turn(synth, "Anything else?", 2)
+    second = synth.current_turn_context_id
 
-    ctx = synth.current_turn_context_id
     assert synth.websocket.sent == [
-        {"text": "Hello there. ", "context_id": ctx, "flush": True},
-        {"text": "", "context_id": ctx, "flush": True},
-        {"context_id": ctx, "close_context": True},
+        {"text": "Hello there. ", "context_id": first, "flush": True, "voice_settings": settings},
+        {"text": "How are you? ", "context_id": first, "flush": True},
+        {"text": "", "context_id": first, "flush": True},
+        {"context_id": first, "close_context": True},
+        {"text": "Anything else? ", "context_id": second, "flush": True, "voice_settings": settings},
+        {"text": "", "context_id": second, "flush": True},
+        {"context_id": second, "close_context": True},
     ]
 
 

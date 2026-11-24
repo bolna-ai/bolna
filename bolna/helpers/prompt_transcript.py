@@ -1,4 +1,4 @@
-"""Earlier turns as prompt text, for the first replies after a language switch.
+"""Earlier turns as prompt text, once a call has switched language.
 
 Some models keep the language of the chat history over every language instruction, so after a switch
 they reply in the old language. Sending the earlier turns as a transcript inside the system prompt,

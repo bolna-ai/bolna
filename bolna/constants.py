@@ -87,8 +87,8 @@ REDELIVERED_TRANSCRIPT_WINDOW_MS = 2000
 # made no forward progress at all, e.g. a hung LLM call or an s2s tool task that never
 # completes. BOLNA-2563.
 STALL_HANGUP_HARD_CAP_S = 60.0
-# [silence] re-prompts allowed per silence period (reset when the user speaks or the node changes;
-# raised to what the node's own _silence_repeats exit edge needs). Each re-prompt counts as agent
+# [silence] re-prompts allowed per silence period (reset only when the user speaks; past it a node
+# still gets what its own _silence_repeats exit edge needs). Each re-prompt counts as agent
 # speech and restarts the silence clock, so without a cap a node re-prompt shorter than
 # hangup_after_silence keeps a silent caller on the line until the max call duration.
 DEFAULT_MAX_SILENCE_REPEATS = 2
@@ -121,9 +121,6 @@ LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S = 0.7
 # flush (the coming turn will drain the buffer). Past this buffer age the speaking flag is
 # treated as stale — the detector hears the same audio and has produced nothing that long.
 LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S = 2.5
-# Agent replies after a switch that get the earlier turns as prompt text (language_switch_prompt_transcript
-# flag): some models keep the language of the chat history over every instruction until their own replies flip it.
-LANGUAGE_SWITCH_TRANSCRIPT_REPLIES = 2
 
 # Debounce for overlapped finals: one regenerate after this quiet window instead of per fragment.
 LLM_REGEN_SETTLE_S = 0.7
@@ -453,6 +450,8 @@ AZURE_TTS_SPEED_MAX = 2.0
 SARVAM_LOUDNESS_MODELS = frozenset({"bulbul:v2"})
 RIME_TIME_SCALE_MODELS = frozenset({"coda", "mistv3"})
 ELEVENLABS_STYLE_MODELS = frozenset({"eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2"})
+# ElevenLabs applies clone_strength only to professional voice clones fine-tuned for a v4 model.
+ELEVENLABS_CLONE_STRENGTH_MODEL_PREFIXES = ("eleven_v4",)
 
 TTS_CONTROL_MODELS = {
     SynthesizerProvider.CARTESIA: {"volume": CARTESIA_VOLUME_MODELS},
@@ -460,9 +459,11 @@ TTS_CONTROL_MODELS = {
     SynthesizerProvider.RIME: {"time_scale_factor": RIME_TIME_SCALE_MODELS},
     SynthesizerProvider.SARVAM: {"loudness": SARVAM_LOUDNESS_MODELS},
 }
-# Deepgram model ids can carry the voice ("aura-2-thalia-en"), so its controls match on the family prefix.
+# Controls that follow a model family match on its prefix: Deepgram ids carry the voice ("aura-2-thalia-en"),
+# and ElevenLabs v4 spans several ids.
 TTS_CONTROL_MODEL_PREFIXES = {
     SynthesizerProvider.DEEPGRAM: {"speed": ("aura-2",)},
+    SynthesizerProvider.ELEVENLABS: {"clone_strength": ELEVENLABS_CLONE_STRENGTH_MODEL_PREFIXES},
 }
 TTS_MODEL_CONTROL_LIMITS = {
     SynthesizerProvider.SARVAM: {
@@ -475,7 +476,7 @@ TTS_AUDIO_SETTINGS = {
     SynthesizerProvider.AZURETTS: frozenset({"speed"}),
     SynthesizerProvider.CARTESIA: frozenset({"speed", "volume"}),
     SynthesizerProvider.DEEPGRAM: frozenset({"speed"}),
-    SynthesizerProvider.ELEVENLABS: frozenset({"speed", "similarity_boost", "temperature", "style"}),
+    SynthesizerProvider.ELEVENLABS: frozenset({"speed", "similarity_boost", "temperature", "style", "clone_strength"}),
     SynthesizerProvider.GEMINI: frozenset({"style"}),
     SynthesizerProvider.KALPA: frozenset({"temperature", "acoustic_temperature", "audio_quality"}),
     SynthesizerProvider.OPENAI: frozenset({"speed"}),
