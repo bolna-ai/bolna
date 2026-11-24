@@ -41,8 +41,8 @@ def test_clip_round_trips_its_chunks_and_format():
 
 
 @pytest.mark.asyncio
-async def test_line_is_stored_only_once_it_reaches_min_plays():
-    store = AsyncMock()
+async def test_line_is_stored_once_it_reaches_min_plays():
+    store = AsyncMock(return_value=True)
     with patch.object(cache_module, "store_file", store):
         below = _cache(plays=19)
         prefix = below.prefix("voice", "mulaw")
@@ -51,16 +51,33 @@ async def test_line_is_stored_only_once_it_reaches_min_plays():
         store.assert_not_awaited()
         assert not below.has(key, prefix)
 
-        past = _cache(plays=21)
-        await past._count_and_store(Capture(key, prefix, TEXT, list(CHUNKS), "mulaw"))
-        store.assert_not_awaited()
-
         at = _cache(plays=20)
         await at._count_and_store(Capture(key, prefix, TEXT, list(CHUNKS), "mulaw"))
         store.assert_awaited_once()
         assert store.await_args.kwargs["file_key"] == key
         assert at.has(key, prefix)
         assert at.fetch(key) == ("mulaw", CHUNKS)
+
+        past = _cache(plays=21)
+        await past._count_and_store(Capture(key, prefix, TEXT, list(CHUNKS), "mulaw"))
+        store.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_store_is_not_recorded_and_a_later_play_retries():
+    store = AsyncMock(side_effect=[False, True])
+    with patch.object(cache_module, "store_file", store):
+        cache = _cache(plays=20)
+        prefix = cache.prefix("voice", "mulaw")
+        key = cache.object_key(prefix, TEXT)
+        await cache._count_and_store(Capture(key, prefix, TEXT, list(CHUNKS), "mulaw"))
+        assert not cache.has(key, prefix)
+        assert tts_clips.recall_clip(key) is None
+
+        cache.record_play.return_value = 21
+        await cache._count_and_store(Capture(key, prefix, TEXT, list(CHUNKS), "mulaw"))
+        assert store.await_count == 2
+        assert cache.has(key, prefix)
 
 
 @pytest.mark.asyncio
@@ -113,6 +130,19 @@ async def test_manifest_drops_clips_older_than_max_age():
         await cache_module._manifests[prefix].loading
     assert cache.has(fresh, prefix)
     assert not cache.has(stale, prefix)
+
+
+@pytest.mark.asyncio
+async def test_failed_listing_waits_out_the_refresh_interval():
+    cache = _cache()
+    prefix = cache.prefix("voice", "mulaw")
+    listing = AsyncMock(side_effect=OSError("denied"))
+    with patch.object(cache_module, "list_s3_objects", listing):
+        cache.warm(prefix)
+        await cache_module._manifests[prefix].loading
+        cache.warm(prefix)
+        await cache_module._manifests[prefix].loading
+    listing.assert_awaited_once()
 
 
 def _tm(cache):

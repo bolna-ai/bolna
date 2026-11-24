@@ -140,17 +140,18 @@ class TtsResponseCache:
     async def _count_and_store(self, capture):
         try:
             plays = await self.record_play(capture.object_key)
-            # Only the play that reaches min_plays stores, so pods yet to list the clip do not overwrite it.
-            if plays != self.min_plays or self.has(capture.object_key, capture.prefix):
+            if plays < self.min_plays or self.has(capture.object_key, capture.prefix):
                 return
             blob = encode_clip(capture.audio_format, capture.chunks)
-            await store_file(
+            stored = await store_file(
                 bucket_name=BUCKET_NAME,
                 file_key=capture.object_key,
                 file_data=blob,
                 content_type="clip",
                 local=self.local,
             )
+            if not stored:
+                return
             _manifests.setdefault(capture.prefix, Manifest()).keys.add(capture.object_key)
             remember_clip(capture.object_key, blob)
             logger.info(f"Stored reply clip {capture.object_key} after {plays} plays ({len(blob)} bytes)")
@@ -161,10 +162,12 @@ class TtsResponseCache:
         try:
             cutoff = time.time() - self.max_age_s
             manifest.keys = {key for key, modified in await self._list(prefix) if modified >= cutoff}
-            manifest.loaded_at = time.time()
             logger.info(f"Loaded {len(manifest.keys)} reply clips under {prefix}")
         except Exception as e:
             logger.error(f"Could not list reply clips under {prefix}: {e}")
+        finally:
+            # A failed listing also waits out the refresh interval rather than retrying on every reply.
+            manifest.loaded_at = time.time()
 
     async def _list(self, prefix):
         if not self.local:

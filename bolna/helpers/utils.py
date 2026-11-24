@@ -330,6 +330,7 @@ async def list_s3_objects(bucket_name, prefix):
 async def store_file(
     bucket_name=None, file_key=None, file_data=None, content_type="json", local=False, preprocess_dir=None
 ):
+    """Write file_data to S3, or under PREPROCESS_DIR when local; True once it is written."""
     if not local:
         session = AioSession()
 
@@ -342,10 +343,12 @@ async def store_file(
                 data = file_data
             try:
                 await s3_client.put_object(Bucket=bucket_name, Key=file_key, Body=data)
+                return True
             except (BotoCoreError, ClientError) as error:
                 logger.error(error)
             except Exception as e:
                 logger.error("Exception occurred while s3 put object: {}".format(e))
+            return False
     if local:
         dir_name = PREPROCESS_DIR if preprocess_dir is None else preprocess_dir
         directory_path = os.path.join(dir_name, os.path.dirname(file_key))
@@ -364,8 +367,10 @@ async def store_file(
                 with open(f"{dir_name}/{file_key}", "wb") as f:
                     data = file_data
                     f.write(data)
+            return True
         except Exception as e:
             logger.error(f"Could not save local file {e}")
+            return False
 
 
 def agent_audio_key(filename, audio_format, agent_name=None, assistant_id=None, local=False):
