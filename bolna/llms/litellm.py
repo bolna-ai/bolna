@@ -26,14 +26,6 @@ logging.getLogger("LiteLLM Router").setLevel(logging.WARNING)
 logging.getLogger("LiteLLM Proxy").setLevel(logging.WARNING)
 
 
-async def _aws_credentials(model, model_args):
-    # Bedrock on IAM auth: litellm would otherwise refresh expiring credentials with a blocking STS call.
-    # Passed to acompletion only, so they never ride along in model_args (e.g. into tool-call payloads).
-    if model.startswith("bedrock/") and "api_key" not in model_args:
-        return await bedrock_credentials()
-    return {}
-
-
 class LiteLLM(BaseLLM):
     def __init__(self, model, max_tokens=30, buffer_size=40, temperature=0.0, language=DEFAULT_LANGUAGE_CODE, **kwargs):
         super().__init__(max_tokens, buffer_size)
@@ -73,6 +65,14 @@ class LiteLLM(BaseLLM):
             self.trigger_function_call = False
         self.run_id = kwargs.get("run_id", None)
 
+    async def _acompletion(self, model_args):
+        # Bedrock on IAM auth: litellm would otherwise refresh expiring credentials with a blocking STS call.
+        # Passed to acompletion only, so they never ride along in model_args (e.g. into tool-call payloads).
+        aws_credentials = {}
+        if self.model.startswith("bedrock/") and "api_key" not in model_args:
+            aws_credentials = await bedrock_credentials()
+        return await acompletion(**model_args, **aws_credentials)
+
     async def generate_stream(self, messages, synthesize=True, meta_info=None, tool_choice=None, tools=None):
         if not messages or len(messages) == 0:
             raise Exception("No messages provided")
@@ -105,8 +105,7 @@ class LiteLLM(BaseLLM):
         )
 
         try:
-            aws_credentials = await _aws_credentials(self.model, model_args)
-            completion_stream = await acompletion(**model_args, **aws_credentials)
+            completion_stream = await self._acompletion(model_args)
         except ContentPolicyViolationError as e:
             logger.error(f"LiteLLM content policy violation: {e}")
             raise
@@ -202,8 +201,7 @@ class LiteLLM(BaseLLM):
                 "temperature": 0.0,
             }
         )
-        aws_credentials = await _aws_credentials(self.model, model_args)
-        stream = await acompletion(**model_args, **aws_credentials)
+        stream = await self._acompletion(model_args)
         return await read_routing_stream(stream, parsed_tools)
 
     async def generate(self, messages, stream=False, request_json=False, meta_info=None, ret_metadata=False):
@@ -227,8 +225,7 @@ class LiteLLM(BaseLLM):
             stream,
         )
         try:
-            aws_credentials = await _aws_credentials(self.model, model_args)
-            completion = await acompletion(**model_args, **aws_credentials)
+            completion = await self._acompletion(model_args)
             text = completion.choices[0].message.content
         except ContentPolicyViolationError as e:
             logger.error(f"LiteLLM content policy violation: {e}")
