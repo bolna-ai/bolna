@@ -18,21 +18,15 @@ class InputStub:
     response_heard_by_user = ""
 
     def __init__(self, heard):
-        self.heard = heard
-
-    def get_response_heard_for_response(self, uid):
-        return self.heard if uid == "r8" else ""
-
-    def get_response_heard_for_turn(self, turn_id):
-        return ""
+        # sync_history reads these stores directly (TaskManager.raw_heard_text), not the getters.
+        self.response_heard_by_response = {"r8": heard}
+        self.response_heard_by_turn = {}
 
 
 class MarkMetaStub:
-    def get_heard_text_for_response(self, uid):
-        return ""
-
-    def get_heard_text_for_turn(self, turn_id):
-        return ""
+    def __init__(self):
+        self.heard_text_by_response = {}
+        self.heard_text_by_turn = {}
 
 
 def make_task_manager(history, heard):
