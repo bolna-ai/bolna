@@ -165,8 +165,6 @@ class _GuardedNetworkBackend(httpcore.AsyncNetworkBackend):
 
     async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         options = {"timeout": timeout, "local_address": local_address, "socket_options": socket_options}
-        if host.lower() in _ALLOWLISTED_HOSTS:
-            return await self._inner.connect_tcp(host, port, **options)
         try:
             loop = asyncio.get_running_loop()
             infos = await asyncio.wait_for(
@@ -178,6 +176,8 @@ class _GuardedNetworkBackend(httpcore.AsyncNetworkBackend):
         except OSError as e:
             raise httpcore.ConnectError(f"Could not resolve {host}: {e}") from None
         addresses = list(dict.fromkeys(info[4][0] for info in infos))
+        if host.lower() in _ALLOWLISTED_HOSTS:
+            return await self._connect_first(addresses, port, options)
         allowed = [address for address in addresses if not _is_disallowed_ip(ipaddress.ip_address(address))]
         if not allowed:
             logger.warning(f"Blocked outbound connection to {host}, which resolves to non-public {addresses}")

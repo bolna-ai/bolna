@@ -364,3 +364,14 @@ async def test_private_aaaa_beside_a_public_a_is_never_dialed(monkeypatch):
     with pytest.raises(httpcore.ConnectError):
         await fch._GuardedNetworkBackend(RecordingBackend()).connect_tcp("dual-stack.example", 443)
     assert dialed == ["93.184.216.34"]
+
+
+async def test_guarded_transport_resolves_an_allowlisted_host_ipv4_first(monkeypatch, local_http_server):
+    """An allowlisted host skips the address check, not the IPv4-first lookup."""
+    port, paths = local_http_server
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", _dns_without_aaaa("127.0.0.1"))
+    monkeypatch.setattr(fch, "_ALLOWLISTED_HOSTS", frozenset({"allowlisted.example"}))
+    async with httpx.AsyncClient(transport=guarded_transport()) as client:
+        response = await asyncio.wait_for(client.get(f"http://allowlisted.example:{port}/"), timeout=1)
+    assert response.status_code == 200
+    assert paths == ["/"]
