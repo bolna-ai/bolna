@@ -1,5 +1,5 @@
-"""TTS alignment can drop characters (Devanagari on ElevenLabs v3). When the heard text covers about the
-whole reply, sync_history must keep the LLM text instead of the lossy alignment copy."""
+"""TTS alignment can drop characters (Devanagari on ElevenLabs v3) or add spaces (the text chunker). sync_history
+aligns the heard text to the LLM text and stores the LLM words up to where playback got."""
 
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.helpers.conversation_history import ConversationHistory
@@ -83,7 +83,7 @@ async def test_barge_in_with_lossy_alignment_stores_clean_llm_prefix():
     assert assistant_contents(history) == ["जी, मैं"]
 
 
-async def test_fully_played_reply_with_many_drops_stores_clean_llm_prefix():
+async def test_fully_played_reply_with_many_drops_keeps_llm_text():
     llm_text = "मैं Woxsen University से Law admissions में आपकी help के लिए call कर रही हूँ, क्या मैं आपसे दो मिनट बात कर सकती हूँ?"
     alignment = "ं Woxsen University से Law ad में आपकी help के लिए call कर रही हूँ, क्या मैं आपसे दो मिनट बात कर सकती हूँ?"
     history = ConversationHistory()
@@ -92,9 +92,7 @@ async def test_fully_played_reply_with_many_drops_stores_clean_llm_prefix():
 
     await tm.sync_history([], interruption_processed_at=1000.0)
 
-    assert assistant_contents(history) == [
-        "मैं Woxsen University से Law admissions में आपकी help के लिए call कर रही हूँ, क्या मैं आपसे दो मिनट बात कर"
-    ]
+    assert assistant_contents(history) == [llm_text]
 
 
 async def test_cut_mid_word_drops_the_partial_word():
@@ -117,3 +115,34 @@ async def test_barge_in_still_trims_to_heard_text():
     await tm.sync_history([], interruption_processed_at=1000.0)
 
     assert assistant_contents(history) == [heard]
+
+
+async def stored_after_sync(llm_text, heard):
+    history = ConversationHistory()
+    history.append_assistant(" " + llm_text, turn_id=8, response_uid="r8")
+    tm = make_task_manager(history, heard)
+    await tm.sync_history([], interruption_processed_at=1000.0)
+    return assistant_contents(history)
+
+
+async def test_barge_in_on_the_last_words_drops_them():
+    llm_text = LLM_TEXT + " कृपया समय पर payment कर दीजिए और कोई सवाल हो तो हमें call कीजिए, ठीक है?"
+    heard = llm_text[: -len(" ठीक है?")]
+
+    assert await stored_after_sync(llm_text, heard) == [heard]
+
+
+async def test_short_fully_played_reply_losing_a_character_keeps_llm_text():
+    assert await stored_after_sync("ठीक है जी।", "ीक है जी।") == ["ठीक है जी।"]
+
+
+async def test_cut_before_punctuation_keeps_the_heard_word():
+    llm_text = "आपकी EMI pending है जी। आगे बताइए"
+
+    assert await stored_after_sync(llm_text, "आपी EMI pending है जी") == ["आपकी EMI pending है जी।"]
+
+
+async def test_chunker_spaces_do_not_push_the_cut_past_playback():
+    llm_text = "आपको 4,500 रुपये 05-11-2026 तक भरने हैं जी"
+
+    assert await stored_after_sync(llm_text, "आपको 4, 500 रुपये 05- 11- 2026") == ["आपको 4,500 रुपये 05-11-2026"]

@@ -14,6 +14,8 @@ import json
 import uuid
 import copy
 import base64
+import difflib
+import unicodedata
 import pytz
 import websockets
 
@@ -30,7 +32,6 @@ from bolna.constants import (
     DTMF_MESSAGE_PREFIX,
     DUPLICATE_RESPONSE_SIMILARITY,
     FILLER_DICT,
-    HEARD_TEXT_FULL_LENGTH_RATIO,
     DEFAULT_LANGUAGE_CODE,
     DEFAULT_MAX_SILENCE_REPEATS,
     DEFAULT_TIMEZONE,
@@ -2477,11 +2478,18 @@ class TaskManager(BaseManager):
         #     text_chunk = text_chunk[index+2:]
         return text_chunk
 
+    def pending_assistant_for_response(self, response_uid):
+        """(sequence_id, staged entry) of a reply still staged; (None, None) when it is not."""
+        for sequence_id, staged in self._pending_assistant_history.items():
+            if staged["response_uid"] == response_uid:
+                return sequence_id, staged
+        return None, None
+
     def sent_text_for_response(self, response_uid):
         """The LLM text of a reply, staged or already in history; empty when unknown."""
-        for staged in self._pending_assistant_history.values():
-            if staged["response_uid"] == response_uid:
-                return str(staged["content"]).strip()
+        staged = self.pending_assistant_for_response(response_uid)[1]
+        if staged:
+            return str(staged["content"]).strip()
         for msg in reversed(self.conversation_history.messages):
             if msg.get("role") == "assistant" and msg.get("response_uid") == response_uid:
                 return (msg.get("content") or "").strip()
@@ -2852,17 +2860,25 @@ class TaskManager(BaseManager):
             # TTS alignment drops characters, so its text only says how far playback got; the words come from the LLM text.
             if target_response_uid is not None and response_heard:
                 sent_text = self.sent_text_for_response(target_response_uid)
-                if sent_text:
-                    heard_len = len(response_heard)
-                    if heard_len >= HEARD_TEXT_FULL_LENGTH_RATIO * len(sent_text):
-                        response_heard = sent_text
-                    else:
-                        cut = sent_text[:heard_len]
-                        if not (cut[-1:].isspace() or sent_text[heard_len : heard_len + 1].isspace()):
-                            cut = self._trim_partial_to_complete_words(cut) or cut
-                        response_heard = cut.strip()
+                matched = [
+                    block
+                    for block in difflib.SequenceMatcher(
+                        None, sent_text, response_heard, autojunk=False
+                    ).get_matching_blocks()
+                    if block.size
+                ]
+                if matched:
+                    # Align instead of measuring: chunker spaces and dropped characters make lengths disagree.
+                    end = matched[-1].a + matched[-1].size
+                    # A dropped final matra or punctuation mark was still played with its word.
+                    while end < len(sent_text) and unicodedata.category(sent_text[end])[0] in ("P", "M"):
+                        end += 1
+                    cut = sent_text[:end]
+                    if end < len(sent_text) and not sent_text[end].isspace():
+                        cut = self._trim_partial_to_complete_words(cut) or cut
+                    response_heard = cut.strip()
                     logger.info(
-                        f"sync_history: heard {heard_len}/{len(sent_text)} chars, using LLM text {response_heard[-20:]!r}"
+                        f"sync_history: heard aligned to {end}/{len(sent_text)} chars, using LLM text {response_heard[-20:]!r}"
                     )
 
             # The duplicate check must compare a regenerated reply with what the caller heard, not what was sent.
@@ -2875,13 +2891,11 @@ class TaskManager(BaseManager):
                     f"text={response_heard!r}"
                 )
                 # A reply still staged (its audio blocked before the commit) keeps its sequence_id and node.
-                stamps = next(
-                    (
-                        {"sequence_id": sequence_id} | ({"node": staged["node"]} if staged.get("node") else {})
-                        for sequence_id, staged in self._pending_assistant_history.items()
-                        if staged["response_uid"] == target_response_uid
-                    ),
-                    {},
+                sequence_id, staged = self.pending_assistant_for_response(target_response_uid)
+                stamps = (
+                    {"sequence_id": sequence_id} | ({"node": staged["node"]} if staged.get("node") else {})
+                    if staged
+                    else {}
                 )
                 self.conversation_history.upsert_assistant_for_response(
                     target_response_uid, response_heard, interim=False, turn_id=target_turn_id, **stamps
