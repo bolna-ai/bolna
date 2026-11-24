@@ -77,7 +77,6 @@ async def test_litellm_lets_a_content_policy_violation_end_the_call():
     llm.model_args = {}
     llm.trigger_function_call = False
     llm.run_id = "r"
-    llm._acompletion = LiteLLM._acompletion.__get__(llm)
     error = ContentPolicyViolationError(message="blocked", model="m", llm_provider="azure")
     with patch("bolna.llms.litellm.acompletion", AsyncMock(side_effect=error)):
         with pytest.raises(ContentPolicyViolationError):
