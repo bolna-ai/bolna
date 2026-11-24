@@ -117,6 +117,25 @@ def _is_disallowed_ip(ip):
     )
 
 
+async def _ipv4_first(lookup):
+    """Resolve IPv4 first and IPv6 only for a host with no IPv4 address. A combined lookup waits on the AAAA
+    answer, and a nameserver that never sends one stalls every lookup until the resolver times out."""
+    try:
+        return await lookup(socket.AF_INET)
+    except OSError:
+        return await lookup(socket.AF_INET6)
+
+
+class _IPv4FirstResolver(aiohttp.ThreadedResolver):
+    """aiohttp resolver that applies ``_ipv4_first`` to the connector's family-agnostic lookups."""
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        resolve = super().resolve
+        if family != socket.AF_UNSPEC:
+            return await resolve(host, port, family)
+        return await _ipv4_first(lambda ip_family: resolve(host, port, ip_family))
+
+
 def _guarded_socket(addr_info):
     """aiohttp socket factory that refuses to dial a disallowed address."""
     family, type_, proto, _, sockaddr = addr_info
@@ -132,8 +151,8 @@ def outbound_connector(url):
     reach an internal host. An allowlisted host skips the address check."""
     host = (urlsplit(url).hostname or "").lower()
     if host in _ALLOWLISTED_HOSTS:
-        return aiohttp.TCPConnector(ssl=get_ssl_context())
-    return aiohttp.TCPConnector(socket_factory=_guarded_socket, ssl=get_ssl_context())
+        return aiohttp.TCPConnector(resolver=_IPv4FirstResolver(), ssl=get_ssl_context())
+    return aiohttp.TCPConnector(resolver=_IPv4FirstResolver(), socket_factory=_guarded_socket, ssl=get_ssl_context())
 
 
 _HAPPY_EYEBALLS_DELAY_S = 0.25
@@ -147,17 +166,19 @@ class _GuardedNetworkBackend(httpcore.AsyncNetworkBackend):
 
     async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         options = {"timeout": timeout, "local_address": local_address, "socket_options": socket_options}
-        if host.lower() in _ALLOWLISTED_HOSTS:
-            return await self._inner.connect_tcp(host, port, **options)
         try:
+            loop = asyncio.get_running_loop()
             infos = await asyncio.wait_for(
-                asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM), timeout
+                _ipv4_first(lambda family: loop.getaddrinfo(host, port, family=family, type=socket.SOCK_STREAM)),
+                timeout,
             )
         except asyncio.TimeoutError:
             raise httpcore.ConnectTimeout(f"Timed out resolving {host}") from None
         except OSError as e:
             raise httpcore.ConnectError(f"Could not resolve {host}: {e}") from None
         addresses = list(dict.fromkeys(info[4][0] for info in infos))
+        if host.lower() in _ALLOWLISTED_HOSTS:
+            return await self._connect_first(addresses, port, options)
         allowed = [address for address in addresses if not _is_disallowed_ip(ipaddress.ip_address(address))]
         if not allowed:
             logger.warning(f"Blocked outbound connection to {host}, which resolves to non-public {addresses}")
@@ -299,7 +320,10 @@ async def validate_outbound_url(url):
 
     loop = asyncio.get_running_loop()
     try:
-        infos = await asyncio.wait_for(loop.getaddrinfo(host, port, type=socket.SOCK_STREAM), timeout=5)
+        infos = await asyncio.wait_for(
+            _ipv4_first(lambda family: loop.getaddrinfo(host, port, family=family, type=socket.SOCK_STREAM)),
+            timeout=5,
+        )
     except asyncio.TimeoutError:
         raise SSRFError(f"DNS resolution for host {host!r} timed out")
     except socket.gaierror as exc:
