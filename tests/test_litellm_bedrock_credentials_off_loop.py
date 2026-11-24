@@ -197,11 +197,13 @@ async def test_non_bedrock_model_does_not_touch_aws_credentials():
 
 
 def test_litellm_signs_with_passed_credentials_without_refreshing_its_own(monkeypatch):
-    """The litellm behaviour this fix relies on: explicit keys build static credentials, no boto3 session."""
+    """The litellm behaviour this fix relies on: explicit keys build static credentials, not the default chain."""
     for var in ("AWS_ROLE_NAME", "AWS_PROFILE_NAME", "AWS_WEB_IDENTITY_TOKEN"):
         monkeypatch.delenv(var, raising=False)
 
-    with patch("boto3.Session", side_effect=AssertionError("litellm resolved its own credentials")):
+    with patch.object(
+        BaseAWSLLM, "_auth_with_env_vars", side_effect=AssertionError("litellm resolved its own credentials")
+    ):
         credentials = BaseAWSLLM().get_credentials(
             aws_access_key_id="AKIA1",
             aws_secret_access_key="secret1",
