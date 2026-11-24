@@ -3,6 +3,7 @@ import errno
 import ipaddress
 import json
 import os
+import re
 import socket
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
@@ -116,6 +117,25 @@ def _is_disallowed_ip(ip):
     )
 
 
+async def _ipv4_first(lookup):
+    """Resolve IPv4 first and IPv6 only for a host with no IPv4 address. A combined lookup waits on the AAAA
+    answer, and a nameserver that never sends one stalls every lookup until the resolver times out."""
+    try:
+        return await lookup(socket.AF_INET)
+    except OSError:
+        return await lookup(socket.AF_INET6)
+
+
+class _IPv4FirstResolver(aiohttp.ThreadedResolver):
+    """aiohttp resolver that applies ``_ipv4_first`` to the connector's family-agnostic lookups."""
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        resolve = super().resolve
+        if family != socket.AF_UNSPEC:
+            return await resolve(host, port, family)
+        return await _ipv4_first(lambda ip_family: resolve(host, port, ip_family))
+
+
 def _guarded_socket(addr_info):
     """aiohttp socket factory that refuses to dial a disallowed address."""
     family, type_, proto, _, sockaddr = addr_info
@@ -131,8 +151,8 @@ def outbound_connector(url):
     reach an internal host. An allowlisted host skips the address check."""
     host = (urlsplit(url).hostname or "").lower()
     if host in _ALLOWLISTED_HOSTS:
-        return aiohttp.TCPConnector(ssl=get_ssl_context())
-    return aiohttp.TCPConnector(socket_factory=_guarded_socket, ssl=get_ssl_context())
+        return aiohttp.TCPConnector(resolver=_IPv4FirstResolver(), ssl=get_ssl_context())
+    return aiohttp.TCPConnector(resolver=_IPv4FirstResolver(), socket_factory=_guarded_socket, ssl=get_ssl_context())
 
 
 _HAPPY_EYEBALLS_DELAY_S = 0.25
@@ -146,17 +166,19 @@ class _GuardedNetworkBackend(httpcore.AsyncNetworkBackend):
 
     async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         options = {"timeout": timeout, "local_address": local_address, "socket_options": socket_options}
-        if host.lower() in _ALLOWLISTED_HOSTS:
-            return await self._inner.connect_tcp(host, port, **options)
         try:
+            loop = asyncio.get_running_loop()
             infos = await asyncio.wait_for(
-                asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM), timeout
+                _ipv4_first(lambda family: loop.getaddrinfo(host, port, family=family, type=socket.SOCK_STREAM)),
+                timeout,
             )
         except asyncio.TimeoutError:
             raise httpcore.ConnectTimeout(f"Timed out resolving {host}") from None
         except OSError as e:
             raise httpcore.ConnectError(f"Could not resolve {host}: {e}") from None
         addresses = list(dict.fromkeys(info[4][0] for info in infos))
+        if host.lower() in _ALLOWLISTED_HOSTS:
+            return await self._connect_first(addresses, port, options)
         allowed = [address for address in addresses if not _is_disallowed_ip(ipaddress.ip_address(address))]
         if not allowed:
             logger.warning(f"Blocked outbound connection to {host}, which resolves to non-public {addresses}")
@@ -208,41 +230,100 @@ def guarded_transport(**kwargs):
     return transport
 
 
-async def validate_outbound_url(url):
-    """SSRF guard for user-supplied URLs, run before the request.
+# Special-use names that only ever reach an internal host. ".invalid" is left to DNS: it is the
+# reserved placeholder name, and integrations save it before they know the real URL.
+_NON_PUBLIC_SUFFIXES = (".localhost", ".local", ".internal")
+_HOSTNAME = re.compile(r"[a-z0-9_-]+(\.[a-z0-9_-]+)*\.?")
 
-    Rejects non-http(s) schemes and any host that resolves to a non-public
-    address (loopback, RFC-1918, link-local incl. the 169.254.169.254 cloud
-    metadata endpoint, reserved, etc.) or into OUTBOUND_BLOCKED_CIDRS. Raises
-    ``SSRFError`` on a blocked URL. Pair it with ``outbound_connector``, which
-    repeats the check on the address actually dialed.
+
+def _dialed_host(host):
+    """The host as an HTTP client dials it: IDNA-encoded and lower-cased, so look-alike dots such as U+3002
+    are already dots. Raises ``SSRFError`` for a host no client could dial."""
+    if ":" in host:
+        return host.lower()
+    try:
+        dialed = host.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        raise SSRFError(f"Request URL host {host!r} is not a valid hostname") from None
+    if not _HOSTNAME.fullmatch(dialed):
+        raise SSRFError(f"Request URL host {host!r} is not a valid hostname")
+    return dialed
+
+
+def _literal_ip(host):
+    """The address a host names directly, including legacy IPv4 forms such as 127.1 or 2130706433."""
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    try:
+        return ipaddress.ip_address(socket.inet_aton(host))
+    except OSError:
+        return None
+
+
+def check_outbound_url(url):
+    """The DNS-free half of the SSRF guard, also run when a URL is saved.
+
+    Raises ``SSRFError`` for a URL that is blocked whatever its host resolves to: a non-http(s)
+    scheme, a malformed URL, a missing or undialable host, an invalid port, a non-public IP literal, or a
+    name that can only reach an internal host. Returns ``(host, port)``, the host as clients dial it, when
+    it still has to be resolved, else ``None``.
     """
-    if not isinstance(url, str):
-        raise SSRFError("Missing or invalid request URL")
-    url = url.strip()
-    if not url:
+    if not isinstance(url, str) or not url.strip():
         raise SSRFError("Missing or invalid request URL")
 
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url.strip())
+    except ValueError:
+        raise SSRFError("Request URL is malformed") from None
     scheme = parsed.scheme.lower()
     if scheme not in ALLOWED_URL_SCHEMES:
         raise SSRFError(f"Blocked URL scheme {scheme!r}; only http/https are allowed")
 
-    host = parsed.hostname
-    if not host:
+    if not parsed.hostname:
         raise SSRFError("Request URL has no host")
-
-    if host.lower() in _ALLOWLISTED_HOSTS:
-        return
 
     try:
         port = parsed.port
     except ValueError:
         raise SSRFError("Request URL has an invalid port")
 
+    host = _dialed_host(parsed.hostname)
+    if host in _ALLOWLISTED_HOSTS:
+        return None
+
+    ip = _literal_ip(host)
+    if ip is not None:
+        if _is_disallowed_ip(ip):
+            raise SSRFError(f"Blocked request to non-public address {host}")
+        return None
+
+    name = host.rstrip(".")
+    if "." not in name or name.endswith(_NON_PUBLIC_SUFFIXES):
+        raise SSRFError(f"Host {host!r} is not a public domain name")
+    return host, port
+
+
+async def validate_outbound_url(url):
+    """SSRF guard for user-supplied URLs, run before the request.
+
+    Runs ``check_outbound_url``, then rejects a host that resolves to a non-public address
+    (loopback, RFC-1918, link-local incl. the 169.254.169.254 cloud metadata endpoint, reserved,
+    etc.) or into OUTBOUND_BLOCKED_CIDRS. Raises ``SSRFError`` on a blocked URL. Pair it with
+    ``outbound_connector``, which repeats the check on the address actually dialed.
+    """
+    target = check_outbound_url(url)
+    if target is None:
+        return
+    host, port = target
+
     loop = asyncio.get_running_loop()
     try:
-        infos = await asyncio.wait_for(loop.getaddrinfo(host, port, type=socket.SOCK_STREAM), timeout=5)
+        infos = await asyncio.wait_for(
+            _ipv4_first(lambda family: loop.getaddrinfo(host, port, family=family, type=socket.SOCK_STREAM)),
+            timeout=5,
+        )
     except asyncio.TimeoutError:
         raise SSRFError(f"DNS resolution for host {host!r} timed out")
     except socket.gaierror as exc:

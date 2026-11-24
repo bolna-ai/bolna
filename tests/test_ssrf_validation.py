@@ -12,6 +12,8 @@ import errno
 import ipaddress
 import socket
 
+import aiohttp
+import httpcore
 import httpx
 import openai
 import pytest
@@ -272,3 +274,104 @@ async def test_guarded_transport_moves_past_an_unresponsive_address(monkeypatch,
     assert response.status_code == 200
     assert paths == ["/"]
     assert loop.time() - started < 2
+
+
+def _dns_without_aaaa(ipv4):
+    """getaddrinfo for a nameserver that answers A queries and never answers AAAA ones."""
+
+    async def fake_getaddrinfo(host, port, *args, family=socket.AF_UNSPEC, **kwargs):
+        if family == socket.AF_INET:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ipv4, port or 80))]
+        await asyncio.sleep(3600)
+
+    return fake_getaddrinfo
+
+
+def _dns_ipv6_only(ipv6):
+    async def fake_getaddrinfo(host, port, *args, family=socket.AF_UNSPEC, **kwargs):
+        if family == socket.AF_INET:
+            raise socket.gaierror(socket.EAI_NONAME, "no A record")
+        return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", (ipv6, port or 80, 0, 0))]
+
+    return fake_getaddrinfo
+
+
+async def test_validate_does_not_wait_on_an_unanswered_aaaa_query(monkeypatch):
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", _dns_without_aaaa("93.184.216.34"))
+    await asyncio.wait_for(validate_outbound_url("https://no-aaaa.example/"), timeout=1)
+
+
+async def test_validate_checks_the_ipv6_fallback_for_an_ipv6_only_host(monkeypatch):
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "getaddrinfo", _dns_ipv6_only("2606:2800:220:1:248:1893:25c8:1946"))
+    await validate_outbound_url("https://ipv6-only.example/")
+
+    monkeypatch.setattr(loop, "getaddrinfo", _dns_ipv6_only("::1"))
+    with pytest.raises(SSRFError):
+        await validate_outbound_url("https://ipv6-only.example/")
+
+
+async def test_aiohttp_resolver_does_not_wait_on_an_unanswered_aaaa_query(monkeypatch):
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", _dns_without_aaaa("93.184.216.34"))
+    hosts = await asyncio.wait_for(fch._IPv4FirstResolver().resolve("no-aaaa.example", 443, socket.AF_UNSPEC), 1)
+    assert [host["host"] for host in hosts] == ["93.184.216.34"]
+
+
+async def test_outbound_connector_reaches_a_host_whose_nameserver_skips_aaaa(monkeypatch, local_http_server):
+    port, paths = local_http_server
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", _dns_without_aaaa("127.0.0.1"))
+    monkeypatch.setattr(fch, "_is_disallowed_ip", lambda ip: str(ip) != "127.0.0.1")
+    url = f"http://no-aaaa.example:{port}/"
+
+    async def fetch():
+        async with aiohttp.ClientSession(connector=fch.outbound_connector(url)) as session:
+            async with session.get(url) as response:
+                return response.status
+
+    assert await asyncio.wait_for(fetch(), timeout=1) == 200
+    assert paths == ["/"]
+
+
+async def test_guarded_transport_reaches_a_host_whose_nameserver_skips_aaaa(monkeypatch, local_http_server):
+    port, paths = local_http_server
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", _dns_without_aaaa("127.0.0.1"))
+    monkeypatch.setattr(fch, "_is_disallowed_ip", lambda ip: str(ip) != "127.0.0.1")
+    async with httpx.AsyncClient(transport=guarded_transport()) as client:
+        response = await asyncio.wait_for(client.get(f"http://no-aaaa.example:{port}/"), timeout=1)
+    assert response.status_code == 200
+    assert paths == ["/"]
+
+
+async def test_private_aaaa_beside_a_public_a_is_never_dialed(monkeypatch):
+    """IPv4 first means the AAAA answer is never used, so no unchecked address can be dialed."""
+
+    async def fake_getaddrinfo(host, port, *args, family=socket.AF_UNSPEC, **kwargs):
+        v4 = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        v6 = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0))
+        return {socket.AF_INET: [v4], socket.AF_INET6: [v6]}.get(family, [v4, v6])
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", fake_getaddrinfo)
+    hosts = await fch._IPv4FirstResolver().resolve("dual-stack.example", 443, socket.AF_UNSPEC)
+    assert [host["host"] for host in hosts] == ["93.184.216.34"]
+
+    dialed = []
+
+    class RecordingBackend:
+        async def connect_tcp(self, host, port, **options):
+            dialed.append(host)
+            raise httpcore.ConnectError("not connecting in a test")
+
+    with pytest.raises(httpcore.ConnectError):
+        await fch._GuardedNetworkBackend(RecordingBackend()).connect_tcp("dual-stack.example", 443)
+    assert dialed == ["93.184.216.34"]
+
+
+async def test_guarded_transport_resolves_an_allowlisted_host_ipv4_first(monkeypatch, local_http_server):
+    """An allowlisted host skips the address check, not the IPv4-first lookup."""
+    port, paths = local_http_server
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", _dns_without_aaaa("127.0.0.1"))
+    monkeypatch.setattr(fch, "_ALLOWLISTED_HOSTS", frozenset({"allowlisted.example"}))
+    async with httpx.AsyncClient(transport=guarded_transport()) as client:
+        response = await asyncio.wait_for(client.get(f"http://allowlisted.example:{port}/"), timeout=1)
+    assert response.status_code == 200
+    assert paths == ["/"]
