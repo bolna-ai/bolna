@@ -22,6 +22,7 @@ from pydub import AudioSegment
 
 from bolna.constants import (
     ACCIDENTAL_INTERRUPTION_PHRASES,
+    ASYNC_TOOL_SUBMITTED_RESULT,
     CACHED_SINGLE_MARK_CATEGORIES,
     CHAT_MAX_CONSECUTIVE_TURN_FAILURES,
     CHAT_WATCHDOG_TICK_S,
@@ -615,6 +616,8 @@ class TaskManager(BaseManager):
         self.execute_function_call_task = None
         # Set while a tool call executes so a parallel LID switch won't truncate it.
         self.function_call_in_flight = False
+        # run_async tool requests still in flight; teardown waits for them.
+        self._async_tool_tasks = set()
         self.synthesizer_tasks = []
         self.synthesizer_task = None
         self._component_error = None
@@ -3615,11 +3618,115 @@ class TaskManager(BaseManager):
                         )
                     )
 
+    async def _call_api_tool(self, called_fun, meta_info, resp, url, method, param, api_token, headers) -> str:
+        """Send a custom tool's request and return its response body, recorded in function_tool_api_call_details."""
+        runtime_args = self._extract_api_call_runtime_args(resp)
+        try:
+            prepared_request = prepare_api_request(param, api_token, headers, **runtime_args)
+        except Exception as exc:
+            logger.warning(f"Could not prepare structured function call request for logging: {exc}")
+            prepared_request = {
+                "request_body": None,
+                "api_params": None,
+                "headers": headers,
+            }
+        function_call_log = self._start_api_call_detail(
+            called_fun=called_fun,
+            url=url,
+            method=method,
+            param=param,
+            headers=prepared_request["headers"],
+            meta_info=meta_info,
+            runtime_args=runtime_args,
+            request_body=prepared_request["request_body"],
+            api_params=prepared_request["api_params"],
+        )
+        try:
+            response = await trigger_api(
+                url=url,
+                method=method.lower(),
+                param=param,
+                api_token=api_token,
+                headers_data=headers,
+                meta_info=meta_info,
+                run_id=self.run_id,
+                return_response_metadata=True,
+                called_fun=called_fun,
+                **resp,
+            )
+        except asyncio.CancelledError:
+            self._finalize_api_call_detail(function_call_log, error="cancelled")
+            raise
+        self._finalize_api_call_detail(
+            function_call_log,
+            response=response.get("body"),
+            status_code=response.get("status_code"),
+            content_type=response.get("content_type"),
+            error=response.get("error"),
+        )
+        return str(response.get("body"))
+
+    def _merge_tool_response_into_context(self, function_response: str) -> None:
+        """A graph agent routes on context_data, so a JSON-object tool response is merged into it."""
+        if not self.__is_graph_agent():
+            return
+        try:
+            response_data = json.loads(function_response) if isinstance(function_response, str) else function_response
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug(f"Could not parse API response as JSON for context merge: {e}")
+            return
+        if not isinstance(response_data, dict):
+            return
+        if self.context_data is None:
+            self.context_data = {}
+        self.context_data.update(response_data)
+        if hasattr(self.tools.get("llm_agent"), "context_data"):
+            self.tools["llm_agent"].context_data.update(response_data)
+        logger.info(f"Merged API response into context_data: {list(response_data.keys())}")
+
+    def _log_tool_response(self, function_response: str, meta_info: dict, called_fun: str) -> None:
+        convert_to_request_log(
+            function_response,
+            meta_info,
+            None,
+            LogComponent.FUNCTION_CALL,
+            direction=LogDirection.RESPONSE,
+            is_cached=False,
+            run_id=self.run_id,
+            tool_name=called_fun,
+        )
+
+    def _start_async_tool_call(self, called_fun, tool_call_id, meta_info, resp, request) -> None:
+        """Run a run_async tool's request in the background; the turn carries on with a placeholder result."""
+        task = asyncio.create_task(self._run_async_tool_call(called_fun, tool_call_id, dict(meta_info), resp, request))
+        task.async_tool_name = called_fun
+        self._async_tool_tasks.add(task)
+        task.add_done_callback(self._on_async_tool_done)
+
+    async def _run_async_tool_call(self, called_fun, tool_call_id, meta_info, resp, request) -> None:
+        function_response = await self._call_api_tool(called_fun, meta_info, resp, **request)
+        self._log_tool_response(function_response, meta_info, called_fun)
+        if not self.conversation_history.replace_tool_result(tool_call_id, function_response):
+            logger.warning(
+                f"async tool {called_fun}: no placeholder for tool_call_id={tool_call_id}, result not in history"
+            )
+        self._merge_tool_response_into_context(function_response)
+        logger.info(f"async tool {called_fun}: result landed for tool_call_id={tool_call_id}")
+
+    def _on_async_tool_done(self, task) -> None:
+        self._async_tool_tasks.discard(task)
+        if task.cancelled():
+            return
+        exception = task.exception()
+        if exception is not None:
+            logger.error(
+                f"async tool {getattr(task, 'async_tool_name', None)} failed: {type(exception).__name__}: {exception}"
+            )
+
     async def __execute_function_call(
         self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp
     ):
         self.check_if_user_online = False
-        function_call_log = None
         turn_id = meta_info.get("turn_id")
         response_uid = meta_info.get("response_uid")
 
@@ -3996,96 +4103,26 @@ class TaskManager(BaseManager):
             # reaches the backend before the tool's main request proceeds.
             await asyncio.sleep(0.3)
 
-        runtime_args = self._extract_api_call_runtime_args(resp)
-        try:
-            prepared_request = prepare_api_request(param, api_token, headers, **runtime_args)
-        except Exception as exc:
-            logger.warning(f"Could not prepare structured function call request for logging: {exc}")
-            prepared_request = {
-                "request_body": None,
-                "api_params": None,
-                "headers": headers,
-            }
-        function_call_log = self._start_api_call_detail(
-            called_fun=called_fun,
-            url=url,
-            method=method,
-            param=param,
-            headers=prepared_request["headers"],
-            meta_info=meta_info,
-            runtime_args=runtime_args,
-            request_body=prepared_request["request_body"],
-            api_params=prepared_request["api_params"],
-        )
-        try:
-            response = await trigger_api(
-                url=url,
-                method=method.lower(),
-                param=param,
-                api_token=api_token,
-                headers_data=headers,
-                meta_info=meta_info,
-                run_id=self.run_id,
-                return_response_metadata=True,
-                called_fun=called_fun,
-                **resp,
-            )
-        except asyncio.CancelledError:
-            self._finalize_api_call_detail(function_call_log, error="cancelled")
-            raise
-        self._finalize_api_call_detail(
-            function_call_log,
-            response=response.get("body"),
-            status_code=response.get("status_code"),
-            content_type=response.get("content_type"),
-            error=response.get("error"),
-        )
-        function_response = str(response.get("body"))
-        get_res_keys, get_res_values = await computed_api_response(function_response)
-
-        # Merge API response data into context_data for routing decisions
-        if self.__is_graph_agent():
-            try:
-                response_data = (
-                    json.loads(function_response) if isinstance(function_response, str) else function_response
-                )
-                if isinstance(response_data, dict):
-                    # Update task manager's context_data
-                    if self.context_data is None:
-                        self.context_data = {}
-                    self.context_data.update(response_data)
-                    # Update graph agent's context_data for routing
-                    if hasattr(self.tools.get("llm_agent"), "context_data"):
-                        self.tools["llm_agent"].context_data.update(response_data)
-                    logger.info(f"Merged API response into context_data: {list(response_data.keys())}")
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.debug(f"Could not parse API response as JSON for context merge: {e}")
-        if called_fun.startswith("check_availability_of_slots") and (
-            not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)
-        ):
-            set_response_prompt = []
-        elif called_fun.startswith("book_appointment") and "id" not in get_res_keys:
-            if get_res_values and get_res_values[0] == "no_available_users_found_error":
-                function_response = "Sorry, the host isn't available at this time. Are you available at any other time?"
-            set_response_prompt = []
+        tool_call_id = resp.get("tool_call_id", "")
+        request = {"url": url, "method": method, "param": param, "api_token": api_token, "headers": headers}
+        if tool_conf.get("run_async"):
+            self._start_async_tool_call(called_fun, tool_call_id, meta_info, resp, request)
+            function_response = ASYNC_TOOL_SUBMITTED_RESULT
         else:
-            set_response_prompt = function_response
+            function_response = await self._call_api_tool(called_fun, meta_info, resp, **request)
+            self._merge_tool_response_into_context(function_response)
+            get_res_keys, get_res_values = await computed_api_response(function_response)
+            if (
+                called_fun.startswith("book_appointment")
+                and "id" not in get_res_keys
+                and get_res_values
+                and get_res_values[0] == "no_available_users_found_error"
+            ):
+                function_response = "Sorry, the host isn't available at this time. Are you available at any other time?"
+            self._log_tool_response(function_response, meta_info, called_fun)
 
-        textual_response = resp.get("textual_response", None)
         self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
-        self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
-
-        logger.info(f"Logging function call parameters ")
-        convert_to_request_log(
-            function_response,
-            meta_info,
-            None,
-            LogComponent.FUNCTION_CALL,
-            direction=LogDirection.RESPONSE,
-            is_cached=False,
-            run_id=self.run_id,
-            tool_name=called_fun,
-        )
+        self.conversation_history.append_tool_result(tool_call_id, function_response)
 
         messages = self.conversation_history.get_copy()
         convert_to_request_log(
@@ -9737,6 +9774,10 @@ class TaskManager(BaseManager):
             # in __execute_function_call's finally block is captured before
             # progression_data snapshots transfer_call_events below.
             await process_task_cancellation(self.llm_task, "llm_task")
+            # A run_async tool is an action the caller asked for, so it finishes (within the tool
+            # request timeout) rather than being cancelled, and lands in function_tool_api_call_details.
+            if self._async_tool_tasks:
+                await asyncio.gather(*self._async_tool_tasks, return_exceptions=True)
 
             # Construct output
             tasks_to_cancel = []

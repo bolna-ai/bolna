@@ -133,6 +133,18 @@ class ConversationHistory:
             }
         )
 
+    def replace_tool_result(self, tool_call_id: str, content: str) -> bool:
+        """Swap a tool call's recorded result for content, in history and interim. False when no result has that id."""
+        if not tool_call_id:
+            return False
+        replaced = False
+        for messages in (self._messages, self._interim):
+            for message in messages:
+                if message.get("role") == ChatRole.TOOL and message.get("tool_call_id") == tool_call_id:
+                    message["content"] = content
+                    replaced = True
+        return replaced
+
     def attach_tool_calls_to_last_response(self, tool_calls: list):
         if self._messages and self._messages[-1].get("role") == ChatRole.ASSISTANT:
             self._messages[-1]["tool_calls"] = tool_calls

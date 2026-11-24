@@ -372,6 +372,13 @@ END_CALL_FUNCTION_PREFIX = "end_call"
 # meta_info flag a graph end node sets so the task manager hangs up once its reply has played.
 HANGUP_AFTER_REPLY = "hangup_after_reply"
 WEB_SEARCH_FUNCTION_NAME = "web_search"
+# What the model sees for a run_async tool until its real result replaces it in history.
+ASYNC_TOOL_SUBMITTED_RESULT = (
+    '{"status": "pending", "message": "This request is still being processed in the background and its outcome '
+    "is not known yet. If you mention it, say only that it is being processed. Do not say it was done, sent, "
+    "delivered or completed, or that it failed, and do not call this tool again for the same request. Its "
+    'result will replace this message when it finishes."}'
+)
 
 END_CALL_TOOL_DEFINITION = {
     "type": "function",
