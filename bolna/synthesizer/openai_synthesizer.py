@@ -240,6 +240,8 @@ class OPENAISynthesizer(BaseSynthesizer):
     async def _stream_pcm(self, text, tail_ms, pad_tail):
         """One request as (audio, closing) packets: tail_ms of silence after the speech, padded to it when pad_tail."""
         await self._check_endpoint()
+        # Silence inside the speech passes on as it arrives, up to the tail's length; only the excess waits.
+        self.pcm_trimmer.reset(pass_ms=tail_ms)
         async with self.async_client.audio.speech.with_streaming_response.create(
             model=self.model,
             voice=self.voice,

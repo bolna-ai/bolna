@@ -73,3 +73,25 @@ class TestPcmEdgeTrimmer:
     def test_the_first_sound_is_passed_on_at_once(self):
         trimmer = PcmEdgeTrimmer(RATE)
         assert _ms(trimmer.feed(_silence(100) + _speech(10))) == LEAD_MS + 10
+
+    def test_a_pause_inside_the_speech_passes_on_as_it_arrives_up_to_the_allowance(self):
+        trimmer = PcmEdgeTrimmer(RATE)
+        trimmer.reset(pass_ms=SENTENCE_PAUSE_MS)
+        assert _ms(trimmer.feed(_speech(100) + _silence(200))) == 100 + 200
+        # Past the allowance the silence waits, and goes out whole once sound follows it.
+        assert _ms(trimmer.feed(_silence(300))) == 100
+        assert _ms(trimmer.feed(_speech(50))) == 200 + 50
+
+    def test_passing_silence_early_changes_no_byte_of_the_output(self):
+        audio = _silence(140) + _speech(400) + _silence(450) + _speech(200) + _silence(500)
+        trimmer = PcmEdgeTrimmer(RATE)
+        trimmer.reset(pass_ms=SENTENCE_PAUSE_MS)
+        chunk = 3841
+        streamed = b"".join(trimmer.feed(audio[i : i + chunk]) for i in range(0, len(audio), chunk))
+        assert streamed + trimmer.finish(SENTENCE_PAUSE_MS, pad=True) == _shape(audio, SENTENCE_PAUSE_MS, pad=True)
+
+    def test_a_tail_already_passed_is_not_added_again(self):
+        trimmer = PcmEdgeTrimmer(RATE)
+        trimmer.reset(pass_ms=SENTENCE_PAUSE_MS)
+        assert _ms(trimmer.feed(_speech(100) + _silence(50))) == 150
+        assert _ms(trimmer.finish(SENTENCE_PAUSE_MS, pad=True)) == SENTENCE_PAUSE_MS - 50

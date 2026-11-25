@@ -61,18 +61,22 @@ def split_speakable(text):
 class PcmEdgeTrimmer:
     """Streams 16-bit mono PCM through, replacing a request's leading and trailing silence with a set length.
 
-    Audio is passed on as it arrives. Only silence is held back, until sound follows it (then it is passed on whole)
-    or the request ends (then it is the tail). Nothing but silence is ever removed.
+    Audio is passed on as it arrives. Once speech has begun, the first pass_ms of each silence is passed on too; the
+    rest is held back until sound follows it (then it is passed on whole) or the request ends (then it is the tail).
+    Nothing but silence is ever removed.
     """
 
     def __init__(self, sample_rate):
         self.frame_bytes = sample_rate * _FRAME_MS // 1000 * 2
         self.reset()
 
-    def reset(self):
+    def reset(self, pass_ms=0):
         self._carry = b""
         self._held = bytearray()
         self._started = False
+        self._pass = self._ms(pass_ms)
+        # Bytes of the current silence already passed on.
+        self._passed = 0
 
     def _ms(self, milliseconds):
         return milliseconds // _FRAME_MS * self.frame_bytes
@@ -90,17 +94,22 @@ class PcmEdgeTrimmer:
         for start in range(0, len(data), self.frame_bytes):
             frame = data[start : start + self.frame_bytes]
             if self._is_silent(frame):
-                self._held += frame
+                if self._started and self._passed < self._pass:
+                    out += frame
+                    self._passed += len(frame)
+                else:
+                    self._held += frame
                 continue
             out += self._held if self._started else self._held[max(0, len(self._held) - self._ms(LEAD_MS)) :]
             out += frame
             self._held.clear()
+            self._passed = 0
             self._started = True
         return bytes(out)
 
     def finish(self, tail_ms, pad=False):
         """The request's tail: up to tail_ms of its trailing silence, padded to tail_ms with silence when pad is set."""
-        keep = self._ms(tail_ms)
+        keep = max(0, self._ms(tail_ms) - self._passed)
         tail = bytes(self._held[:keep]) if self._started else b""
         if pad:
             tail += bytes(keep - len(tail))
