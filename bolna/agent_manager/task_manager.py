@@ -2712,6 +2712,23 @@ class TaskManager(BaseManager):
             cumulative_duration += chunk_duration
         return "".join(played_text)
 
+    @staticmethod
+    def _pending_text_chunks(mark_events_data, target_turn_id):
+        """The target turn's pending audio marks for the playback estimate, or none when no mark carries text."""
+        chunks = [
+            {
+                "text": mark_data.get("text_synthesized") or "",
+                "duration": mark_data.get("duration", 0),
+                "sent_ts": mark_data.get("sent_ts", 0),
+            }
+            for _, mark_data in mark_events_data
+            if mark_data.get("type", "") not in ("pre_mark_message", "backchanneling")
+            and (target_turn_id is None or mark_data.get("turn_id") == target_turn_id)
+        ]
+        # Where text rides on some marks only (a request's closing one), the text-less ones are the audio before
+        # it: they keep their playing time, and the turn's first mark starts the clock.
+        return chunks if any(chunk["text"] for chunk in chunks) else []
+
     async def sync_history(
         self, mark_events_data, interruption_processed_at, extend_with_playback_estimate=False, caller_onset=None
     ):
@@ -2796,18 +2813,7 @@ class TaskManager(BaseManager):
 
             if not response_heard:
                 pending_marks = [{"mark_id": k, "mark_data": v} for k, v in mark_events_data]
-                pending_chunks = []
-                for mark in pending_marks:
-                    mark_data = mark.get("mark_data", {})
-                    mark_type = mark_data.get("type", "")
-                    text = mark_data.get("text_synthesized", "")
-                    if target_turn_id is not None and mark_data.get("turn_id") != target_turn_id:
-                        continue
-                    if mark_type in ["pre_mark_message", "backchanneling"] or not text:
-                        continue
-                    pending_chunks.append(
-                        {"text": text, "duration": mark_data.get("duration", 0), "sent_ts": mark_data.get("sent_ts", 0)}
-                    )
+                pending_chunks = self._pending_text_chunks(mark_events_data, target_turn_id)
 
                 if pending_chunks:
                     first_sent_ts = pending_chunks[0].get("sent_ts", 0)
