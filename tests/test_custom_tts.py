@@ -578,6 +578,7 @@ class TestBolnaProvider:
             ("hi-IN", "hi"),
             ("EN_us", "en"),
             (" kn ", "kn"),
+            ("od", "or"),
             ("multi", None),
             ("auto", None),
             ("", None),

@@ -30,14 +30,16 @@ MULAW_SAMPLE_RATE = 8000
 
 
 _LANGUAGE_CODE = re.compile(r"[a-z]{2}")
+# Bolna's language codes that differ from ISO 639-1.
+_ISO_LANGUAGE = {"od": "or"}
 
 
 def _primary_language(language):
-    """ "hi-IN" to "hi"; None for anything else ("multi", "auto"), which the server then infers from the text."""
+    """ "hi-IN" to "hi", a hint the server may ignore; None for anything else ("multi", "auto"): the server infers it."""
     if not isinstance(language, str):
         return None
     primary = re.split(r"[-_]", language.strip().lower(), maxsplit=1)[0]
-    return primary if _LANGUAGE_CODE.fullmatch(primary) else None
+    return _ISO_LANGUAGE.get(primary, primary) if _LANGUAGE_CODE.fullmatch(primary) else None
 
 
 class OPENAISynthesizer(BaseSynthesizer):
