@@ -20,6 +20,8 @@ logger = configure_logger(__name__)
 
 
 class CartesiaSynthesizer(StreamSynthesizer):
+    one_shot_matches_stream = True
+
     def __init__(
         self,
         voice_id,
@@ -312,6 +314,14 @@ class CartesiaSynthesizer(StreamSynthesizer):
         return await self._generate_http(
             text,
             output_format={"container": "raw", "encoding": "pcm_s16le", "sample_rate": int(sample_rate)},
+        )
+
+    async def synthesize_telephony_clip(self, text):
+        """Raw mu-law 8000, matching the WS telephony leg; None on non-mulaw configs."""
+        if not self.use_mulaw:
+            return None
+        return await self._generate_http(
+            text, output_format={"container": "raw", "encoding": "pcm_mulaw", "sample_rate": 8000}
         )
 
     async def _generate_http(self, text, output_format=None):

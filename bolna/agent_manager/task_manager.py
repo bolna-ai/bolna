@@ -29,6 +29,7 @@ from bolna.constants import (
     CHAT_WATCHDOG_TICK_S,
     DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION,
+    IS_USER_ONLINE_MESSAGE,
     DTMF_MESSAGE_PREFIX,
     DUPLICATE_RESPONSE_SIMILARITY,
     FILLER_DICT,
@@ -106,6 +107,9 @@ from bolna.helpers.utils import (
     create_ws_data_packet,
     get_file_names_in_directory,
     get_raw_audio_bytes,
+    fixed_line_clip_key,
+    has_template_variables,
+    tts_voice_identity,
     is_valid_md5,
     get_required_input_types,
     format_messages,
@@ -129,8 +133,6 @@ from bolna.helpers.utils import (
     convert_to_request_log,
     yield_chunks_from_memory,
     process_task_cancellation,
-    audio_to_mulaw8k,
-    audio_to_pcm,
     pcm_to_ulaw,
     ulaw_to_pcm,
     format_error_message,
@@ -139,6 +141,7 @@ from bolna.helpers.utils import (
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.tts_audio_monitor import TtsAudioMonitor
+from ..helpers.tts_clips import clip_pieces, load_fixed_line_clip, recall_clip, render_clip
 from ..helpers.observable_variable import ObservableVariable
 from bolna.models import S2SConfig, WebSearchConfig, tts_render_settings
 from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
@@ -385,6 +388,8 @@ class TaskManager(BaseManager):
         self.kwargs = kwargs
         self.kwargs["task_manager_instance"] = self
         self.provider_api_keys = self.kwargs.pop("provider_api_keys", None) or {}
+        # Characters played from stored audio instead of being synthesized: billed, but not rendered.
+        self.synthesizer_cached_characters = 0
         # Optional load-signal callback (set by the caller only for PTU-served calls).
         self.on_turn_usage = kwargs.get("on_turn_usage")
         # Fired instead of on_turn_usage when another backend served the turn.
@@ -768,6 +773,10 @@ class TaskManager(BaseManager):
         # Handoff clips pre-rendered per language on that language's OWN voice (text and
         self.handoff_audio_cache = {}
         self.handoff_prewarm_task = None
+        # Voice digest per synthesizer pool label (None for a single synthesizer), keying stored fixed-line clips.
+        self.fixed_line_voices = {}
+        # Message categories whose configured text is the same on every call, so its clip can be stored.
+        self.fixed_line_categories = set()
         # In-flight speculative follow-up generation;
         # single slot is safe because decisions are serialized by language_switch_lock.
         self._spec_followup_task = None
@@ -811,6 +820,8 @@ class TaskManager(BaseManager):
             self.check_user_online_message_config = self.conversation_config.get(
                 "check_user_online_message", DEFAULT_USER_ONLINE_MESSAGE
             )
+            if not has_template_variables(self.check_user_online_message_config):
+                self.fixed_line_categories.add(IS_USER_ONLINE_MESSAGE)
             self.user_online_message_in_llm_history = self.conversation_config.get(
                 "user_online_message_in_llm_history", False
             )
@@ -860,6 +871,8 @@ class TaskManager(BaseManager):
                     """
 
                 self.call_hangup_message_config = self.conversation_config.get("call_hangup_message", None)
+                if not has_template_variables(self.call_hangup_message_config):
+                    self.fixed_line_categories.add("agent_hangup")
                 if self.call_hangup_message_config and self.context_data and not self.is_web_based_call:
                     if isinstance(self.call_hangup_message_config, dict):
                         self.call_hangup_message_config = {
@@ -2078,6 +2091,9 @@ class TaskManager(BaseManager):
                     cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
                     leg_kwargs = self.__pool_leg_kwargs(synthesizer_kwargs, "synthesizer_key", provider_name)
                     synthesizers[label] = cls(**cfg, **provider_config, **leg_kwargs, caching=caching)
+                    self.fixed_line_voices[label] = tts_voice_identity(
+                        provider_name, provider_config, cfg.get("pronunciation_rules")
+                    )
 
                 # Use active synth's provider/voice for logging metadata, and buffer_size
                 # Note that in the current state, buffer_size of other synth configs is ignored
@@ -2126,6 +2142,9 @@ class TaskManager(BaseManager):
                 provider_config,
                 synth_config.get("pronunciation_rules"),
                 on_platform_key=not self.kwargs.get("synthesizer_key"),
+            )
+            self.fixed_line_voices[None] = tts_voice_identity(
+                self.synthesizer_provider, provider_config, synth_config.get("pronunciation_rules")
             )
             if self.turn_based_conversation:
                 synth_config["audio_format"] = "mp3"  # Hard code mp3 if we're connected through dashboard
@@ -5105,7 +5124,8 @@ class TaskManager(BaseManager):
                 "message_category": "agent_hangup",
                 "end_of_llm_stream": True,
             }
-            await self._synthesize(create_ws_data_packet(message, meta_info=meta_info))
+            if not await self.__play_fixed_line_clip(message, meta_info):
+                await self._synthesize(create_ws_data_packet(message, meta_info=meta_info))
             # Stamp after goodbye is queued — actual disconnect happens after it plays
             self.hangup_triggered_at = time.time()
         return
@@ -7541,7 +7561,7 @@ class TaskManager(BaseManager):
             # Pre-warmed wire-format clip pushed straight to the transport. Both end-flags required
             handoff_meta.update(
                 {
-                    "format": "mulaw" if self.__handoff_mulaw_wire() else "pcm",
+                    "format": "mulaw" if self.__mulaw_wire() else "pcm",
                     "end_of_llm_stream": True,
                     "end_of_synthesizer_stream": True,
                     "is_first_chunk": True,
@@ -7582,7 +7602,7 @@ class TaskManager(BaseManager):
         # As in the legacy handoff: render after the runtime placeholders so {customer_name} resolves.
         return update_prompt_with_context(text, self.context_data)
 
-    def __handoff_mulaw_wire(self) -> bool:
+    def __mulaw_wire(self) -> bool:
         """True on telephony (mu-law@8k clip), False on web/freeswitch (raw PCM@24k)."""
         return self.tools["output"].get_provider() in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
 
@@ -7594,7 +7614,7 @@ class TaskManager(BaseManager):
             return
 
         # A call has exactly one transport, so render in its wire format only.
-        mulaw_wire = self.__handoff_mulaw_wire()
+        mulaw_wire = self.__mulaw_wire()
         multilingual = (self.task_config["tools_config"].get("synthesizer") or {}).get("multilingual") or {}
 
         async def render(label, synth):
@@ -7618,62 +7638,89 @@ class TaskManager(BaseManager):
             if cached:
                 self.handoff_audio_cache[label] = cached
                 return
-            # Under ~50ms is a failed one-shot returning a sentinel, not a clip.
-            min_clip_bytes = 400 if mulaw_wire else 2400
             try:
-                clip = None
-                # Prefer a native one-shot in the wire format when the provider offers it.
-                if mulaw_wire:
-                    telephony_one_shot = getattr(synth, "synthesize_telephony_clip", None)
-                    if telephony_one_shot is not None:
-                        clip = await telephony_one_shot(text)
-                else:
-                    pcm_one_shot = getattr(synth, "synthesize_pcm_clip", None)
-                    if pcm_one_shot is not None:
-                        clip = await pcm_one_shot(text, WEBCALL_TTS_SAMPLE_RATE)
-                # Before the fallback, so synthesize() still gets its turn.
-                if clip and len(clip) < min_clip_bytes:
-                    logger.warning(
-                        f"LanguageSwitcher: one-shot for '{label}' returned {len(clip)}B — falling back to synthesize()"
-                    )
-                    clip = None
-                if not clip:
-                    audio = await synth.synthesize(text)
-                    if not audio:
-                        return
-                    # pydub decode shells out to ffprobe/ffmpeg — keep it off the event loop.
-                    clip = await asyncio.to_thread(self.__handoff_clip_convert, synth, audio, mulaw_wire)
-                if clip and len(clip) < min_clip_bytes:
-                    logger.error(f"LanguageSwitcher: handoff clip for '{label}' is {len(clip)}B — discarding")
-                    return
+                clip = await render_clip(synth, text, mulaw_wire)
                 if clip:
+                    synth.synthesized_characters = getattr(synth, "synthesized_characters", 0) + len(text)
                     self.handoff_audio_cache[label] = clip
                     if len(HANDOFF_CLIP_CACHE) >= HANDOFF_CLIP_CACHE_MAX:
                         HANDOFF_CLIP_CACHE.pop(next(iter(HANDOFF_CLIP_CACHE)))
                     HANDOFF_CLIP_CACHE[cache_key] = clip
-                    synth.synthesized_characters = getattr(synth, "synthesized_characters", 0) + len(text)
                     logger.info(f"LanguageSwitcher: pre-warmed handoff clip '{label}' ({len(clip)} bytes)")
             except Exception as e:
                 logger.error(f"LanguageSwitcher: handoff prewarm failed for '{label}': {e}")
 
         await asyncio.gather(*(render(label, synth) for label, synth in pool.synthesizers.items()))
 
-    def __handoff_clip_convert(self, synth, audio, mulaw_wire):
-        """Decode a one-shot render into the wire format. Blocking — run off-loop."""
-        kwargs = {
-            "rate_hint": getattr(synth, "sampling_rate", 0) or getattr(synth, "sample_rate", 0) or 8000,
-            "format_hint": getattr(synth, "format", "") or "",
+    def __fixed_line_wire_format(self):
+        """Wire format a stored fixed-line clip plays in on this call, or None when it has no single one."""
+        if self.turn_based_conversation:
+            return None
+        if self.__mulaw_wire():
+            return "mulaw"
+        if self.is_web_based_call or self.tools["output"].get_provider() == TelephonyProvider.FREESWITCH.value:
+            return "pcm"
+        return None
+
+    async def __play_fixed_line_clip(self, text, meta_info):
+        """Play a fixed line from the clip this process holds; on a miss speak it live and load the clip for later calls."""
+        category = meta_info["message_category"]
+        if not text or category not in self.fixed_line_categories or not self.assistant_id:
+            return False
+        wire_format = self.__fixed_line_wire_format()
+        if not wire_format:
+            return False
+        synth = self.tools["synthesizer"]
+        label = None
+        if isinstance(synth, SynthesizerPool):
+            label = synth.active_label
+            synth = synth.synthesizers[label]
+        voice_identity = self.fixed_line_voices.get(label)
+        if voice_identity is None or not synth.one_shot_matches_stream:
+            return False
+        mulaw_wire = wire_format == "mulaw"
+        clip_key = fixed_line_clip_key(text, voice_identity, wire_format)
+        storage = {
+            "agent_name": self.assistant_name,
+            "audio_format": wire_format,
+            "assistant_id": self.assistant_id,
+            "local": self.is_local,
         }
-        if mulaw_wire:
-            clip = audio_to_mulaw8k(audio, **kwargs)
-        else:
-            clip = audio_to_pcm(audio, target_sample_rate=WEBCALL_TTS_SAMPLE_RATE, **kwargs)
+        clip = recall_clip(clip_key)
         if clip is None:
-            logger.error(
-                f"LanguageSwitcher: handoff clip for {synth.__class__.__name__} is a compressed container "
-                f"pydub can't decode into {'mulaw' if mulaw_wire else 'pcm'} — skipping"
+            load_fixed_line_clip(synth, text, clip_key, mulaw_wire, storage)
+            return False
+
+        meta_info = {
+            **meta_info,
+            "format": wire_format,
+            "text": text,
+            "type": "audio",
+            "cached": True,
+            "end_of_llm_stream": True,
+        }
+        for direction in (LogDirection.REQUEST, LogDirection.RESPONSE):
+            convert_to_request_log(
+                message=text,
+                meta_info=meta_info,
+                component=LogComponent.SYNTHESIZER,
+                direction=direction,
+                model=self.synthesizer_provider,
+                is_cached=True,
+                engine=self.tools["synthesizer"].get_engine(),
+                run_id=self.run_id,
             )
-        return clip
+        pieces = clip_pieces(clip, mulaw_wire)
+        for index, piece in enumerate(pieces):
+            piece_meta = {
+                **meta_info,
+                "is_first_chunk": index == 0,
+                "end_of_synthesizer_stream": index == len(pieces) - 1,
+            }
+            self.__enqueue_chunk(piece, index, len(pieces), piece_meta)
+        self.synthesizer_cached_characters += len(text)
+        logger.info(f"Playing stored {category} clip {clip_key} ({len(clip)} bytes)")
+        return True
 
     def __language_directive(self, label: str) -> str:
         """The one standing language order, installed at setup and on every switch."""
@@ -8779,28 +8826,23 @@ class TaskManager(BaseManager):
                         continue
 
                     self.tools["input"].reset_response_heard_by_user()
+                    # Clear what is still queued before the prompt goes out, or the clear cuts the prompt.
+                    await self.tools["output"].handle_interruption()
+                    # The clear wipes the marks of the audio it cut, so no echo resets this flag for them.
+                    self.tools["input"].update_is_audio_being_played(
+                        False, AudioPlaybackReason.SILENCE_HANGUP_INTERRUPT
+                    )
 
-                    if self.should_record:
-                        meta_info = {
-                            "io": "default",
-                            "request_id": str(uuid.uuid4()),
-                            "cached": False,
-                            "sequence_id": -1,
-                            "format": "wav",
-                            "message_category": "is_user_online_message",
-                            "end_of_llm_stream": True,
-                        }
-                        await self._synthesize(create_ws_data_packet(user_online_message, meta_info=meta_info))
-                    else:
-                        meta_info = {
-                            "io": self.tools["output"].get_provider(),
-                            "request_id": str(uuid.uuid4()),
-                            "cached": False,
-                            "sequence_id": -1,
-                            "format": "pcm",
-                            "message_category": "is_user_online_message",
-                            "end_of_llm_stream": True,
-                        }
+                    meta_info = {
+                        "io": "default" if self.should_record else self.tools["output"].get_provider(),
+                        "request_id": str(uuid.uuid4()),
+                        "cached": False,
+                        "sequence_id": -1,
+                        "format": "wav" if self.should_record else "pcm",
+                        "message_category": IS_USER_ONLINE_MESSAGE,
+                        "end_of_llm_stream": True,
+                    }
+                    if not await self.__play_fixed_line_clip(user_online_message, meta_info):
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info=meta_info))
                     if self.user_online_message_in_llm_history:
                         # Tells the LLM why it asked, so a "yes" answers the check and the open question stays open.
@@ -8814,18 +8856,9 @@ class TaskManager(BaseManager):
                         sequence_id=-1,
                         message_category="is_user_online_message",
                     )
-
-                    # Explicitly reset the audio flag after synthesizing the prompt.
-                    # handle_interruption() below sends clearAudio to Plivo and wipes the
-                    # mark dictionary, so the final-chunk mark echo will never arrive and
-                    # is_audio_being_played would stay stuck True forever — blocking the
-                    # silence-hangup gate in this loop indefinitely.
-                    self.tools["input"].update_is_audio_being_played(
-                        False, AudioPlaybackReason.SILENCE_HANGUP_INTERRUPT
-                    )
-
-                # Just in case we need to clear messages sent before
-                await self.tools["output"].handle_interruption()
+                else:
+                    # Just in case we need to clear messages sent before
+                    await self.tools["output"].handle_interruption()
             else:
                 logger.info(
                     f"Only {time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence not cutting the phone call"
@@ -9899,6 +9932,7 @@ class TaskManager(BaseManager):
                     "synthesizer_characters": (
                         self.tools["synthesizer"].get_synthesized_characters() if _has_asr_tts else 0
                     ),
+                    "synthesizer_cached_characters": self.synthesizer_cached_characters,
                     "ended_by_assistant": self.ended_by_assistant,
                     "user_spoke": self.user_spoke,
                     "node_extracted_data": (

@@ -8,6 +8,7 @@ import pytest
 from pydub import AudioSegment
 
 from bolna.agent_manager.task_manager import HANDOFF_CLIP_CACHE, TaskManager
+from bolna.helpers.tts_clips import convert_clip
 from bolna.synthesizer.synthesizer_pool import SynthesizerPool
 
 
@@ -25,7 +26,7 @@ def _wav_bytes(duration_ms=100, rate=16000):
 
 
 def _to_mulaw(synth, audio):
-    return TaskManager._TaskManager__handoff_clip_convert.__get__(MagicMock(), TaskManager)(synth, audio, True)
+    return convert_clip(synth, audio, True)
 
 
 def test_clip_from_wav_bytes():
@@ -72,7 +73,7 @@ def _tm(cache=None):
     # Bind the real text builder so the handoff text is a str, not a MagicMock.
     tm._TaskManager__handoff_text_for = TaskManager._TaskManager__handoff_text_for.__get__(tm, TaskManager)
     # Bind the real wire helper so the provider drives mulaw-vs-pcm, not a truthy MagicMock.
-    tm._TaskManager__handoff_mulaw_wire = TaskManager._TaskManager__handoff_mulaw_wire.__get__(tm, TaskManager)
+    tm._TaskManager__mulaw_wire = TaskManager._TaskManager__mulaw_wire.__get__(tm, TaskManager)
     return tm
 
 
@@ -122,7 +123,6 @@ async def test_prewarm_renders_all_labels_and_survives_failure():
     pool.active_label = "hi"
     pool.synthesizers = {"hi": synth_for("hi", fail=True), "te": synth_for("te")}
     tm.tools["synthesizer"] = pool
-    tm._TaskManager__handoff_clip_convert = TaskManager._TaskManager__handoff_clip_convert.__get__(tm, TaskManager)
 
     await TaskManager._TaskManager__prewarm_handoff_clips.__get__(tm, TaskManager)()
 
@@ -215,7 +215,6 @@ async def test_prewarm_renders_pcm_for_non_mulaw_wire():
 
     fallback = MagicMock(spec=["synthesize"])  # no pcm one-shot → synthesize() + audio_to_pcm
     fallback.synthesize = AsyncMock(return_value=_wav_bytes(rate=16000))
-    tm._TaskManager__handoff_clip_convert = TaskManager._TaskManager__handoff_clip_convert.__get__(tm, TaskManager)
 
     pool = MagicMock(spec=SynthesizerPool)
     pool.active_label = "hi"
@@ -294,7 +293,6 @@ async def test_one_shot_sentinel_falls_back_to_synthesize():
     synth = MagicMock(spec=["synthesize", "synthesize_telephony_clip"])
     synth.synthesize_telephony_clip = AsyncMock(return_value=b"\x00")  # deepgram-style sentinel
     synth.synthesize = AsyncMock(return_value=_wav_bytes(duration_ms=200))
-    tm._TaskManager__handoff_clip_convert = TaskManager._TaskManager__handoff_clip_convert.__get__(tm, TaskManager)
 
     pool = MagicMock(spec=SynthesizerPool)
     pool.active_label = "hi"
@@ -315,7 +313,6 @@ async def test_short_fallback_clip_still_discarded():
 
     synth = MagicMock(spec=["synthesize"])
     synth.synthesize = AsyncMock(return_value=_wav_bytes(duration_ms=10))  # 80 bytes mu-law
-    tm._TaskManager__handoff_clip_convert = TaskManager._TaskManager__handoff_clip_convert.__get__(tm, TaskManager)
 
     pool = MagicMock(spec=SynthesizerPool)
     pool.active_label = "hi"
@@ -336,7 +333,6 @@ async def test_mulaw_stream_synth_still_prewarms_on_pcm_wire():
     synth = MagicMock(spec=["synthesize", "use_mulaw"])
     synth.use_mulaw = True  # hardcoded by the provider, ignores the kwarg
     synth.synthesize = AsyncMock(return_value=_wav_bytes(duration_ms=200, rate=32000))
-    tm._TaskManager__handoff_clip_convert = TaskManager._TaskManager__handoff_clip_convert.__get__(tm, TaskManager)
 
     pool = MagicMock(spec=SynthesizerPool)
     pool.active_label = "hi"
@@ -354,7 +350,7 @@ def test_handoff_mulaw_wire_tracks_output_handler_registry():
     from bolna.providers import SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
 
     tm = _tm()
-    wire = TaskManager._TaskManager__handoff_mulaw_wire.__get__(tm, TaskManager)
+    wire = TaskManager._TaskManager__mulaw_wire.__get__(tm, TaskManager)
     for provider in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS:
         tm.tools["output"].get_provider = MagicMock(return_value=provider)
         assert wire() is True, provider

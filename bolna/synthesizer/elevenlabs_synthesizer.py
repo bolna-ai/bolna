@@ -254,6 +254,8 @@ class ElevenlabsBase(StreamSynthesizer):
 class ElevenlabsSynthesizer(ElevenlabsBase):
     """Eleven v1/v2 models over the multi-stream-input socket, one context per turn."""
 
+    one_shot_matches_stream = True
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ws_url = (
