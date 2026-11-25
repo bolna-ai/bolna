@@ -78,9 +78,13 @@ def custom_synthesizer(**kwargs):
 
 def bolna_synthesizer(**kwargs):
     """Our own TTS on the OpenAI synthesizer, streamed, at the endpoint in the server's environment."""
-    endpoint = os.getenv("SPEECH_SYNTHESIZER_URL", "").replace("{model}", kwargs.get("model") or "")
-    if not endpoint:
+    template = os.getenv("SPEECH_SYNTHESIZER_URL", "")
+    if not template:
         raise ValueError("SPEECH_SYNTHESIZER_URL is not set")
+    model = kwargs.get("model") or ""
+    if "{model}" in template and not model:
+        raise ValueError("bolna TTS needs a model to pick its server")
+    endpoint = template.replace("{model}", model)
     kwargs["synthesizer_key"] = os.getenv("SPEECH_SYNTHESIZER_KEY") or "none"
     kwargs["voice"] = kwargs.pop("voice_id", None) or kwargs.get("voice")
     kwargs.pop("synthesizer_base_url", None)

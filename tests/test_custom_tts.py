@@ -10,7 +10,7 @@ import pytest
 from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, DefaultAsyncHttpxClient
 from pydantic import TypeAdapter, ValidationError
 
-from bolna.helpers.function_calling_helpers import SSRFError
+from bolna.helpers.function_calling_helpers import SSRFError, _GuardedNetworkBackend
 from bolna.models import CustomTTSConfig, OpenAIConfig, Synthesizer
 from bolna.providers import SUPPORTED_SYNTHESIZER_MODELS
 from bolna.synthesizer.openai_synthesizer import OPENAISynthesizer
@@ -32,6 +32,10 @@ def _custom_tts(**kwargs):
 
 def _base_url(synth):
     return str(synth.async_client.base_url).rstrip("/")
+
+
+def _dials_through_the_ssrf_guard(synth):
+    return isinstance(synth.async_client._client._transport._pool._network_backend, _GuardedNetworkBackend)
 
 
 def _answer(synth):
@@ -72,6 +76,9 @@ class TestClient:
 
     def test_a_customer_endpoint_follows_no_redirects(self):
         assert _custom_tts().async_client._client.follow_redirects is False
+
+    def test_a_customer_endpoint_dials_through_the_ssrf_guard(self):
+        assert _dials_through_the_ssrf_guard(_custom_tts())
 
     def test_the_openai_provider_keeps_the_sdk_client(self):
         assert SUPPORTED_SYNTHESIZER_MODELS["openai"](voice="alloy").async_client._client.follow_redirects is True
@@ -401,18 +408,33 @@ class TestBolnaProvider:
     def _bolna(self, monkeypatch, **kwargs):
         monkeypatch.setenv("SPEECH_SYNTHESIZER_URL", "https://tts.example.com/{model}/v1")
         monkeypatch.setenv("SPEECH_SYNTHESIZER_KEY", "platform-tts-key")
-        kwargs = {"voice": "Ritvik", "voice_id": "ritvik", "model": "maya2-native", "language": "hi-IN", **kwargs}
+        kwargs = {"voice": "Ritvik", "voice_id": "ritvik", "model": "speech-model", "language": "hi-IN", **kwargs}
         return SUPPORTED_SYNTHESIZER_MODELS["bolna"](**kwargs)
 
     def test_the_endpoint_and_key_come_from_the_environment(self, monkeypatch):
         synth = self._bolna(monkeypatch, synthesizer_key="customer-key", synthesizer_base_url="https://evil.example")
-        assert _base_url(synth) == "https://tts.example.com/maya2-native/v1"
+        assert _base_url(synth) == "https://tts.example.com/speech-model/v1"
         assert synth.async_client.api_key == "platform-tts-key"
+
+    def test_our_own_endpoint_may_be_a_private_address(self, monkeypatch):
+        synth = self._bolna(monkeypatch)
+        assert synth._endpoint_checked and not _dials_through_the_ssrf_guard(synth)
 
     def test_without_an_endpoint_setup_fails(self, monkeypatch):
         monkeypatch.delenv("SPEECH_SYNTHESIZER_URL", raising=False)
         with pytest.raises(ValueError):
             SUPPORTED_SYNTHESIZER_MODELS["bolna"](voice="Ritvik", voice_id="ritvik", model="m", language="hi")
+
+    @pytest.mark.parametrize("model", ["", None])
+    def test_without_a_model_setup_fails_instead_of_dialling_a_bare_host(self, monkeypatch, model):
+        with pytest.raises(ValueError, match="model"):
+            self._bolna(monkeypatch, model=model)
+
+    def test_a_single_server_endpoint_needs_no_model_in_the_url(self, monkeypatch):
+        monkeypatch.setenv("SPEECH_SYNTHESIZER_URL", "http://tts.internal:8000/v1")
+        synth = SUPPORTED_SYNTHESIZER_MODELS["bolna"](voice="Ritvik", voice_id="ritvik", model="m", language="hi")
+        assert _base_url(synth) == "http://tts.internal:8000/v1"
+        assert synth.model == "m"
 
     async def test_it_streams_the_voice_id_with_the_spoken_language(self, monkeypatch):
         synth = self._bolna(monkeypatch)
