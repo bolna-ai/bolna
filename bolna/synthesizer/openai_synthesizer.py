@@ -98,6 +98,11 @@ class OPENAISynthesizer(BaseSynthesizer):
             self._held_text = None
             self._interruptions = 0
             self._chunk_read = None
+            self._stream_sequence = None
+            # Whether the open turn has played audio: a request failing after that costs the turn, not the call.
+            self._turn_audio_sent = False
+            # A turn closed early by a failed request; its later pieces are dropped.
+            self._dropped_turn = None
 
     def supports_websocket(self):
         return True
@@ -228,6 +233,8 @@ class OPENAISynthesizer(BaseSynthesizer):
         self.pcm_resampler.reset()
         self.pcm_trimmer.reset()
         self._held_text = None
+        self._turn_audio_sent = False
+        self._dropped_turn = None
         self.first_chunk_generated = False
 
     def _convert_pcm_chunk(self, data):
@@ -273,16 +280,31 @@ class OPENAISynthesizer(BaseSynthesizer):
         finally:
             self._chunk_read = None
 
+    def _record_failed_request(self, error, sequence_id):
+        logger.error(f"Speech request failed after the turn's audio began, closing sequence_id {sequence_id}: {error}")
+        if self.task_manager_instance is not None:
+            self.task_manager_instance.record_non_fatal_synthesizer_error(
+                {"error_type": "tts_request_failed", "error": str(error), "sequence_id": sequence_id}
+            )
+
     async def _generate_pcm_stream_loop(self):
         while True:
             message = await self.internal_queue.get()
             meta_info, text = message.get("meta_info"), message.get("data")
             sequence_id = meta_info.get("sequence_id")
+            final = bool(meta_info.get("end_of_llm_stream"))
             if not self.should_synthesize_response(sequence_id):
                 logger.info(f"Not synthesizing: sequence_id {sequence_id} not current")
-                return
+                continue
+            if sequence_id != self._stream_sequence:
+                # Nothing of an abandoned reply's stream leaks into the next one.
+                self._reset_pcm_stream()
+                self._stream_sequence = sequence_id
+            if self._dropped_turn == sequence_id:
+                if final:
+                    self._dropped_turn = None
+                continue
 
-            final = bool(meta_info.get("end_of_llm_stream"))
             held = self._held_text[1] if self._held_text and self._held_text[0] == sequence_id else ""
             text = f"{held} {text or ''}".strip()
             # A piece that stops mid-sentence would be rendered as a sentence of its own; its end waits for the rest.
@@ -293,64 +315,90 @@ class OPENAISynthesizer(BaseSynthesizer):
             meta_info["text"] = text
             meta_info["is_cached"] = False
 
+            outcome = None
             if text:
                 self.synthesized_characters += len(text)
                 started = time.perf_counter()
                 self._begin_turn_timing(meta_info, started)
                 # Canned speech shares sequence -1, which never retires, so a barge-in is seen by its count.
                 interruptions = self._interruptions
+
+                def stopped():
+                    if self._interruptions != interruptions:
+                        return "interrupted"
+                    return None if self.should_synthesize_response(sequence_id) else "retired"
+
                 first_audio = True
-                async with aclosing(self._stream_pcm(text, pause_ms, pad_tail=not final)) as stream:
-                    while True:
-                        try:
-                            item = await self._next_audio(stream)
-                        except asyncio.CancelledError:
-                            # Only handle_interruption cancels the read alone; anything else is this task ending.
-                            if self._interruptions == interruptions:
-                                raise
-                            item = None
-                        except Exception:
-                            # A request nobody is waiting for any more must not end the call.
-                            if self._interruptions == interruptions and self.should_synthesize_response(sequence_id):
-                                raise
-                            item = None
-                        if self._interruptions != interruptions:
-                            logger.info(f"Stopping stream: sequence_id {sequence_id} was interrupted")
-                            return
-                        if not self.should_synthesize_response(sequence_id):
-                            logger.info(f"Stopping stream: sequence_id {sequence_id} not current")
-                            self._reset_pcm_stream()
-                            # The consumer clears its playing flag on a retired sequence's end packet.
-                            retired = {"sequence_id": sequence_id, "end_of_synthesizer_stream": True}
-                            retired["format"] = meta_info["format"]
-                            yield create_ws_data_packet(b"\x00", retired)
-                            return
-                        if item is None:
-                            break
-                        audio, closing = item
-                        if not audio:
-                            continue
-                        # Only the end packet closes the turn; audio that says so releases a hangup wait early.
-                        # The heard-text tracker credits a request's text once its closing packet is played.
-                        packet_meta = {
-                            **meta_info,
-                            "end_of_llm_stream": False,
-                            "text_synthesized": f"{text} " if closing else "",
-                        }
-                        if first_audio:
-                            first_audio = False
-                            if "first_result_latency_ms" not in self._timed_turn:
-                                latency = time.perf_counter() - started
-                                self._timed_turn["first_result_latency_ms"] = round(latency * 1000)
-                                self._upsert_turn_latency(dict(self._timed_turn))
-                                packet_meta["synthesizer_latency"] = latency
-                        self._stamp_first_chunk(packet_meta)
-                        self._stamp_mark_id(packet_meta)
-                        yield create_ws_data_packet(audio, packet_meta)
+                try:
+                    async with aclosing(self._stream_pcm(text, pause_ms, pad_tail=not final)) as stream:
+                        # Checked before every read too: a barge-in while this loop sat at its yield cancelled none.
+                        while (outcome := stopped()) is None:
+                            try:
+                                item = await self._next_audio(stream)
+                            except asyncio.CancelledError:
+                                # Only handle_interruption cancels the read alone; anything else is this task ending.
+                                if self._interruptions == interruptions:
+                                    raise
+                                continue
+                            except Exception as e:
+                                # A request nobody is waiting for any more must not end the call.
+                                if stopped():
+                                    continue
+                                if not self._turn_audio_sent:
+                                    raise
+                                self._record_failed_request(e, sequence_id)
+                                outcome = "failed"
+                                break
+                            if item is None:
+                                break
+                            if stopped():
+                                continue
+                            audio, closing = item
+                            if not audio:
+                                continue
+                            # Only the end packet closes the turn; audio that says so releases a hangup wait early.
+                            # The heard-text tracker credits a request's text once its closing packet is played.
+                            packet_meta = {
+                                **meta_info,
+                                "end_of_llm_stream": False,
+                                "text_synthesized": f"{text} " if closing else "",
+                            }
+                            if first_audio:
+                                first_audio = False
+                                if "first_result_latency_ms" not in self._timed_turn:
+                                    latency = time.perf_counter() - started
+                                    self._timed_turn["first_result_latency_ms"] = round(latency * 1000)
+                                    self._upsert_turn_latency(dict(self._timed_turn))
+                                    packet_meta["synthesizer_latency"] = latency
+                            self._stamp_first_chunk(packet_meta)
+                            self._stamp_mark_id(packet_meta)
+                            self._turn_audio_sent = True
+                            yield create_ws_data_packet(audio, packet_meta)
+                except asyncio.CancelledError:
+                    # Cancelled from outside, as a pool switch does: the leg's next reply starts clean.
+                    self._reset_pcm_stream()
+                    raise
+
+                if outcome == "interrupted":
+                    logger.info(f"Stopping stream: sequence_id {sequence_id} was interrupted")
+                    continue
+                if outcome == "retired":
+                    logger.info(f"Stopping stream: sequence_id {sequence_id} not current")
+                    self._reset_pcm_stream()
+                    # The consumer clears its playing flag on a retired sequence's end packet.
+                    retired = {"sequence_id": sequence_id, "end_of_synthesizer_stream": True}
+                    retired["format"] = meta_info["format"]
+                    yield create_ws_data_packet(b"\x00", retired)
+                    continue
+                if outcome == "failed":
+                    # The turn ends with what it already played; its end packet goes out now.
+                    meta_info["end_of_llm_stream"] = True
                 self._finish_chunk_timing(meta_info, len(text), started, time.perf_counter())
 
-            if meta_info.get("end_of_llm_stream"):
+            if final or outcome == "failed":
                 self._reset_pcm_stream()
+                if not final:
+                    self._dropped_turn = sequence_id
                 self._stamp_end_of_stream(meta_info)
                 self._stamp_mark_id(meta_info)
                 yield create_ws_data_packet(b"\x00", meta_info)

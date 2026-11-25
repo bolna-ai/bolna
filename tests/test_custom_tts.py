@@ -334,25 +334,35 @@ class TestPcmStreaming:
         packets = [p async for p in _take(synth.generate(), 4)]
         assert [p["meta_info"].get("text_synthesized", "") for p in packets] == ["", "", "Hello there. ", ""]
 
-    async def test_a_retired_sequence_ends_with_its_own_end_packet(self, monkeypatch):
+    async def test_a_retired_sequence_ends_with_its_own_end_packet_and_the_next_reply_plays(self, monkeypatch):
         synth = _streaming_tts(monkeypatch, [_A, _B, _C])
         await _push(synth)
         stream = synth.generate()
         assert (await stream.__anext__())["data"] == _A
-        synth.task_manager_instance.current.clear()
+        synth.task_manager_instance.current = {2}
         end = await stream.__anext__()
         assert (end["data"], end["meta_info"]["sequence_id"]) == (b"\x00", 1)
-        with pytest.raises(StopAsyncIteration):
-            await stream.__anext__()
+        await synth.push({"data": "next", "meta_info": {"sequence_id": 2, "end_of_llm_stream": True}})
+        assert (await stream.__anext__())["meta_info"]["sequence_id"] == 2
 
-    async def test_a_barge_in_stops_canned_speech_whose_sequence_never_retires(self, monkeypatch):
+    async def test_a_barge_in_stops_canned_speech_and_the_stream_keeps_serving(self, monkeypatch):
+        # Like a WebSocket leg's, the stream outlives the barge-in and serves the next reply.
         synth = _streaming_tts(monkeypatch, [_A, _B, _C])
         await _push(synth)
         stream = synth.generate()
         assert (await stream.__anext__())["data"] == _A
         await synth.handle_interruption()
-        with pytest.raises(StopAsyncIteration):
-            await stream.__anext__()
+        synth.task_manager_instance.current = {2}
+        await synth.push({"data": "next", "meta_info": {"sequence_id": 2, "end_of_llm_stream": True}})
+        packet = await asyncio.wait_for(stream.__anext__(), 1)
+        assert (packet["data"], packet["meta_info"]["sequence_id"]) == (_A, 2)
+
+    async def test_a_piece_of_a_retired_sequence_is_skipped_not_the_end_of_the_stream(self, monkeypatch):
+        synth = _streaming_tts(monkeypatch, [_A])
+        await synth.push({"data": "old", "meta_info": {"sequence_id": 7, "end_of_llm_stream": True}})
+        await _push(synth)
+        packet = await asyncio.wait_for(synth.generate().__anext__(), 1)
+        assert packet["meta_info"]["sequence_id"] == 1
 
     async def test_a_barge_in_wakes_a_read_the_server_never_answers(self, monkeypatch):
         synth = _streaming_tts(monkeypatch, [_A])
@@ -360,7 +370,8 @@ class TestPcmStreaming:
 
         async def stalled(text, tail_ms, pad_tail):
             yield _A, False
-            await gate.wait()
+            if text == "hello":
+                await gate.wait()
 
         synth._stream_pcm = stalled
         await _push(synth)
@@ -369,8 +380,117 @@ class TestPcmStreaming:
         waiting = asyncio.ensure_future(stream.__anext__())
         await asyncio.sleep(0)
         await synth.handle_interruption()
-        with pytest.raises(StopAsyncIteration):
-            await asyncio.wait_for(waiting, 1)
+        synth.task_manager_instance.current = {2}
+        await synth.push({"data": "next", "meta_info": {"sequence_id": 2, "end_of_llm_stream": True}})
+        assert (await asyncio.wait_for(waiting, 1))["meta_info"]["sequence_id"] == 2
+
+    async def test_a_barge_in_while_parked_at_a_packet_reads_nothing_more_of_the_dead_reply(self, monkeypatch):
+        synth = _streaming_tts(monkeypatch, [_A])
+        gate = asyncio.Event()
+
+        async def stalled(text, tail_ms, pad_tail):
+            yield _A, False
+            if text == "hello":
+                await gate.wait()
+
+        synth._stream_pcm = stalled
+        await _push(synth)
+        stream = synth.generate()
+        await stream.__anext__()
+        # Nothing is reading: the generator sits at its yield when the barge-in lands.
+        await synth.handle_interruption()
+        synth.task_manager_instance.current = {2}
+        await synth.push({"data": "next", "meta_info": {"sequence_id": 2, "end_of_llm_stream": True}})
+        assert (await asyncio.wait_for(stream.__anext__(), 1))["meta_info"]["sequence_id"] == 2
+
+
+def _scripted_tts(monkeypatch, script, task_manager=None, **kwargs):
+    """A custom PCM endpoint answering each input with its scripted chunks; an exception among them fails mid-body."""
+
+    def server(request):
+        if request.method == "GET":
+            return httpx.Response(404)
+
+        async def body():
+            for chunk in script[json.loads(request.content)["input"]]:
+                if isinstance(chunk, Exception):
+                    raise chunk
+                yield chunk
+
+        return httpx.Response(200, content=body())
+
+    monkeypatch.setattr("bolna.synthesizer.openai_synthesizer.validate_outbound_url", AsyncMock())
+    monkeypatch.setattr(
+        "bolna.synthesizer.openai_synthesizer.DefaultAsyncHttpxClient",
+        lambda **k: DefaultAsyncHttpxClient(**{**k, "transport": httpx.MockTransport(server)}),
+    )
+    kwargs.setdefault("sampling_rate", 24000)
+    return _custom_tts(response_format="pcm", task_manager_instance=task_manager or _Sequences(), **kwargs)
+
+
+class _RecordingSequences(_Sequences):
+    def __init__(self):
+        super().__init__()
+        self.non_fatal = []
+
+    def record_non_fatal_synthesizer_error(self, error):
+        self.non_fatal.append(error)
+
+
+class TestStreamState:
+    """What one reply leaves behind never reaches the next, and a failure mid-reply costs that reply only."""
+
+    async def test_a_barge_in_while_parked_leaves_no_stale_bytes_for_the_next_reply(self, monkeypatch):
+        # The first reply arrives in odd-sized pieces, so a half sample is pending whenever it is cut.
+        first = _A + _B + _C + _A + _B + _C
+        script = {"First.": [first[i : i + 961] for i in range(0, len(first), 961)], "Second.": [_B + _C]}
+        synth = _scripted_tts(monkeypatch, script)
+        await synth.push({"data": "First.", "meta_info": {"sequence_id": 1, "end_of_llm_stream": True}})
+        stream = synth.generate()
+        await stream.__anext__()
+        await synth.handle_interruption()
+        synth.task_manager_instance.current = {2}
+        await synth.push({"data": "Second.", "meta_info": {"sequence_id": 2, "end_of_llm_stream": True}})
+        packet = await asyncio.wait_for(stream.__anext__(), 1)
+        assert (packet["meta_info"]["sequence_id"], packet["data"]) == (2, _B + _C)
+
+    async def test_a_new_reply_starts_from_a_fresh_resampler(self, monkeypatch):
+        script = {"First.": [_A + _B], "Second.": [_C]}
+        synth = _scripted_tts(monkeypatch, script, sampling_rate=8000)
+        await synth.push({"data": "First.", "meta_info": {"sequence_id": 1, "end_of_llm_stream": False}})
+        stream = synth.generate()
+        await stream.__anext__()
+        synth.task_manager_instance.current = {1, 2}
+        await synth.push({"data": "Second.", "meta_info": {"sequence_id": 2, "end_of_llm_stream": True}})
+        while (packet := await asyncio.wait_for(stream.__anext__(), 1))["meta_info"]["sequence_id"] != 2:
+            pass
+        fresh = _scripted_tts(monkeypatch, script, sampling_rate=8000)
+        assert packet["data"] == fresh._convert_pcm_chunk(_C)
+
+    async def test_a_failure_after_the_turn_played_closes_the_turn_and_keeps_the_call(self, monkeypatch):
+        recorder = _RecordingSequences()
+        script = {"One.": [_A, httpx.ReadError("connection lost")], "Two.": [_B], "Next.": [_C]}
+        synth = _scripted_tts(monkeypatch, script, task_manager=recorder)
+        await synth.push({"data": "One.", "meta_info": {"sequence_id": 1, "end_of_llm_stream": False}})
+        await synth.push({"data": "Two.", "meta_info": {"sequence_id": 1, "end_of_llm_stream": True}})
+        stream = synth.generate()
+        played, end = [await asyncio.wait_for(stream.__anext__(), 1) for _ in range(2)]
+        assert played["data"] == _A
+        assert (end["data"], end["meta_info"]["end_of_synthesizer_stream"]) == (b"\x00", True)
+        assert [e["error_type"] for e in recorder.non_fatal] == ["tts_request_failed"]
+        # The rest of the failed turn is dropped; the next reply plays.
+        recorder.current = {2}
+        await synth.push({"data": "Next.", "meta_info": {"sequence_id": 2, "end_of_llm_stream": True}})
+        packet = await asyncio.wait_for(stream.__anext__(), 1)
+        assert (packet["meta_info"]["sequence_id"], packet["data"]) == (2, _C)
+
+    async def test_a_failure_before_the_turn_played_anything_still_ends_the_call(self, monkeypatch):
+        recorder = _RecordingSequences()
+        synth = _scripted_tts(monkeypatch, {"One.": [httpx.ReadError("connection lost")]}, task_manager=recorder)
+        await synth.push({"data": "One.", "meta_info": {"sequence_id": 1, "end_of_llm_stream": True}})
+        with pytest.raises(Exception):
+            await asyncio.wait_for(synth.generate().__anext__(), 1)
+        assert recorder.non_fatal == []
 
 
 class TestSentenceRequests:
@@ -454,7 +574,15 @@ class TestBolnaProvider:
 
     @pytest.mark.parametrize(
         "language, sent",
-        [("hi-IN", "hi"), ("EN_us", "en"), (" kn ", "kn"), ("multi", None), ("auto", None), ("", None), (None, None)],
+        [
+            ("hi-IN", "hi"),
+            ("EN_us", "en"),
+            (" kn ", "kn"),
+            ("multi", None),
+            ("auto", None),
+            ("", None),
+            (None, None),
+        ],
     )
     def test_only_a_bare_language_code_is_sent(self, monkeypatch, language, sent):
         extras = self._bolna(monkeypatch, language=language)._request_extras()
