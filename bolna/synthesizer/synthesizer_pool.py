@@ -9,6 +9,13 @@ logger = configure_logger(__name__)
 _SWITCH_SENTINEL = object()
 
 
+class _LegFailure:
+    """A leg's error, carried through _output_queue so generate() raises it in the call's synthesizer task."""
+
+    def __init__(self, error):
+        self.error = error
+
+
 class SynthesizerPool:
     """
     Holds multiple pre-warmed synthesizer connections and routes text/audio
@@ -135,15 +142,18 @@ class SynthesizerPool:
         logger.info(f"SynthesizerPool: generate task started for active='{self.active_label}'")
 
     async def _run_generate(self, label):
-        """Iterate synth.generate() and forward results into the shared _output_queue."""
+        """Forward synth.generate() into _output_queue, re-entering it when it returns, as __listen_synthesizer does."""
         try:
             synth = self.synthesizers[label]
-            async for message in synth.generate():
-                self._output_queue.put_nowait(message)
+            while True:
+                async for message in synth.generate():
+                    self._output_queue.put_nowait(message)
+                await asyncio.sleep(0.01)
         except asyncio.CancelledError:
             logger.info(f"SynthesizerPool: _run_generate cancelled for '{label}'")
         except Exception as e:
             logger.error(f"SynthesizerPool: error in _run_generate for '{label}': {e}", exc_info=True)
+            self._output_queue.put_nowait(_LegFailure(e))
 
     async def generate(self):
         """Async generator that yields audio packets from the active synthesizer.
@@ -156,6 +166,8 @@ class SynthesizerPool:
             if message is _SWITCH_SENTINEL:
                 logger.info("SynthesizerPool: generate() received SWITCH_SENTINEL, returning")
                 return
+            if isinstance(message, _LegFailure):
+                raise message.error
             yield message
 
     # ------------------------------------------------------------------
