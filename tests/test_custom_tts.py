@@ -537,6 +537,12 @@ class TestBolnaProvider:
         assert _base_url(synth) == "https://tts.example.com/speech-model/v1"
         assert synth.async_client.api_key == "platform-tts-key"
 
+    def test_our_own_endpoint_fails_fast_and_keeps_idle_connections(self, monkeypatch):
+        client = self._bolna(monkeypatch).async_client
+        assert (client.timeout, client.max_retries) == (httpx.Timeout(20.0, connect=2.0, read=5.0), 0)
+        assert client._client._transport._pool._keepalive_expiry == 120
+        assert _custom_tts().async_client._client._transport._pool._keepalive_expiry == 5
+
     def test_our_own_endpoint_may_be_a_private_address(self, monkeypatch):
         synth = self._bolna(monkeypatch)
         assert synth._endpoint_checked and not _dials_through_the_ssrf_guard(synth)
