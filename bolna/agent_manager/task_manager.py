@@ -4862,11 +4862,13 @@ class TaskManager(BaseManager):
         # Skipped when end_call is the primary hangup; those agents hang up via the tool. Also
         # skipped once the call is over: a node-scoped end_call tears down inside this task and
         # returns here, where asking the LLM whether to hang up is a request nobody can act on.
+        # Skipped too while a trunk transfer rings: the media node ends that call.
         if (
             self.use_llm_to_determine_hangup
             and not self.turn_based_conversation
             and not self.end_call_primary
             and not self.conversation_ended
+            and not self._trunk_transfer_ringing()
         ):
             completion_res, metadata = await self.tools["llm_agent"].check_for_completion(
                 messages, self.check_for_completion_prompt, meta_info=meta_info
@@ -5068,6 +5070,10 @@ class TaskManager(BaseManager):
         await self.__process_end_of_conversation()
 
     async def process_call_hangup(self):
+        # Closing the fork mid-ring makes mod_audio_stream hang the caller up 2 s later, answered or not.
+        if self._trunk_transfer_ringing():
+            logger.info("process_call_hangup: a trunk transfer is ringing, the media node ends this call")
+            return
         if self.hangup_decision_at is None:
             self.hangup_decision_at = time.time()
         if self._hangup_processing or self.conversation_ended:
