@@ -543,6 +543,16 @@ class TestBolnaProvider:
         assert client._client._transport._pool._keepalive_expiry == 120
         assert _custom_tts().async_client._client._transport._pool._keepalive_expiry == 5
 
+    async def test_a_one_shot_render_has_its_edge_silence_set(self, monkeypatch):
+        synth = self._bolna(monkeypatch)
+        audio = bytes(4800) + _A + _B + bytes(9600)
+        synth.async_client.audio.speech.create = AsyncMock(
+            return_value=MagicMock(iter_bytes=lambda chunk_size: [audio])
+        )
+        clip = await synth.synthesize("hello")
+        # 20 ms before the speech and 100 ms after it, at 48 bytes a millisecond.
+        assert clip[44:] == bytes(960) + _A + _B + bytes(4800)
+
     def test_our_own_endpoint_may_be_a_private_address(self, monkeypatch):
         synth = self._bolna(monkeypatch)
         assert synth._endpoint_checked and not _dials_through_the_ssrf_guard(synth)
@@ -571,10 +581,10 @@ class TestBolnaProvider:
 
     async def test_a_one_shot_render_is_wav_at_the_servers_rate(self, monkeypatch):
         synth = self._bolna(monkeypatch)
-        create = AsyncMock(return_value=MagicMock(iter_bytes=lambda chunk_size: [b"\x01\x00\x02\x00"]))
+        create = AsyncMock(return_value=MagicMock(iter_bytes=lambda chunk_size: [_A]))
         synth.async_client.audio.speech.create = create
         clip = await synth.synthesize("hello")
-        assert clip[:4] == b"RIFF" and clip.endswith(b"\x01\x00\x02\x00")
+        assert clip[:4] == b"RIFF" and clip.endswith(_A)
         assert int.from_bytes(clip[24:28], "little") == 24000
         assert create.call_args.kwargs["response_format"] == "pcm"
 

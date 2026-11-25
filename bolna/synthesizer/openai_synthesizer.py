@@ -202,6 +202,8 @@ class OPENAISynthesizer(BaseSynthesizer):
             return await self._generate_http(text)
         # Callers of our own servers get WAV, whose header carries the rate; they decode nothing else for it.
         audio = await self._generate_http(text, response_format="pcm")
+        trimmer = PcmEdgeTrimmer(self.pcm_sample_rate)
+        audio = trimmer.feed(audio or b"") + trimmer.finish(FINAL_TAIL_MS)
         return pcm_to_wav_bytes(audio, sample_rate=self.pcm_sample_rate) if audio else None
 
     # ------------------------------------------------------------------
