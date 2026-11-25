@@ -192,9 +192,9 @@ def test_only_verified_providers_store_clips():
     from bolna.synthesizer.sarvam_synthesizer import SarvamSynthesizer
 
     assert ElevenlabsSynthesizer.one_shot_matches_stream and CartesiaSynthesizer.one_shot_matches_stream
-    # Sarvam's one-shot endpoint renders audibly louder than its stream; v3 is untested.
+    assert ElevenlabsV3Synthesizer.one_shot_matches_stream
+    # Sarvam's one-shot endpoint renders audibly louder than its stream.
     assert not SarvamSynthesizer.one_shot_matches_stream
-    assert not ElevenlabsV3Synthesizer.one_shot_matches_stream
 
 
 async def test_a_templated_line_is_never_stored(storage):
