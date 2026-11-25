@@ -6,6 +6,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import openai
 import pytest
 from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, DefaultAsyncHttpxClient
 from pydantic import TypeAdapter, ValidationError
@@ -450,6 +451,42 @@ class TestBolnaProvider:
         assert clip[:4] == b"RIFF" and clip.endswith(b"\x01\x00\x02\x00")
         assert int.from_bytes(clip[24:28], "little") == 24000
         assert create.call_args.kwargs["response_format"] == "pcm"
+
+    @pytest.mark.parametrize(
+        "language, sent",
+        [("hi-IN", "hi"), ("EN_us", "en"), (" kn ", "kn"), ("multi", None), ("auto", None), ("", None), (None, None)],
+    )
+    def test_only_a_bare_language_code_is_sent(self, monkeypatch, language, sent):
+        extras = self._bolna(monkeypatch, language=language)._request_extras()
+        assert extras == ({"language": sent} if sent else None)
+
+    async def test_a_switch_sets_the_language_even_when_the_agent_had_none(self, monkeypatch):
+        synth = self._bolna(monkeypatch, language="multi")
+        await synth.set_target_language("kn")
+        assert synth._request_extras() == {"language": "kn"}
+        await synth.set_target_language("auto")
+        assert synth._request_extras() is None
+
+    async def test_a_one_shot_render_sends_the_language_too(self, monkeypatch):
+        synth = self._bolna(monkeypatch)
+        create = AsyncMock(return_value=MagicMock(iter_bytes=lambda chunk_size: [b"\x01\x00"]))
+        synth.async_client.audio.speech.create = create
+        await synth.synthesize("hello")
+        assert create.call_args.kwargs["extra_body"] == {"language": "hi"}
+
+    async def test_a_refused_request_ends_the_turn_with_an_error_instead_of_waiting(self, monkeypatch):
+        # The task manager ends the call on a synthesizer error; a stream that waited would leave it silent.
+        def server(request):
+            return httpx.Response(400, json={"error": {"message": "unsupported language"}})
+
+        monkeypatch.setattr(
+            "bolna.synthesizer.openai_synthesizer.DefaultAsyncHttpxClient",
+            lambda **k: DefaultAsyncHttpxClient(**{**k, "transport": httpx.MockTransport(server)}),
+        )
+        synth = self._bolna(monkeypatch, task_manager_instance=_Sequences())
+        await _push(synth)
+        with pytest.raises(openai.BadRequestError):
+            await asyncio.wait_for(synth.generate().__anext__(), 5)
 
     def test_a_customer_endpoint_is_never_sent_a_language(self):
         assert _custom_tts(language="hi")._request_extras() is None

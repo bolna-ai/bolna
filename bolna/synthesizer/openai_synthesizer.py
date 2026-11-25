@@ -29,9 +29,15 @@ _CUSTOM_ENDPOINT_TIMEOUT_SECONDS = 20
 MULAW_SAMPLE_RATE = 8000
 
 
+_LANGUAGE_CODE = re.compile(r"[a-z]{2}")
+
+
 def _primary_language(language):
-    """ "hi-IN" to "hi": speech servers take the bare language."""
-    return re.split(r"[-_]", language.strip().lower(), maxsplit=1)[0] if isinstance(language, str) else language
+    """ "hi-IN" to "hi"; None for anything else ("multi", "auto"), which the server then infers from the text."""
+    if not isinstance(language, str):
+        return None
+    primary = re.split(r"[-_]", language.strip().lower(), maxsplit=1)[0]
+    return primary if _LANGUAGE_CODE.fullmatch(primary) else None
 
 
 class OPENAISynthesizer(BaseSynthesizer):
@@ -147,7 +153,7 @@ class OPENAISynthesizer(BaseSynthesizer):
         return {**(self.extra_body or {}), "language": self.language}
 
     async def set_target_language(self, language):
-        if self.language is not None and language:
+        if self.platform_endpoint and language:
             self.language = _primary_language(language)
 
     async def _check_endpoint(self):
