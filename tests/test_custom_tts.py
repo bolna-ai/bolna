@@ -266,7 +266,7 @@ def _streaming_tts(monkeypatch, chunks, sent=None, **kwargs):
     monkeypatch.setattr("bolna.synthesizer.openai_synthesizer.validate_outbound_url", AsyncMock())
     monkeypatch.setattr(
         "bolna.synthesizer.openai_synthesizer.DefaultAsyncHttpxClient",
-        lambda **k: DefaultAsyncHttpxClient(transport=httpx.MockTransport(server), **k),
+        lambda **k: DefaultAsyncHttpxClient(**{**k, "transport": httpx.MockTransport(server)}),
     )
     kwargs.setdefault("sampling_rate", 24000)
     return _custom_tts(response_format="pcm", task_manager_instance=_Sequences(), **kwargs)
@@ -296,11 +296,12 @@ class TestPcmStreaming:
         audio = _A + _B + _C
         synth = _streaming_tts(monkeypatch, [audio[:961], audio[961:]], sent, extra_body={"language": "hi"})
         await _push(synth)
-        packets = [p async for p in _take(synth.generate(), 3)]
-        assert [p["data"] for p in packets] == [_A + _B, _C, b"\x00"]
+        packets = [p async for p in _take(synth.generate(), 4)]
+        # Speech to the last sample leaves no tail of its own, so the closing packet is one frame of silence.
+        assert [p["data"] for p in packets] == [_A + _B, _C, bytes(480), b"\x00"]
         assert [p["meta_info"]["is_first_chunk"] for p in packets[:2]] == [True, False]
         assert packets[0]["meta_info"]["format"] == "pcm"
-        assert packets[2]["meta_info"]["end_of_synthesizer_stream"] is True
+        assert packets[3]["meta_info"]["end_of_synthesizer_stream"] is True
         assert (sent["response_format"], sent["language"]) == ("pcm", "hi")
         assert synth.turn_latencies[0]["first_result_latency_ms"] <= synth.turn_latencies[0]["total_stream_duration_ms"]
 
@@ -315,9 +316,15 @@ class TestPcmStreaming:
     async def test_audio_packets_never_claim_the_end_of_the_turn(self, monkeypatch):
         synth = _streaming_tts(monkeypatch, [_A])
         await _push(synth)
-        audio, end = [p async for p in _take(synth.generate(), 2)]
-        assert audio["meta_info"]["end_of_llm_stream"] is False
+        *audio, end = [p async for p in _take(synth.generate(), 3)]
+        assert [p["meta_info"]["end_of_llm_stream"] for p in audio] == [False, False]
         assert end["meta_info"]["end_of_llm_stream"] is True
+
+    async def test_a_requests_text_rides_on_its_closing_packet_only(self, monkeypatch):
+        synth = _streaming_tts(monkeypatch, [_A, _B])
+        await _push(synth, "Hello there.")
+        packets = [p async for p in _take(synth.generate(), 4)]
+        assert [p["meta_info"].get("text_synthesized", "") for p in packets] == ["", "", "Hello there. ", ""]
 
     async def test_a_retired_sequence_ends_with_its_own_end_packet(self, monkeypatch):
         synth = _streaming_tts(monkeypatch, [_A, _B, _C])
@@ -344,7 +351,7 @@ class TestPcmStreaming:
         gate = asyncio.Event()
 
         async def stalled(text, tail_ms, pad_tail):
-            yield _A
+            yield _A, False
             await gate.wait()
 
         synth._stream_pcm = stalled
@@ -375,9 +382,9 @@ class TestSentenceRequests:
         assert packets[0]["meta_info"]["text"] == "Sure."
 
     async def test_a_piece_with_no_sentence_end_waits_and_sends_nothing(self, monkeypatch):
-        sent, packets = await self._requests(monkeypatch, ["one two three", "four."], 2)
+        sent, packets = await self._requests(monkeypatch, ["one two three", "four."], 3)
         assert sent == ["one two three four."]
-        assert packets[1]["meta_info"]["end_of_synthesizer_stream"] is True
+        assert packets[2]["meta_info"]["end_of_synthesizer_stream"] is True
 
     async def test_a_barge_in_drops_the_held_text(self, monkeypatch):
         synth = _streaming_tts(monkeypatch, [_A])

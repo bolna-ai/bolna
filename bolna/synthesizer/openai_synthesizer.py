@@ -232,7 +232,7 @@ class OPENAISynthesizer(BaseSynthesizer):
         return pcm_to_ulaw(audio) if self.use_mulaw else audio
 
     async def _stream_pcm(self, text, tail_ms, pad_tail):
-        """One request's audio with its edge silence set: tail_ms after the speech, padded up to it when pad_tail."""
+        """One request as (audio, closing) packets: tail_ms of silence after the speech, padded to it when pad_tail."""
         await self._check_endpoint()
         async with self.async_client.audio.speech.with_streaming_response.create(
             model=self.model,
@@ -245,13 +245,13 @@ class OPENAISynthesizer(BaseSynthesizer):
             async for chunk in response.iter_bytes():
                 audio = self._convert_pcm_chunk(self.pcm_trimmer.feed(chunk))
                 if audio:
-                    yield audio
-        audio = self._convert_pcm_chunk(self.pcm_trimmer.finish(tail_ms, pad=pad_tail))
-        if audio:
-            yield audio
+                    yield audio, False
+        # Always sent, even as a frame of silence: the request's text rides on its closing packet.
+        tail = self.pcm_trimmer.finish(tail_ms, pad=pad_tail) or bytes(self.pcm_trimmer.frame_bytes)
+        yield self._convert_pcm_chunk(tail), True
 
     async def _next_audio(self, stream):
-        """The stream's next audio, or None at its end; handle_interruption can cancel the wait."""
+        """The stream's next (audio, closing), or None at its end; handle_interruption can cancel the wait."""
 
         async def read():
             try:
@@ -295,17 +295,17 @@ class OPENAISynthesizer(BaseSynthesizer):
                 async with aclosing(self._stream_pcm(text, pause_ms, pad_tail=not final)) as stream:
                     while True:
                         try:
-                            audio = await self._next_audio(stream)
+                            item = await self._next_audio(stream)
                         except asyncio.CancelledError:
                             # Only handle_interruption cancels the read alone; anything else is this task ending.
                             if self._interruptions == interruptions:
                                 raise
-                            audio = None
+                            item = None
                         except Exception:
                             # A request nobody is waiting for any more must not end the call.
                             if self._interruptions == interruptions and self.should_synthesize_response(sequence_id):
                                 raise
-                            audio = None
+                            item = None
                         if self._interruptions != interruptions:
                             logger.info(f"Stopping stream: sequence_id {sequence_id} was interrupted")
                             return
@@ -317,10 +317,18 @@ class OPENAISynthesizer(BaseSynthesizer):
                             retired["format"] = meta_info["format"]
                             yield create_ws_data_packet(b"\x00", retired)
                             return
-                        if audio is None:
+                        if item is None:
                             break
+                        audio, closing = item
+                        if not audio:
+                            continue
                         # Only the end packet closes the turn; audio that says so releases a hangup wait early.
-                        packet_meta = {**meta_info, "end_of_llm_stream": False}
+                        # The heard-text tracker credits a request's text once its closing packet is played.
+                        packet_meta = {
+                            **meta_info,
+                            "end_of_llm_stream": False,
+                            "text_synthesized": f"{text} " if closing else "",
+                        }
                         if first_audio:
                             first_audio = False
                             if "first_result_latency_ms" not in self._timed_turn:
