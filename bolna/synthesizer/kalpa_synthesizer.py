@@ -44,7 +44,7 @@ from websockets.exceptions import InvalidHandshake
 
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.ssl_context import get_ssl_context
+from bolna.helpers.ssl_context import get_ssl_context, tcp_connector
 from bolna.helpers.utils import StreamingPcmResampler, audio_to_mulaw8k, pcm_to_ulaw, resample
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
@@ -358,7 +358,7 @@ class KalpaSynthesizer(StreamSynthesizer):
         headers = {"Authorization": f"Bearer {self.api_key}"}
         url = f"https://{self.kalpa_host}/v1/voices"
         params = {"model": self.model} if self.model else None
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=tcp_connector()) as session:
             async with session.get(
                 url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
@@ -1178,7 +1178,7 @@ class KalpaSynthesizer(StreamSynthesizer):
             "Content-Type": "application/json",
         }
         url = f"https://{self.kalpa_host}/v1/tts/{voice_id}"
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=tcp_connector()) as session:
             for attempt in range(HTTP_RETRIES + 1):
                 async with session.post(url, headers=headers, json=payload) as response:
                     request_id = response.headers.get("X-Request-ID")

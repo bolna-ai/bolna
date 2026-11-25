@@ -12,7 +12,7 @@ from websockets.exceptions import InvalidHandshake
 from .stream_synthesizer import StreamSynthesizer
 from bolna.constants import CARTESIA_VOLUME_MAX, CARTESIA_VOLUME_MIN, CARTESIA_VOLUME_MODELS
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.ssl_context import get_ssl_context
+from bolna.helpers.ssl_context import get_ssl_context, tcp_connector
 from bolna.helpers.utils import cartesia_supports_pronunciation_dict
 
 
@@ -336,7 +336,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
         if self.pronunciation_dict_id:
             payload["pronunciation_dict_id"] = self.pronunciation_dict_id
         headers = {"X-API-Key": self.api_key, "Cartesia-Version": "2024-06-10"}
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=tcp_connector()) as session:
             async with session.post(self.api_url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     return await response.read()

@@ -23,7 +23,7 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from .elevenlabs_synthesizer import split_flushable
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.ssl_context import get_ssl_context
+from bolna.helpers.ssl_context import get_ssl_context, tcp_connector
 from bolna.helpers.utils import pcm_to_ulaw, pcm_to_wav_bytes
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
@@ -540,7 +540,7 @@ class NavanaSynthesizer(StreamSynthesizer):
         payload = {"text": text, "output_format": output_format, **self._speech_options()}
         headers = {**self._headers(), "Content-Type": "application/json"}
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(connector=tcp_connector()) as session:
                 async with session.post(
                     self.api_url,
                     json=payload,

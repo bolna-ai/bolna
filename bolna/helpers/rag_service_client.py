@@ -6,6 +6,7 @@ import time
 import uuid
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
+from bolna.helpers.ssl_context import tcp_connector
 
 
 @dataclass
@@ -51,7 +52,7 @@ class RAGServiceClient:
 
     async def __aenter__(self):
         """Async context manager entry."""
-        self.session = aiohttp.ClientSession(timeout=self.timeout)
+        self.session = aiohttp.ClientSession(connector=tcp_connector(), timeout=self.timeout)
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -62,7 +63,7 @@ class RAGServiceClient:
     async def _ensure_session(self):
         """Ensure session exists."""
         if not self.session:
-            self.session = aiohttp.ClientSession(timeout=self.timeout)
+            self.session = aiohttp.ClientSession(connector=tcp_connector(), timeout=self.timeout)
 
     def _is_available(self) -> bool:
         """Check if RAG service should be attempted. Skips if recently failing."""

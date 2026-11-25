@@ -23,7 +23,7 @@ from bolna.helpers.logger_config import configure_logger
 from bolna.enums import TelephonyProvider
 from bolna.constants import SARVAM_MAX_KEYTERM_CHARACTERS, SARVAM_MAX_KEYTERMS
 from bolna.helpers.asr_keywords import keyword_terms
-from bolna.helpers.ssl_context import get_ssl_context
+from bolna.helpers.ssl_context import get_ssl_context, tcp_connector
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
 load_dotenv()
@@ -115,7 +115,7 @@ class SarvamTranscriber(BaseTranscriber):
         self._configure_audio_params()
         self.session: Optional[aiohttp.ClientSession] = None
         if not self.stream:
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(connector=tcp_connector())
 
     def _configure_audio_params(self):
         if self.telephony_provider in TelephonyProvider.telephony_values():
@@ -172,7 +172,7 @@ class SarvamTranscriber(BaseTranscriber):
 
     async def _get_http_transcription(self, audio_data):
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(connector=tcp_connector())
 
         wav_data = self._convert_audio_to_wav(audio_data)
         if wav_data is None:
