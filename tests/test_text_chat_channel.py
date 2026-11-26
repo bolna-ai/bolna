@@ -418,6 +418,7 @@ def test_committed_tool_call_text_is_the_turn_the_tool_call_attaches_to():
     tm.conversation_history.append_user("no thanks", turn_id=7)
     tm._pending_assistant_history = {}
     tm._committed_assistant_sequences = set()
+    tm._rendered_before_failure = {}
     tm._sent_audio_sequences = set()
     tm._blocked_sequences = set()
     tm._pending_user_input = None

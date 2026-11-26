@@ -653,6 +653,8 @@ class TaskManager(BaseManager):
         self._response_turn_id = 0
         self._turn_msg_map = {}  # turn_id → assistant message dict ref in _messages
         self._pending_assistant_history = {}  # sequence_id -> {content, turn_id, response_uid}
+        # response_uid -> the text the synthesizer rendered before a request of that reply failed
+        self._rendered_before_failure = {}
 
         # Language detection
         self.language_detector = LanguageDetector(self.task_config["task_config"], run_id=self.run_id)
@@ -5656,6 +5658,13 @@ class TaskManager(BaseManager):
             return
 
         self._committed_assistant_sequences.add(sequence_id)
+        if staged["response_uid"] in self._rendered_before_failure:
+            rendered = self._rendered_before_failure.pop(staged["response_uid"])
+            content = self._rendered_prefix(staged["content"], rendered)
+            logger.info(f"Committing {len(content)} of {len(staged['content'])} chars: synthesis failed partway")
+            if not content:
+                return
+            staged = {**staged, "content": content}
         self._last_spoken_assistant = (staged["turn_id"], staged["content"])
         self._last_spoken_user_input = staged.get("user_input")
         stamps = {"sequence_id": sequence_id} | ({"node": staged["node"]} if staged.get("node") else {})
@@ -7851,17 +7860,35 @@ class TaskManager(BaseManager):
 
     def __keep_rendered_text(self, meta_info):
         """A reply whose synthesis failed partway keeps only the text that was rendered, in history and out of the
-        reply cache."""
+        reply cache. A reply the LLM is still writing is cut when it is committed."""
         self._response_captures.pop(meta_info.get("sequence_id"), None)
         rendered = meta_info.get("text_rendered") or ""
         response_uid = meta_info.get("response_uid")
         logger.info(f"Synthesis failed partway: keeping {len(rendered)} rendered chars of response_uid {response_uid}")
-        self.conversation_history.sync_response_after_interruption(
-            response_uid, rendered, self.update_transcript_for_interruption
-        )
+        if response_uid is None:
+            return
+        self._rendered_before_failure[response_uid] = rendered
+        self.conversation_history.sync_response_after_interruption(response_uid, rendered, self._rendered_prefix)
         self.conversation_history.sync_interim_response_after_interruption(
-            response_uid, rendered, self.update_transcript_for_interruption
+            response_uid, rendered, self._rendered_prefix
         )
+
+    def _rendered_prefix(self, original, rendered):
+        """The start of original that rendered says, matched without whitespace, since rendered joins the requests'
+        texts with single spaces."""
+        target = "".join((rendered or "").split())
+        if original is None or not target:
+            return self.update_transcript_for_interruption(original, rendered)
+        matched = 0
+        for index, char in enumerate(original):
+            if char.isspace():
+                continue
+            if char != target[matched]:
+                break
+            matched += 1
+            if matched == len(target):
+                return original[: index + 1]
+        return self.update_transcript_for_interruption(original, rendered)
 
     def __capture_reply_audio(self, message):
         """Keep a learning reply's live audio; at its end, hand the whole clip to the cache."""
