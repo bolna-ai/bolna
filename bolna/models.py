@@ -448,6 +448,8 @@ PronunciationRules = Annotated[
 ]
 
 EXPRESSIVE_TAG_PROVIDERS = (SynthesizerProvider.CARTESIA.value, SynthesizerProvider.ELEVENLABS.value)
+# Below this the LLM cut lands inside words often enough that a tag can't be put back together reliably.
+EXPRESSIVE_TAGS_MIN_BUFFER = 20
 
 
 class Synthesizer(BaseModel):
@@ -465,7 +467,8 @@ class Synthesizer(BaseModel):
 
     @model_validator(mode="after")
     def expressive_tags_only_where_supported(self):
-        if self.expressive_tags and self.provider not in EXPRESSIVE_TAG_PROVIDERS:
+        too_small = self.buffer_size is not None and self.buffer_size < EXPRESSIVE_TAGS_MIN_BUFFER
+        if self.expressive_tags and (self.provider not in EXPRESSIVE_TAG_PROVIDERS or too_small):
             self.expressive_tags = False
         return self
 

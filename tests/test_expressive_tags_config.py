@@ -13,3 +13,9 @@ def test_expressive_tags_is_off_by_default():
 def test_expressive_tags_is_kept_for_cartesia_and_forced_off_for_other_providers():
     assert Synthesizer(provider="cartesia", provider_config=CARTESIA, expressive_tags=True).expressive_tags is True
     assert Synthesizer(provider="sarvam", provider_config=SARVAM, expressive_tags=True).expressive_tags is False
+
+
+def test_expressive_tags_stays_off_when_the_llm_cut_is_too_small_to_keep_a_tag_whole():
+    for size, kept in ((1, False), (19, False), (20, True), (40, True)):
+        synth = Synthesizer(provider="cartesia", provider_config=CARTESIA, expressive_tags=True, buffer_size=size)
+        assert synth.expressive_tags is kept
