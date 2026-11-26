@@ -170,24 +170,32 @@ def parse(text):
 
 
 # Codes a caller must copy: spelled. Phone numbers and OTPs: slowed. One token each, so an LLM cut never splits them.
+_CODE = r"[A-Z][A-Z0-9-]{4,11}"
 _RULES = re.compile(
     r"(?P<phone>(?<![\w+])(?:\+91|0)?[6-9]\d{9}(?!\w))"
-    r"|(?P<id>(?<![\w@.-])[A-Z][A-Z0-9-]{4,11}(?![\w@-]))"
+    rf"|(?P<id>(?<![\w@.-]){_CODE}(?![\w@-]))"
     r"|(?P<otp>(?<![\w.,])\d{4,6}(?![\w]|[.,]\d))"
 )
 _OTP_CONTEXT = re.compile(r"\b(?:otp|code|pin|password|passcode)\b|ओटीपी|कोड|पिन|पासवर्ड", re.IGNORECASE)
+
+
+def _is_reference(code):
+    """A reference like BK48217 has a long number or mixes letters and digits; SAVE10 or FESTIVE100 is a word and a
+    short number, said as such."""
+    return (
+        re.fullmatch(_CODE, code) is not None
+        and sum(c.isdigit() for c in code) >= 2
+        and not re.search(r"[A-Z]{5}", code)
+        and not re.fullmatch(r"[A-Z]+\d{1,3}", code)
+    )
 
 
 def _rule_spans(text):
     """Words(…) segments of plain text, with codes marked for spelling and phone numbers and OTPs for slowing."""
     out, pos = [], 0
     for m in _RULES.finditer(text):
-        # A reference like BK48217 has a long number or mixes letters and digits; SAVE10 or FESTIVE100 is a word and a
-        # short number, said as such.
         code = m["id"]
-        if code and (
-            sum(c.isdigit() for c in code) < 2 or re.search(r"[A-Z]{5}", code) or re.fullmatch(r"[A-Z]+\d{1,3}", code)
-        ):
+        if code and not _is_reference(code):
             continue
         if m["otp"] and not _OTP_CONTEXT.search(" ".join(text[: m.start()].split()[-3:])):
             continue
@@ -201,11 +209,14 @@ def _rule_spans(text):
 
 
 def apply_rules(segments):
-    """The segments with the rules applied to plain text; text inside a tag is left as the tag wrote it."""
+    """The segments with the rules applied to plain text; text inside a tag is left as the tag wrote it, except a
+    reference the LLM slowed, which is spelled: LLMs slow codes they're told to leave alone."""
     out, in_spell = [], False
     for s in segments:
         if isinstance(s, RawTag) and s.xml_name == "spell":
             in_spell = not s.text.startswith("</")  # a <spell> the reply already wrote
+        if isinstance(s, Words) and s.delivery == "slow" and _is_reference(s.text.strip()):
+            s = Words(s.text.strip(), "spell")
         plain = isinstance(s, Words) and s.delivery is None and not in_spell
         out.extend(_rule_spans(s.text) if plain else [s])
     return out

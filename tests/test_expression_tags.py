@@ -213,9 +213,11 @@ def test_rules_leave_amounts_years_units_and_product_names_alone():
     assert [s for s in kept if isinstance(s, tags.Words) and s.delivery] == [tags.Words("560001", "slow")]
 
 
-def test_rules_never_touch_text_inside_a_tag():
-    kept = tags.segments("<<slow: BK48217>> ok", tags.capabilities_for("cartesia", "sonic-3.6"), rules=True)
-    assert kept[0] == tags.Words("BK48217", "slow")
+def test_rules_leave_text_inside_a_tag_as_written():
+    kept = tags.segments(
+        "<<fast: BK48217>> and <<slow: 98765 43210>> ok", tags.capabilities_for("cartesia", "sonic-3.6"), rules=True
+    )
+    assert kept[0] == tags.Words("BK48217", "fast") and kept[2] == tags.Words("98765 43210", "slow")
 
 
 REPLY = "<<apologetic>> Sorry. [[pause 400]] Your ID <<spell: BK4821>> is <<slow: 98765 43210>> ok ^^now^^ [[laugh]]"
@@ -301,6 +303,17 @@ def test_the_guide_leaves_codes_to_the_spelling_rule():
     assert tags.segments("Your reference is BK48217.", tags.capabilities_for("cartesia", "sonic-3.6"), rules=True)[
         1
     ] == tags.Words("BK48217", "spell")
+
+
+def test_a_code_the_llm_slows_is_still_spelled():
+    reply = "Ref <<slow: BK48217>>, promo <<slow: DIWALI10>>, helpline <<slow: 9876543210>>, fare <<slow: ₹1,250>>."
+    spans = tags.segments(reply, tags.capabilities_for("cartesia", "sonic-3.6"), rules=True)
+    assert {s.text: s.delivery for s in spans if isinstance(s, tags.Words) and s.delivery} == {
+        "BK48217": "spell",
+        "DIWALI10": "slow",  # a promo word is said, not spelled
+        "9876543210": "slow",
+        "₹1,250": "slow",
+    }
 
 
 def test_the_transcript_keeps_bracketed_text_that_is_not_a_tag_and_no_gap_where_a_tag_was():
