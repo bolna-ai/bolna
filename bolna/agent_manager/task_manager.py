@@ -2747,7 +2747,7 @@ class TaskManager(BaseManager):
         chunks = cls._playback_chunks(
             mark_data
             for _, mark_data in mark_events_data
-            if mark_data.get("type", "") not in ("pre_mark_message", "backchanneling")
+            if mark_data.get("type", "") not in NON_EVIDENCE_MARK_TYPES
             and (target_turn_id is None or mark_data.get("turn_id") == target_turn_id)
         )
         # Text-less marks before a mark with text are its audio: they keep their playing time, and the turn's first
@@ -2832,7 +2832,6 @@ class TaskManager(BaseManager):
                         response_heard = (raw_heard + tail_text).strip()
 
             if not response_heard:
-                pending_marks = [{"mark_id": k, "mark_data": v} for k, v in mark_events_data]
                 pending_chunks = self._pending_text_chunks(mark_events_data, target_turn_id)
 
                 if pending_chunks:
@@ -2854,8 +2853,7 @@ class TaskManager(BaseManager):
                     # No text_synthesized on marks (streaming synths). Group pending
                     # marks by turn_id and use audio duration to determine play state.
                     pending_by_turn = {}  # turn_id → {seq_ids: set, pending_dur: float}
-                    for mark in pending_marks:
-                        mark_data = mark.get("mark_data", {})
+                    for _, mark_data in mark_events_data:
                         if mark_data.get("type") == "pre_mark_message":
                             continue
                         t_id = mark_data.get("turn_id")
@@ -7887,17 +7885,16 @@ class TaskManager(BaseManager):
         """The start of original that rendered says, matched without whitespace, since rendered joins the requests'
         texts with single spaces."""
         target = "".join((rendered or "").split())
-        if original is None or not target:
-            return self.update_transcript_for_interruption(original, rendered)
-        matched = 0
-        for index, char in enumerate(original):
-            if char.isspace():
-                continue
-            if char != target[matched]:
-                break
-            matched += 1
-            if matched == len(target):
-                return original[: index + 1]
+        if original and target:
+            matched = 0
+            for index, char in enumerate(original):
+                if char.isspace():
+                    continue
+                if char != target[matched]:
+                    break
+                matched += 1
+                if matched == len(target):
+                    return original[: index + 1]
         return self.update_transcript_for_interruption(original, rendered)
 
     def __capture_reply_audio(self, message):
