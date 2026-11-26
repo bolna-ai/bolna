@@ -41,6 +41,15 @@ def test_a_committed_reply_is_cut_to_the_rendered_text():
     assert _assistant(history) == ["First sentence."]
     assert tm._last_spoken_assistant == (3, "First sentence.")
     assert 5 not in tm._response_captures
+    assert tm._rendered_before_failure == {}
+
+
+def test_a_dropped_reply_leaves_nothing_behind():
+    tm, history = _task_manager()
+    _fail(tm, "First sentence.")
+    tm._pending_assistant_history[5] = {"content": FULL, "turn_id": 3, "response_uid": "uid-1"}
+    tm._drop_staged_assistant_history(5, "test")
+    assert tm._rendered_before_failure == {}
 
 
 def test_a_reply_the_llm_finishes_after_the_failure_is_committed_cut():

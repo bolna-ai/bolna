@@ -5702,6 +5702,7 @@ class TaskManager(BaseManager):
         staged = self._pending_assistant_history.pop(sequence_id, None)
         if staged is None:
             return
+        self._rendered_before_failure.pop(staged["response_uid"], None)
         logger.info(
             "BOLNA_TRACE_TM drop_assistant_history seq=%s turn=%s response_uid=%s reason=%s",
             sequence_id,
@@ -7871,7 +7872,9 @@ class TaskManager(BaseManager):
         logger.info(f"Synthesis failed partway: keeping {len(rendered)} rendered chars of response_uid {response_uid}")
         if response_uid is None:
             return
-        self._rendered_before_failure[response_uid] = rendered
+        # A reply not committed yet is cut when it is; a committed one is cut here.
+        if meta_info.get("sequence_id") not in self._committed_assistant_sequences:
+            self._rendered_before_failure[response_uid] = rendered
         self.conversation_history.sync_response_after_interruption(response_uid, rendered, self._rendered_prefix)
         self.conversation_history.sync_interim_response_after_interruption(
             response_uid, rendered, self._rendered_prefix
