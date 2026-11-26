@@ -96,7 +96,7 @@ class GeminiLLM(BaseLLM):
 
     def _prepare_history(self, messages):
         """Translate Bolna roles (OpenAI-style) to Gemini-style roles and parts."""
-        system_instruction = ""
+        system_parts = []
         history = []
 
         for msg in messages:
@@ -105,7 +105,8 @@ class GeminiLLM(BaseLLM):
             tool_calls = msg.get("tool_calls")
 
             if role == "system":
-                system_instruction = content
+                if content:
+                    system_parts.append(content)
                 continue
 
             parts = []
@@ -183,7 +184,7 @@ class GeminiLLM(BaseLLM):
                     )
                 else:
                     history.append(types.Content(role="user", parts=[types.Part(text=f"Tool result: {content}")]))
-
+        system_instruction = "\n\n".join(system_parts)
         return system_instruction, history
 
     def _get_thinking_config(self) -> "types.ThinkingConfig | None":
