@@ -39,6 +39,7 @@ def test_a_committed_reply_is_cut_to_the_rendered_text():
     tm._stage_assistant_history(META, FULL)
     _fail(tm, "First sentence.")
     assert _assistant(history) == ["First sentence."]
+    assert tm._last_spoken_assistant == (3, "First sentence.")
     assert 5 not in tm._response_captures
 
 

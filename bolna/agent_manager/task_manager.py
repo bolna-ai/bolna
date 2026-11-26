@@ -7878,6 +7878,10 @@ class TaskManager(BaseManager):
         self.conversation_history.sync_interim_response_after_interruption(
             response_uid, rendered, self._rendered_prefix
         )
+        # The duplicate check compares a regenerated reply with what the caller heard, not what was sent.
+        if self._last_spoken_assistant and self._last_spoken_assistant[0] == meta_info.get("turn_id"):
+            cut = self._rendered_prefix(self._last_spoken_assistant[1], rendered)
+            self._last_spoken_assistant = (self._last_spoken_assistant[0], cut) if cut else None
 
     def _rendered_prefix(self, original, rendered):
         """The start of original that rendered says, matched without whitespace, since rendered joins the requests'
