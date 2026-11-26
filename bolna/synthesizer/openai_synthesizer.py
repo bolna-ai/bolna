@@ -20,6 +20,7 @@ from bolna.helpers.utils import (
     create_ws_data_packet,
     pcm_to_ulaw,
     pcm_to_wav_bytes,
+    primary_language_code,
     resample,
 )
 
@@ -38,16 +39,12 @@ _WOKEN = object()
 
 
 _LANGUAGE_CODE = re.compile(r"[a-z]{2}")
-# Bolna's language codes that differ from ISO 639-1.
-_ISO_LANGUAGE = {"od": "or"}
 
 
 def _primary_language(language):
     """ "hi-IN" to "hi", a hint the server may ignore; None for anything else ("multi", "auto"): the server infers it."""
-    if not isinstance(language, str):
-        return None
-    primary = re.split(r"[-_]", language.strip().lower(), maxsplit=1)[0]
-    return _ISO_LANGUAGE.get(primary, primary) if _LANGUAGE_CODE.fullmatch(primary) else None
+    code = primary_language_code(language)
+    return code if code and _LANGUAGE_CODE.fullmatch(code) else None
 
 
 class OPENAISynthesizer(BaseSynthesizer):
@@ -98,27 +95,22 @@ class OPENAISynthesizer(BaseSynthesizer):
         self._timed_turn_key = None
         self._timed_turn = None
         self._timed_turn_started = None
-        # A customer's endpoint asked for raw PCM is played as it arrives; mp3 needs the whole clip to decode.
+        # Raw PCM, from our servers or a customer's that asked for it, plays as it arrives; mp3 needs the whole clip.
         self.streams_pcm = bool(endpoint) and response_format == "pcm"
         self.use_mulaw = kwargs.get("use_mulaw", False)
         if self.streams_pcm:
             target_rate = MULAW_SAMPLE_RATE if self.use_mulaw else self.sample_rate
             self.pcm_resampler = StreamingPcmResampler(self.pcm_sample_rate, target_rate)
-            self.pcm_trimmer = PcmEdgeTrimmer(self.pcm_sample_rate)
-            # (sequence_id, text): the end of a piece that stops mid-sentence, spoken with the next piece.
-            self._held_text = None
+            # The end of a piece that stops mid-sentence, spoken with the turn's next piece.
+            self._held_text = ""
             self._interruptions = 0
             # Set while a read is in flight; handle_interruption resolves it to stop waiting on the server.
             self._wake = None
             self._stream_sequence = None
-            # Whether the open turn has played audio: a request failing after that costs the turn, not the call.
-            self._turn_audio_sent = False
-            # A turn closed early by a failed request; its later pieces are dropped.
-            self._dropped_turn = None
+            # The open turn was closed early by a failed request; its later pieces are dropped.
+            self._turn_dropped = False
             # The text of the open turn's requests that ended in full.
             self._turn_rendered = []
-            # How much of the last request's pause went out before its closing packet.
-            self._closing_pause_ms = 0
 
     def supports_websocket(self):
         return True
@@ -188,16 +180,19 @@ class OPENAISynthesizer(BaseSynthesizer):
             raise SSRFError(f"Custom TTS endpoint rejected: {reason}") from None
         self._endpoint_checked = True
 
+    def _speech_request(self, text, response_format):
+        return {
+            "model": self.model,
+            "voice": self.voice,
+            "response_format": response_format,
+            "input": text,
+            "speed": self.speed,
+            "extra_body": self._request_extras(),
+        }
+
     async def _generate_http(self, text, response_format="mp3"):
         await self._check_endpoint()
-        spoken_response = await self.async_client.audio.speech.create(
-            model=self.model,
-            voice=self.voice,
-            response_format=response_format,
-            input=text,
-            speed=self.speed,
-            extra_body=self._request_extras(),
-        )
+        spoken_response = await self.async_client.audio.speech.create(**self._speech_request(text, response_format))
         buffer = io.BytesIO()
         for chunk in spoken_response.iter_bytes(chunk_size=4096):
             buffer.write(chunk)
@@ -213,14 +208,13 @@ class OPENAISynthesizer(BaseSynthesizer):
         audio = trimmer.feed(audio or b"") + trimmer.finish(FINAL_TAIL_MS)
         return pcm_to_wav_bytes(audio, sample_rate=self.pcm_sample_rate) if audio else None
 
-    # ------------------------------------------------------------------
-    # generate / push — use base _generate_http_loop
-    # ------------------------------------------------------------------
-
     async def generate(self):
         loop = self._generate_pcm_stream_loop() if self.streams_pcm else self._generate_http_loop()
         async for packet in loop:
             yield packet
+
+    async def cleanup(self):
+        await self.async_client.close()
 
     # ------------------------------------------------------------------
     # Streamed PCM: one request per text piece, audio forwarded chunk by chunk
@@ -249,10 +243,8 @@ class OPENAISynthesizer(BaseSynthesizer):
 
     def _reset_pcm_stream(self):
         self.pcm_resampler.reset()
-        self.pcm_trimmer.reset()
-        self._held_text = None
-        self._turn_audio_sent = False
-        self._dropped_turn = None
+        self._held_text = ""
+        self._turn_dropped = False
         self._turn_rendered = []
         self.first_chunk_generated = False
 
@@ -264,27 +256,23 @@ class OPENAISynthesizer(BaseSynthesizer):
         return pcm_to_ulaw(audio) if self.use_mulaw else audio
 
     async def _stream_pcm(self, text, tail_ms, pad_tail):
-        """One request as (audio, closing) packets: tail_ms of silence after the speech, padded to it when pad_tail."""
+        """One request as (audio, closing_pause_ms) packets, closing_pause_ms None until the closing one: tail_ms of
+        silence after the speech, padded to it when pad_tail."""
         await self._check_endpoint()
         # Silence inside the speech passes on as it arrives, up to the tail's length; only the excess waits.
-        self.pcm_trimmer.reset(pass_ms=tail_ms)
+        trimmer = PcmEdgeTrimmer(self.pcm_sample_rate, pass_ms=tail_ms)
         async with self.async_client.audio.speech.with_streaming_response.create(
-            model=self.model,
-            voice=self.voice,
-            response_format="pcm",
-            input=text,
-            speed=self.speed,
-            extra_body=self._request_extras(),
+            **self._speech_request(text, "pcm")
         ) as response:
             async for chunk in response.iter_bytes():
-                audio = self._convert_pcm_chunk(self.pcm_trimmer.feed(chunk))
+                audio = self._convert_pcm_chunk(trimmer.feed(chunk))
                 if audio:
-                    yield audio, False
-        # Always sent, even as a frame of silence: the request's text rides on its closing packet. Up to tail_ms of the
-        # pause was passed on with the speech; the closing packet holds the rest.
-        self._closing_pause_ms = self.pcm_trimmer.passed_ms
-        tail = self.pcm_trimmer.finish(tail_ms, pad=pad_tail) or bytes(self.pcm_trimmer.frame_bytes)
-        yield self._convert_pcm_chunk(tail), True
+                    yield audio, None
+        # Always sent, even as a frame of silence: the request's text rides on its closing packet, which says how much
+        # of the pause already went out with the speech.
+        closing_pause_ms = trimmer.passed_ms
+        tail = trimmer.finish(tail_ms, pad=pad_tail) or bytes(trimmer.frame_bytes)
+        yield self._convert_pcm_chunk(tail), closing_pause_ms
 
     async def _next_audio(self, stream):
         """The stream's next (audio, closing), None at its end, or _WOKEN once handle_interruption ends the wait.
@@ -321,6 +309,22 @@ class OPENAISynthesizer(BaseSynthesizer):
             return _WOKEN
         return reading.result()
 
+    def _audio_packet(self, audio, meta_info, text, closing_pause_ms, started):
+        """A packet of one request's audio. Only the turn's end packet closes it; the closing packet carries the text."""
+        packet_meta = {**meta_info, "end_of_llm_stream": False, "text_synthesized": ""}
+        if closing_pause_ms is not None:
+            packet_meta["text_synthesized"] = f"{text} "
+            packet_meta["closing_pause_ms"] = closing_pause_ms
+            self._turn_rendered.append(text)
+        if "first_result_latency_ms" not in self._timed_turn:
+            latency = time.perf_counter() - started
+            self._timed_turn["first_result_latency_ms"] = round(latency * 1000)
+            self._upsert_turn_latency(dict(self._timed_turn))
+            packet_meta["synthesizer_latency"] = latency
+        self._stamp_first_chunk(packet_meta)
+        self._stamp_mark_id(packet_meta)
+        return create_ws_data_packet(audio, packet_meta)
+
     def _record_failed_request(self, error, sequence_id):
         logger.error(f"Speech request failed after the turn's audio began, closing sequence_id {sequence_id}: {error}")
         if self.task_manager_instance is not None:
@@ -341,16 +345,14 @@ class OPENAISynthesizer(BaseSynthesizer):
                 # Nothing of an abandoned reply's stream leaks into the next one.
                 self._reset_pcm_stream()
                 self._stream_sequence = sequence_id
-            if self._dropped_turn == sequence_id:
+            if self._turn_dropped:
                 if final:
-                    self._dropped_turn = None
+                    self._turn_dropped = False
                 continue
 
-            held = self._held_text[1] if self._held_text and self._held_text[0] == sequence_id else ""
-            text = f"{held} {text or ''}".strip()
+            text = f"{self._held_text} {text or ''}".strip()
             # A piece that stops mid-sentence would be rendered as a sentence of its own; its end waits for the rest.
-            text, rest, pause_ms = (text, "", FINAL_TAIL_MS) if final else split_speakable(text)
-            self._held_text = (sequence_id, rest) if rest else None
+            text, self._held_text, pause_ms = (text, "", FINAL_TAIL_MS) if final else split_speakable(text)
 
             meta_info["format"] = "mulaw" if self.use_mulaw else "pcm"
             meta_info["text"] = text
@@ -369,7 +371,6 @@ class OPENAISynthesizer(BaseSynthesizer):
                         return "interrupted"
                     return None if self.should_synthesize_response(sequence_id) else "retired"
 
-                first_audio = True
                 try:
                     async with aclosing(self._stream_pcm(text, pause_ms, pad_tail=not final)) as stream:
                         # Checked before every read too: a barge-in while this loop sat at its yield cancelled none.
@@ -380,7 +381,7 @@ class OPENAISynthesizer(BaseSynthesizer):
                                 # A request nobody is waiting for any more must not end the call.
                                 if stopped():
                                     continue
-                                if not self._turn_audio_sent:
+                                if not self.first_chunk_generated:
                                     raise
                                 self._record_failed_request(e, sequence_id)
                                 outcome = "failed"
@@ -389,32 +390,9 @@ class OPENAISynthesizer(BaseSynthesizer):
                                 break
                             if item is _WOKEN or stopped():
                                 continue
-                            audio, closing = item
-                            if not audio:
-                                continue
-                            # Only the end packet closes the turn; audio that says so releases a hangup wait early.
-                            # The heard-text tracker credits a request's text once its closing packet is played.
-                            packet_meta = {
-                                **meta_info,
-                                "end_of_llm_stream": False,
-                                "text_synthesized": f"{text} " if closing else "",
-                            }
-                            if closing:
-                                # The speech ended this long before the closing packet: its text was heard by then.
-                                packet_meta["closing_pause_ms"] = self._closing_pause_ms
-                            if first_audio:
-                                first_audio = False
-                                if "first_result_latency_ms" not in self._timed_turn:
-                                    latency = time.perf_counter() - started
-                                    self._timed_turn["first_result_latency_ms"] = round(latency * 1000)
-                                    self._upsert_turn_latency(dict(self._timed_turn))
-                                    packet_meta["synthesizer_latency"] = latency
-                            self._stamp_first_chunk(packet_meta)
-                            self._stamp_mark_id(packet_meta)
-                            self._turn_audio_sent = True
-                            if closing:
-                                self._turn_rendered.append(text)
-                            yield create_ws_data_packet(audio, packet_meta)
+                            audio, closing_pause_ms = item
+                            if audio:
+                                yield self._audio_packet(audio, meta_info, text, closing_pause_ms, started)
                 except asyncio.CancelledError:
                     # Cancelled from outside, as a pool switch does: the leg's next reply starts clean.
                     self._reset_pcm_stream()
@@ -427,8 +405,11 @@ class OPENAISynthesizer(BaseSynthesizer):
                     logger.info(f"Stopping stream: sequence_id {sequence_id} not current")
                     self._reset_pcm_stream()
                     # The consumer clears its playing flag on a retired sequence's end packet.
-                    retired = {"sequence_id": sequence_id, "end_of_synthesizer_stream": True}
-                    retired["format"] = meta_info["format"]
+                    retired = {
+                        "sequence_id": sequence_id,
+                        "end_of_synthesizer_stream": True,
+                        "format": meta_info["format"],
+                    }
                     yield create_ws_data_packet(b"\x00", retired)
                     continue
                 if outcome == "failed":
@@ -441,7 +422,7 @@ class OPENAISynthesizer(BaseSynthesizer):
             if final or outcome == "failed":
                 self._reset_pcm_stream()
                 if not final:
-                    self._dropped_turn = sequence_id
+                    self._turn_dropped = True
                 self._stamp_end_of_stream(meta_info)
                 self._stamp_mark_id(meta_info)
                 yield create_ws_data_packet(b"\x00", meta_info)

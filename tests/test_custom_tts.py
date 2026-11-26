@@ -378,7 +378,7 @@ class TestPcmStreaming:
         gate = asyncio.Event()
 
         async def stalled(text, tail_ms, pad_tail):
-            yield _A, False
+            yield _A, None
             if text == "hello":
                 await gate.wait()
 
@@ -399,7 +399,7 @@ class TestPcmStreaming:
         gate = asyncio.Event()
 
         async def stalled(text, tail_ms, pad_tail):
-            yield _A, False
+            yield _A, None
             await gate.wait()
 
         synth._stream_pcm = stalled
@@ -418,7 +418,7 @@ class TestPcmStreaming:
         gate = asyncio.Event()
 
         async def stalled(text, tail_ms, pad_tail):
-            yield _A, False
+            yield _A, None
             try:
                 await gate.wait()
             finally:
@@ -441,7 +441,7 @@ class TestPcmStreaming:
         gate = asyncio.Event()
 
         async def stalled(text, tail_ms, pad_tail):
-            yield _A, False
+            yield _A, None
             if text == "hello":
                 await gate.wait()
 
@@ -586,7 +586,7 @@ class TestSentenceRequests:
         stream = synth.generate()
         await stream.__anext__()
         await synth.handle_interruption()
-        assert synth._held_text is None
+        assert synth._held_text == ""
 
 
 class TestBolnaProvider:
