@@ -34,6 +34,7 @@ def _wait_tm(mark_data, grace=0.5):
     marks.update_data("m1", mark_data)
     tm.mark_event_meta_data = marks
     tm.conversation_ended = False
+    tm.has_transfer = False
     tm.hangup_mark_event_timeout = grace
     tm.tools = {"input": SimpleNamespace(input_stream_ended=False)}
     tm._turn_audio_flushed = asyncio.Event()

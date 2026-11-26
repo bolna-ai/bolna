@@ -28,6 +28,7 @@ def _task_manager_with_pending_goodbye():
 
     task_manager = TaskManager.__new__(TaskManager)
     task_manager.conversation_ended = False
+    task_manager.has_transfer = False
     task_manager.hangup_mark_event_timeout = 10
     task_manager._turn_audio_flushed = asyncio.Event()
     task_manager._turn_audio_flushed.set()
