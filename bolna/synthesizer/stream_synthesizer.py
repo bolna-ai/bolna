@@ -75,7 +75,7 @@ class StreamSynthesizer(BaseSynthesizer):
         # Expressive tags (off unless the agent turns them on): a tag a piece ended inside, and the reply's pause budget.
         self.expressive_tags = bool(kwargs.get("expressive_tags"))
         self._held_tag = ("", None)
-        self._pause_budget = (None, expression_tags.MAX_PAUSES_PER_REPLY)
+        self._pause_budget = (None, expression_tags.MAX_PAUSES_PER_REPLY, False)  # (reply, pauses left, after a pause)
 
     # ------------------------------------------------------------------
     # Subclass hooks (override these)
@@ -187,31 +187,44 @@ class StreamSynthesizer(BaseSynthesizer):
 
         end_of_llm_stream = meta_info.get("end_of_llm_stream", False)
         if self.expressive_tags:
-            text = self._expressive_text(text, meta_info.get("sequence_id"), end_of_llm_stream)
+            piece = text or ""
+            text, spoken = self._expressive_text(piece, meta_info.get("sequence_id"), end_of_llm_stream)
+            # Billing and the end-of-turn match follow the words the voice speaks, not the tags.
+            self.synthesized_characters += len(spoken) - len(piece)
+            self.current_sequence_chars += len(spoken) - len(piece)
+            self.current_text = spoken
             if not text and not end_of_llm_stream:
                 return  # the whole piece is an unfinished tag: it goes out with the next piece
         self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
         self.text_queue.append(meta_info)
 
-    def _expressive_text(self, text, sequence_id, end_of_stream):
-        """The piece with its expressive tags in this voice's own syntax, and every tag it can't perform removed.
+    def _expressive_text(self, piece, sequence_id, end_of_stream):
+        """(text for the voice, words it speaks): the piece with its expressive tags in this voice's own syntax, and
+        every tag it can't perform removed.
 
         A tag the piece ends inside waits for the next piece of the same reply; a new reply drops it."""
         held, held_sequence = self._held_tag
-        if held and held_sequence == sequence_id:
-            text = f"{held} {text or ''}"  # the LLM cut dropped exactly one space
-        if self._pause_budget[0] != sequence_id:
-            self._pause_budget = (sequence_id, expression_tags.MAX_PAUSES_PER_REPLY)
-        ready, held = expression_tags.split_unfinished(text or "", final=end_of_stream)
+        text = f"{held} {piece}" if held and held_sequence == sequence_id else piece  # the LLM cut dropped one space
+        reply = (sequence_id, self.current_turn_start_time)  # canned messages share a sequence_id but not a turn
+        if self._pause_budget[0] != reply:
+            self._pause_budget = (reply, expression_tags.MAX_PAUSES_PER_REPLY, False)
+        _, pauses_left, after_pause = self._pause_budget
+        # A canned line (sequence -1) is always pushed whole, even when its end is deferred (a handoff).
+        last_piece = end_of_stream or sequence_id == -1
+        ready, held = expression_tags.split_unfinished(text, final=last_piece)
         self._held_tag = (held, sequence_id)
         kept = expression_tags.segments(
-            ready, self.expression_capabilities(), getattr(self, "language", None), self._pause_budget[1]
+            ready,
+            self.expression_capabilities(),
+            getattr(self, "language", None),
+            pauses_left,
+            rules=True,
+            after_pause=after_pause,
+            end_of_reply=last_piece,
         )
-        self._pause_budget = (
-            sequence_id,
-            self._pause_budget[1] - sum(isinstance(s, expression_tags.Pause) for s in kept),
-        )
-        return self._format_tags(kept)
+        pauses_left -= sum(isinstance(s, expression_tags.Pause) for s in kept)
+        self._pause_budget = (reply, pauses_left, expression_tags.ends_with_pause(kept, after_pause))
+        return self._format_tags(kept), expression_tags.words_only(kept)
 
     def expression_capabilities(self):
         """Provider hook: the tags this voice performs. By default, the capability table's entry for its model."""
