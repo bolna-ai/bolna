@@ -23,6 +23,7 @@ from collections import deque
 import websockets
 
 from .base_synthesizer import BaseSynthesizer
+from bolna.helpers import expression_tags
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
 
@@ -70,6 +71,11 @@ class StreamSynthesizer(BaseSynthesizer):
         self.current_sequence_chars = 0
         # Socket this turn's text was attempted on; only that socket's loss settles the turn.
         self.current_turn_socket = None
+
+        # Expressive tags (off unless the agent turns them on): a tag a piece ended inside, and the reply's pause budget.
+        self.expressive_tags = bool(kwargs.get("expressive_tags"))
+        self._held_tag = ("", None)
+        self._pause_budget = (None, expression_tags.MAX_PAUSES_PER_REPLY)
 
     # ------------------------------------------------------------------
     # Subclass hooks (override these)
@@ -180,8 +186,41 @@ class StreamSynthesizer(BaseSynthesizer):
         self._on_push(meta_info, text)
 
         end_of_llm_stream = meta_info.get("end_of_llm_stream", False)
+        if self.expressive_tags:
+            text = self._expressive_text(text, meta_info.get("sequence_id"), end_of_llm_stream)
+            if not text and not end_of_llm_stream:
+                return  # the whole piece is an unfinished tag: it goes out with the next piece
         self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
         self.text_queue.append(meta_info)
+
+    def _expressive_text(self, text, sequence_id, end_of_stream):
+        """The piece with its expressive tags in this voice's own syntax, and every tag it can't perform removed.
+
+        A tag the piece ends inside waits for the next piece of the same reply; a new reply drops it."""
+        held, held_sequence = self._held_tag
+        if held and held_sequence == sequence_id:
+            text = f"{held} {text or ''}"  # the LLM cut dropped exactly one space
+        if self._pause_budget[0] != sequence_id:
+            self._pause_budget = (sequence_id, expression_tags.MAX_PAUSES_PER_REPLY)
+        ready, held = expression_tags.split_unfinished(text or "", final=end_of_stream)
+        self._held_tag = (held, sequence_id)
+        kept = expression_tags.segments(
+            ready, self.expression_capabilities(), getattr(self, "language", None), self._pause_budget[1]
+        )
+        self._pause_budget = (
+            sequence_id,
+            self._pause_budget[1] - sum(isinstance(s, expression_tags.Pause) for s in kept),
+        )
+        return self._format_tags(kept)
+
+    def expression_capabilities(self):
+        """Provider hook: the tags this voice performs. By default, the capability table's entry for its model."""
+        return expression_tags.capabilities_for(self.provider_name, getattr(self, "model", None))
+
+    def _format_tags(self, segments):
+        """Provider hook: the segments in this voice's own syntax. By default the words, plus the provider tags written
+        in the text that the voice performs; neutral tags need a provider override to be performed."""
+        return expression_tags.kept_text(segments)
 
     def _stamp_turn_start(self, meta_info):
         """Only stamp on the first push of a new turn (don't re-stamp on subsequent chunks)."""

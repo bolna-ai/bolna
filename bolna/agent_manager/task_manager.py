@@ -2078,6 +2078,8 @@ class TaskManager(BaseManager):
                 synthesizers = {}
                 for label, cfg in multilingual.items():
                     cfg = dict(cfg)  # shallow copy so pops don't mutate original
+                    # Every language's voice uses the agent's setting, so a voice switched to mid-call handles tags too.
+                    cfg.setdefault("expressive_tags", synth_config.get("expressive_tags", False))
                     caching = cfg.pop("caching", True)
                     provider_name = cfg.pop("provider")
                     provider_config = cfg.pop("provider_config")
