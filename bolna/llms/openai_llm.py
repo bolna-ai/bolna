@@ -46,6 +46,10 @@ load_dotenv()
 RESPONSES_WS_HOSTS = frozenset({"api.openai.com", "eu.api.openai.com", "in.api.openai.com"})
 
 
+# OpenAI cannot continue from the chained previous_response_id: the turn is re-run on full history
+STALE_CHAIN_ERROR_CODES = ("previous_response_not_found", "unsupported_native_response_reference")
+
+
 def responses_ws_url(base_url: Optional[str]) -> Optional[str]:
     """The Responses WebSocket URL for this endpoint, or None when it only streams over HTTP."""
     host = urlparse(base_url).hostname if base_url else "api.openai.com"
@@ -150,19 +154,6 @@ class OpenAIWSConnection:
                 if self._needs_reset:
                     self.discard_socket()
 
-    async def cancel_response(self, response_id: str):
-        """Best-effort cancel: signal the server to terminate the in-flight
-        response. We do not drain events here — the concurrent stream_response
-        loop is the sole recv consumer and will see the resulting terminal
-        event itself. Holding the lock would block the cancel until the
-        stream completes naturally, defeating its purpose."""
-        if self._ws is None or self._ws.state is not WSState.OPEN:
-            return
-        try:
-            await self._ws.send(json.dumps({"type": ResponseStreamEvent.CANCEL, "response_id": response_id}))
-        except Exception:
-            pass
-
     async def disconnect(self):
         # Settle any in-flight pre-warm first: it assigns _ws after the fact, so closing
         # before it lands would leave a live socket nobody owns.
@@ -265,7 +256,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
         # http2=False: cancelled h2 requests leak streams until the connection pins at 100 (barge-in)
-        http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False)
+        http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False, guarded=is_custom)
 
         if compatible_endpoint:
             base_url = kwargs.get("base_url")
@@ -353,7 +344,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             "stream_options": {"include_usage": True},
         }
 
-        if not is_reasoning_model(self.model):
+        if not is_reasoning_model(self.model_family):
             model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
@@ -667,8 +658,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 if evt_type == ResponseStreamEvent.ERROR:
                     error_info = evt.get("error", {})
                     error_code = error_info.get("code", "")
-                    if error_code == "previous_response_not_found" and self.previous_response_id:
-                        logger.warning(f"WS previous_response_id not found, retrying with full history")
+                    if error_code in STALE_CHAIN_ERROR_CODES and self.previous_response_id:
+                        logger.warning(f"WS previous_response_id unusable ({error_code}), retrying with full history")
                         async for chunk in self._retry_full_history(
                             messages, synthesize, request_json, meta_info, tool_choice, tools
                         ):
@@ -890,11 +881,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.started_streaming = False
 
     def cancel_in_flight_response(self):
-        """Cancel the in-flight WS response and drop the chain — a lost cancel race can leave a
-        server-committed function_call this client never saw, poisoning every later chained
-        request. Chain state only: the hint sync_history sets right after this must survive."""
+        """Drop the WS chain, keeping the hint. No response.cancel: OpenAI answers it with an error frame."""
         if self._ws_transport and self.previous_response_id:
-            asyncio.ensure_future(self._ws_transport.cancel_response(self.previous_response_id))
             self.previous_response_id = None
             self._in_flight_response_id = None
             self._pending_call_ids = set()

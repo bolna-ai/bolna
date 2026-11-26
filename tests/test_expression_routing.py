@@ -458,7 +458,11 @@ class TestPriorityOrdering:
         )
 
         # With enough turns, expression edge (priority 1) should match first
-        history = [{"role": "user", "content": f"msg {i}"} for i in range(5)]
+        history = [
+            msg
+            for i in range(5)
+            for msg in ({"role": "assistant", "content": f"ask {i}"}, {"role": "user", "content": f"msg {i}"})
+        ]
         agent.context_data = {}
 
         result = await agent.decide_next_node_with_functions(history)

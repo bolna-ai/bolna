@@ -125,6 +125,7 @@ class LLMProvider(str, Enum):
     GOOGLE = "google"
     BOLNA = "bolna"
     SARVAM = "sarvam"
+    BEDROCK = "bedrock"
 
     @classmethod
     def all_values(cls):
@@ -177,7 +178,6 @@ class ResponseStreamEvent(str, Enum):
 
     # WebSocket client commands
     CREATE = "response.create"
-    CANCEL = "response.cancel"
 
     @classmethod
     def terminal_events(cls):

@@ -14,6 +14,8 @@ import json
 import uuid
 import copy
 import base64
+import difflib
+import unicodedata
 import pytz
 import websockets
 
@@ -27,6 +29,7 @@ from bolna.constants import (
     CHAT_WATCHDOG_TICK_S,
     DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION,
+    IS_USER_ONLINE_MESSAGE,
     DTMF_MESSAGE_PREFIX,
     DUPLICATE_RESPONSE_SIMILARITY,
     FILLER_DICT,
@@ -62,6 +65,8 @@ from bolna.constants import (
     WEBCALL_TTS_SAMPLE_RATE,
 )
 from bolna.helpers.function_calling_helpers import (
+    SSRFError,
+    outbound_connector,
     redacted_url,
     resolve_tool_name,
     trigger_api,
@@ -69,6 +74,7 @@ from bolna.helpers.function_calling_helpers import (
     prepare_api_request,
     validate_outbound_url,
 )
+from bolna.helpers.prompt_transcript import with_prompt_transcript
 from bolna.helpers.conversation_history import ConversationHistory
 from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
@@ -102,6 +108,9 @@ from bolna.helpers.utils import (
     create_ws_data_packet,
     get_file_names_in_directory,
     get_raw_audio_bytes,
+    fixed_line_clip_key,
+    has_template_variables,
+    tts_voice_identity,
     is_valid_md5,
     get_required_input_types,
     format_messages,
@@ -117,14 +126,14 @@ from bolna.helpers.utils import (
     scalar_fields,
     static_node_audio_key,
     static_node_ends_call,
+    graph_opening_language,
+    graph_opening_node,
     clean_json_string,
     wav_bytes_to_pcm,
     mp3_bytes_to_pcm,
     convert_to_request_log,
     yield_chunks_from_memory,
     process_task_cancellation,
-    audio_to_mulaw8k,
-    audio_to_pcm,
     pcm_to_ulaw,
     ulaw_to_pcm,
     format_error_message,
@@ -133,6 +142,8 @@ from bolna.helpers.utils import (
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.tts_audio_monitor import TtsAudioMonitor
+from ..helpers.tts_clips import clip_pieces, load_fixed_line_clip, recall_clip, render_clip, wire_seconds
+from ..helpers.tts_response_cache import Capture, TtsResponseCache
 from ..helpers.observable_variable import ObservableVariable
 from bolna.models import MemoryVariable, S2SConfig, WebSearchConfig, tts_render_settings
 from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
@@ -394,6 +405,14 @@ class TaskManager(BaseManager):
         self.kwargs = kwargs
         self.kwargs["task_manager_instance"] = self
         self.provider_api_keys = self.kwargs.pop("provider_api_keys", None) or {}
+        # scope, min_plays, max_age_days and the record_play counter for replaying repeated replies.
+        self.tts_response_cache_config = self.kwargs.pop("tts_response_cache", None)
+        self.tts_response_cache = None
+        self._response_captures = {}
+        self._synth_pushed_sequences = set()
+        self._replayed_reply_keys = set()
+        # Characters played from stored audio instead of being synthesized: billed, but not rendered.
+        self.synthesizer_cached_characters = 0
         # Optional load-signal callback (set by the caller only for PTU-served calls).
         self.on_turn_usage = kwargs.get("on_turn_usage")
         # Fired instead of on_turn_usage when another backend served the turn.
@@ -777,6 +796,10 @@ class TaskManager(BaseManager):
         # Handoff clips pre-rendered per language on that language's OWN voice (text and
         self.handoff_audio_cache = {}
         self.handoff_prewarm_task = None
+        # Voice digest per synthesizer pool label (None for a single synthesizer), keying stored fixed-line clips.
+        self.fixed_line_voices = {}
+        # Message categories whose configured text is the same on every call, so its clip can be stored.
+        self.fixed_line_categories = set()
         # In-flight speculative follow-up generation;
         # single slot is safe because decisions are serialized by language_switch_lock.
         self._spec_followup_task = None
@@ -820,6 +843,8 @@ class TaskManager(BaseManager):
             self.check_user_online_message_config = self.conversation_config.get(
                 "check_user_online_message", DEFAULT_USER_ONLINE_MESSAGE
             )
+            if not has_template_variables(self.check_user_online_message_config):
+                self.fixed_line_categories.add(IS_USER_ONLINE_MESSAGE)
             self.user_online_message_in_llm_history = self.conversation_config.get(
                 "user_online_message_in_llm_history", False
             )
@@ -869,6 +894,8 @@ class TaskManager(BaseManager):
                     """
 
                 self.call_hangup_message_config = self.conversation_config.get("call_hangup_message", None)
+                if not has_template_variables(self.call_hangup_message_config):
+                    self.fixed_line_categories.add("agent_hangup")
                 if self.call_hangup_message_config and self.context_data and not self.is_web_based_call:
                     if isinstance(self.call_hangup_message_config, dict):
                         self.call_hangup_message_config = {
@@ -951,7 +978,6 @@ class TaskManager(BaseManager):
                 if self.max_silence_repeats is None:
                     self.max_silence_repeats = DEFAULT_MAX_SILENCE_REPEATS
                 self._silence_repeats_sent = 0
-                self._silence_period = None
 
                 # Handling accidental interruption
                 self.number_of_words_for_interruption = self.conversation_config.get(
@@ -1020,7 +1046,7 @@ class TaskManager(BaseManager):
 
         # Language switching, gated per call by the LANGUAGE_SWITCH feature flag
         # (tools_config["llm_language_switch"], see __language_switch_enabled):
-        #   enabled  → dedicated Switch LLM driven by the unbiased Saaras v3
+        #   enabled  → dedicated Switch LLM driven by the unbiased Saaras v4
         #              detector (handle_language_switch); the main LLM carries
         #              no switch tool.
         #   disabled → legacy flow: switch_language tool on the main LLM + the
@@ -1079,6 +1105,7 @@ class TaskManager(BaseManager):
         # self.__setup_tasks(llm)
 
         # setting llm
+        self.opening_node = None
         if self.llm_config is not None:
             agent_type = self.llm_agent_config.get("agent_type", "simple_llm_agent")
             # Graph and knowledge-base agents build their own LLM; one built here would never be used or closed.
@@ -1090,6 +1117,7 @@ class TaskManager(BaseManager):
             # Setup tasks
             agent_params = {"llm": llm, "agent_type": agent_type}
             self.__setup_tasks(**agent_params)
+            self._arm_opening_node()
 
         elif self.__is_multiagent():
             # Setup task for multiagent conversation
@@ -1237,8 +1265,10 @@ class TaskManager(BaseManager):
             try:
                 # ``target_url`` is user-controlled only on the direct fallback path;
                 # the dispatch URL is operator-set env config and may be internal.
+                connector = None
                 if not dispatch_url:
                     await validate_outbound_url(target_url)
+                    connector = outbound_connector(target_url)
                 convert_to_request_log(
                     str(payload),
                     meta_info,
@@ -1248,7 +1278,9 @@ class TaskManager(BaseManager):
                     run_id=self.run_id,
                     tool_name=webhook_tool_name,
                 )
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with aiohttp.ClientSession(
+                    connector=connector, timeout=aiohttp.ClientTimeout(total=10)
+                ) as session:
                     # allow_redirects=False: a redirect hop is not re-validated and would
                     # reopen the SSRF path past the pre-flight check above.
                     async with session.post(target_url, json=payload, allow_redirects=False) as response:
@@ -1269,6 +1301,10 @@ class TaskManager(BaseManager):
                             status_code=response.status,
                             content_type=response.headers.get("Content-Type"),
                         )
+            except SSRFError as exc:
+                # The reason names the resolved address; the recorded detail is shown to the customer.
+                logger.warning(f"pre_call_webhook to {target_url} blocked: {exc}")
+                self._finalize_api_call_detail(api_call_detail, error="blocked by outbound URL policy")
             except Exception as exc:
                 logger.warning(f"pre_call_webhook to {target_url} failed (ignored): {exc}")
                 self._finalize_api_call_detail(api_call_detail, error=exc)
@@ -1454,6 +1490,24 @@ class TaskManager(BaseManager):
                 llm.cancel_in_flight_response()
         except Exception as e:
             logger.debug(f"cancel_in_flight_response failed: {e}")
+
+    def _arm_opening_node(self):
+        """The static start node that opened the call keeps its own silence repeat and barge-in threshold
+        from the opening, not only once routing first lands on it."""
+        self.opening_node = graph_opening_node(self.task_config)
+        if self.opening_node:
+            self.repeat_after_silence_seconds = self.opening_node.get("repeat_after_silence_seconds")
+            self._apply_node_interruption_threshold(self.opening_node)
+
+    def __opening_node_ends_call(self) -> bool:
+        """An end_call opening node hangs up once its message has played. A hangup already under way keeps
+        its own reason, and an opening that sent no audio leaves the node to speak on the caller's turn."""
+        return (
+            self.opening_node is not None
+            and static_node_ends_call(self.opening_node)
+            and not (self.hangup_triggered or self._end_call_in_progress or self.conversation_ended)
+            and bool(self.tools["output"].get_welcome_message_sent_ts())
+        )
 
     def _apply_node_interruption_threshold(self, node):
         """A node may override the call-level word threshold; None inherits it. Written to both
@@ -1957,10 +2011,6 @@ class TaskManager(BaseManager):
                         "language_switch_lid_provider"
                     ) or os.getenv("LID_PROVIDER", "sarvam")
                     lid_config = {"telephony_provider": provider}
-                    # Sarvam-only model override (language_switch_saaras_v4_lid flag).
-                    lid_model = self.task_config.get("tools_config", {}).get("language_switch_lid_model")
-                    if lid_model:
-                        lid_config["sarvam_model"] = lid_model
                     switch_enabled = self.__language_switch_enabled()
                     if switch_enabled:
                         # language_switch_llm (azure or jev flag) overrides the model; absent → default.
@@ -1989,7 +2039,7 @@ class TaskManager(BaseManager):
                     logger.info(
                         f"TranscriberPool created with labels={list(transcribers.keys())}, "
                         f"active='{active_label}', language_switch_enabled={switch_enabled}, "
-                        f"lid_provider={LID_PROVIDER!r}, lid_model={lid_model or 'default'}, "
+                        f"lid_provider={LID_PROVIDER!r}, "
                         f"legacy_lid_heuristic={not switch_enabled}, lazy_legs={self.tools['transcriber'].lazy_legs}"
                     )
                     if switch_enabled:
@@ -2091,6 +2141,9 @@ class TaskManager(BaseManager):
                     cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
                     leg_kwargs = self.__pool_leg_kwargs(synthesizer_kwargs, "synthesizer_key", provider_name)
                     synthesizers[label] = cls(**cfg, **provider_config, **leg_kwargs, caching=caching)
+                    self.fixed_line_voices[label] = tts_voice_identity(
+                        provider_name, provider_config, cfg.get("pronunciation_rules")
+                    )
 
                 # Use active synth's provider/voice for logging metadata, and buffer_size
                 # Note that in the current state, buffer_size of other synth configs is ignored
@@ -2139,6 +2192,9 @@ class TaskManager(BaseManager):
                 provider_config,
                 synth_config.get("pronunciation_rules"),
                 on_platform_key=not self.kwargs.get("synthesizer_key"),
+            )
+            self.fixed_line_voices[None] = tts_voice_identity(
+                self.synthesizer_provider, provider_config, synth_config.get("pronunciation_rules")
             )
             if self.turn_based_conversation:
                 synth_config["audio_format"] = "mp3"  # Hard code mp3 if we're connected through dashboard
@@ -2246,6 +2302,8 @@ class TaskManager(BaseManager):
             injected_cfg["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get("buffer_size")
             injected_cfg["language"] = self.language
             injected_cfg["turn_based_conversation"] = self.turn_based_conversation
+            if llm_config.get("static_start_opening"):
+                injected_cfg["opening_language"] = graph_opening_language(self.task_config)
             injected_cfg["execution_id"] = self.run_id
 
             llm_agent = GraphAgent(injected_cfg)
@@ -2339,6 +2397,11 @@ class TaskManager(BaseManager):
 
         agent_type = (self.task_config["tools_config"].get("llm_agent") or {}).get("agent_type", "simple_llm_agent")
         self.is_local = local
+        if self.tts_response_cache_config and self._is_conversation_task():
+            self.tts_response_cache = TtsResponseCache(**self.tts_response_cache_config, local=local)
+            wire_format = self.__fixed_line_wire_format()
+            for voice_identity in self.fixed_line_voices.values() if wire_format else ():
+                self.tts_response_cache.warm(self.tts_response_cache.prefix(voice_identity, wire_format))
         if task_id == 0:
             if (
                 self.context_data
@@ -2480,6 +2543,23 @@ class TaskManager(BaseManager):
         # if index != -1:
         #     text_chunk = text_chunk[index+2:]
         return text_chunk
+
+    def pending_assistant_for_response(self, response_uid):
+        """(sequence_id, staged entry) of a reply still staged; (None, None) when it is not."""
+        for sequence_id, staged in self._pending_assistant_history.items():
+            if staged["response_uid"] == response_uid:
+                return sequence_id, staged
+        return None, None
+
+    def sent_text_for_response(self, response_uid):
+        """The LLM text of a reply, staged or already in history; empty when unknown."""
+        staged = self.pending_assistant_for_response(response_uid)[1]
+        if staged:
+            return str(staged["content"]).strip()
+        for msg in reversed(self.conversation_history.messages):
+            if msg.get("role") == "assistant" and msg.get("response_uid") == response_uid:
+                return (msg.get("content") or "").strip()
+        return ""
 
     def update_transcript_for_interruption(self, original_stream, heard_text):
         """Trim original response to match what was actually heard."""
@@ -2634,6 +2714,24 @@ class TaskManager(BaseManager):
             or (self.execute_function_call_task is not None and not self.execute_function_call_task.done()),
         }
 
+    def raw_heard_text(self, response_uid, turn_id):
+        """The ACKed text accumulated for a reply, unstripped so a tail can be joined at the spoken boundary.
+        A None id falls back to that store's last heard id."""
+        input_handler = self.tools["input"]
+        sources = (
+            (input_handler, "response_heard_by_response", response_uid, "last_heard_response_uid"),
+            (input_handler, "response_heard_by_turn", turn_id, "last_heard_turn_id"),
+            (self.mark_event_meta_data, "heard_text_by_response", response_uid, "last_heard_response_uid"),
+            (self.mark_event_meta_data, "heard_text_by_turn", turn_id, "last_heard_turn_id"),
+        )
+        for owner, store_name, key, last_heard_name in sources:
+            if key is None:
+                key = getattr(owner, last_heard_name, None)
+            text = getattr(owner, store_name, {}).get(key) if key is not None else None
+            if text and text.strip():
+                return text
+        return ""
+
     def estimate_played_text_for_time(self, pending_chunks, actual_play_time):
         """Credit whole chunks that fit in actual_play_time, then a word-trimmed proportional
         slice of the chunk the clock lands in."""
@@ -2657,10 +2755,17 @@ class TaskManager(BaseManager):
             cumulative_duration += chunk_duration
         return "".join(played_text)
 
-    async def sync_history(self, mark_events_data, interruption_processed_at, extend_with_playback_estimate=False):
+    async def sync_history(
+        self, mark_events_data, interruption_processed_at, extend_with_playback_estimate=False, caller_onset=None
+    ):
         """Sync history to reflect only what was actually spoken. Uses confirmed text or falls back to pending marks.
-        extend_with_playback_estimate: end-of-call only — credit the unACKed tail proportionally
-        to the wall clock elapsed since the last ACK (marks can lag playback and get lost)."""
+        extend_with_playback_estimate: credit the unACKed tail proportionally to the wall clock
+        elapsed since the last ACK (marks can lag playback and get lost).
+        caller_onset: a barge-in's speech onset; nothing after it is credited, since the caller talked over it."""
+        # A barge-in is detected words after the caller starts; don't credit what they spoke over.
+        heard_until = (
+            interruption_processed_at if caller_onset is None else min(interruption_processed_at, caller_onset)
+        )
         try:
             mark_events_data = list(mark_events_data)
             target_turn_id = self._get_latest_turn_id_from_marks(mark_events_data)
@@ -2683,47 +2788,54 @@ class TaskManager(BaseManager):
                 f"mark_ids={[mid for mid, _ in mark_events_data]}"
             )
             input_handler = self.tools["input"]
-            response_heard = input_handler.get_response_heard_for_response(target_response_uid)
-            if not response_heard:
-                response_heard = input_handler.get_response_heard_for_turn(target_turn_id)
-            if not response_heard:
-                response_heard = self.mark_event_meta_data.get_heard_text_for_response(target_response_uid)
-            if not response_heard:
-                response_heard = self.mark_event_meta_data.get_heard_text_for_turn(target_turn_id)
-            if not response_heard:
+            raw_heard = self.raw_heard_text(target_response_uid, target_turn_id)
+            if not raw_heard.strip():
                 # Only fall back to global accumulator when target_turn_id is unknown.
                 # With a known target turn, the global can hold stale text from a
                 # previous turn (e.g. acked post-tool audio before reset), which
                 # would corrupt the wrong message.
                 if target_turn_id is None:
-                    response_heard = input_handler.response_heard_by_user
+                    raw_heard = input_handler.response_heard_by_user or ""
                     target_turn_id = getattr(input_handler, "last_heard_turn_id", None)
+            response_heard = raw_heard.strip()
             logger.info(f"sync_history: response_heard len={len(response_heard) if response_heard else 0}")
             if response_heard:
                 logger.info(f"response_heard (last 10 chars): {response_heard[-10:]}")
 
             if extend_with_playback_estimate and response_heard:
+                last_acked = self.mark_event_meta_data.get_last_acked_mark_for_turn(target_turn_id)
+                last_acked_sent_ts = (last_acked or {}).get("sent_ts") or 0
                 pending_tail = []
                 for mark_id, mark_data in mark_events_data:
-                    text = mark_data.get("text_synthesized", "")
-                    if mark_data.get("type") in NON_EVIDENCE_MARK_TYPES or not text:
+                    if mark_data.get("type") in NON_EVIDENCE_MARK_TYPES:
                         continue
                     if target_turn_id is not None and mark_data.get("turn_id") != target_turn_id:
                         continue
-                    pending_tail.append({"text": text, "duration": mark_data.get("duration", 0)})
-                last_ack_ts = self.mark_event_meta_data.get_last_ack_ts_for_turn(target_turn_id)
-                if pending_tail and last_ack_ts:
-                    # Proportional by the wall clock since the last ACK. The ACK itself lags true
-                    # playout end, so this window under-credits — it can't stamp unheard text.
-                    tail_play_time = max(0.0, interruption_processed_at - last_ack_ts)
+                    # A lost mark from before the last ACK isn't the tail; its text would land after later text.
+                    sent_ts = mark_data.get("sent_ts") or 0
+                    if sent_ts and sent_ts <= last_acked_sent_ts:
+                        continue
+                    # Text-less marks (Azure sets text on a sentence's last chunk only) still take playback time.
+                    pending_tail.append(
+                        {
+                            "text": mark_data.get("text_synthesized") or "",
+                            "duration": mark_data.get("duration", 0),
+                            "sent_ts": sent_ts,
+                        }
+                    )
+                if pending_tail and last_acked:
+                    # Proportional by the wall clock since playback of the tail could start: the last ACK,
+                    # or the tail's send if it was still being generated then. The ACK lags true playout end,
+                    # so this window under-credits — it can't stamp unheard text.
+                    tail_start = max(last_acked["ack_ts"], pending_tail[0]["sent_ts"])
+                    tail_play_time = max(0.0, heard_until - tail_start)
                     tail_text = self.estimate_played_text_for_time(pending_tail, tail_play_time)
                     if tail_text:
                         logger.info(
                             f"sync_history: crediting unacked tail ({tail_play_time:.2f}s elapsed, {len(tail_text)} chars)"
                         )
-                        # Restore the stripped chunk-boundary space or the exact-match trim drops the tail.
-                        joiner = "" if (response_heard[-1:].isspace() or tail_text[:1].isspace()) else " "
-                        response_heard += joiner + tail_text
+                        # The unstripped heard text keeps the chunk boundary as spoken; a guessed space can split a word.
+                        response_heard = (raw_heard + tail_text).strip()
 
             if not response_heard:
                 pending_marks = [{"mark_id": k, "mark_data": v} for k, v in mark_events_data]
@@ -2743,10 +2855,10 @@ class TaskManager(BaseManager):
                 if pending_chunks:
                     first_sent_ts = pending_chunks[0].get("sent_ts", 0)
                     if first_sent_ts > 0:
-                        time_since_first_send = interruption_processed_at - first_sent_ts
+                        time_since_first_send = heard_until - first_sent_ts
                         actual_play_time = max(0, time_since_first_send)
                     else:
-                        elapsed_time = interruption_processed_at - self.tools["input"].get_current_mark_started_time()
+                        elapsed_time = heard_until - self.tools["input"].get_current_mark_started_time()
                         actual_play_time = max(0, elapsed_time)
 
                     estimated = self.estimate_played_text_for_time(pending_chunks, actual_play_time)
@@ -2843,6 +2955,31 @@ class TaskManager(BaseManager):
                                 response_heard = ""
                                 logger.info(f"turn_id={t_id}: nothing heard")
 
+            # TTS alignment drops characters, so its text only says how far playback got; the words come from the LLM text.
+            if target_response_uid is not None and response_heard:
+                sent_text = self.sent_text_for_response(target_response_uid)
+                # v3 sends "word " chunks; a trailing space would match past the word and trim it.
+                matched = [
+                    block
+                    for block in difflib.SequenceMatcher(
+                        None, sent_text, response_heard.rstrip(), autojunk=False
+                    ).get_matching_blocks()
+                    if block.size
+                ]
+                if matched:
+                    # Align instead of measuring: chunker spaces and dropped characters make lengths disagree.
+                    end = matched[-1].a + matched[-1].size
+                    # A dropped final matra or punctuation mark was still played with its word.
+                    while end < len(sent_text) and unicodedata.category(sent_text[end])[0] in ("P", "M"):
+                        end += 1
+                    cut = sent_text[:end]
+                    if end < len(sent_text) and not sent_text[end].isspace():
+                        cut = self._trim_partial_to_complete_words(cut) or cut
+                    response_heard = cut.strip()
+                    logger.info(
+                        f"sync_history: heard aligned to {end}/{len(sent_text)} chars, using LLM text {response_heard[-20:]!r}"
+                    )
+
             # The duplicate check must compare a regenerated reply with what the caller heard, not what was sent.
             if self._last_spoken_assistant and self._last_spoken_assistant[0] == target_turn_id:
                 self._last_spoken_assistant = (target_turn_id, response_heard) if response_heard else None
@@ -2853,13 +2990,11 @@ class TaskManager(BaseManager):
                     f"text={response_heard!r}"
                 )
                 # A reply still staged (its audio blocked before the commit) keeps its sequence_id and node.
-                stamps = next(
-                    (
-                        {"sequence_id": sequence_id} | ({"node": staged["node"]} if staged.get("node") else {})
-                        for sequence_id, staged in self._pending_assistant_history.items()
-                        if staged["response_uid"] == target_response_uid
-                    ),
-                    {},
+                sequence_id, staged = self.pending_assistant_for_response(target_response_uid)
+                stamps = (
+                    {"sequence_id": sequence_id} | ({"node": staged["node"]} if staged.get("node") else {})
+                    if staged
+                    else {}
                 )
                 self.conversation_history.upsert_assistant_for_response(
                     target_response_uid, response_heard, interim=False, turn_id=target_turn_id, **stamps
@@ -2896,7 +3031,8 @@ class TaskManager(BaseManager):
 
             traceback.print_exc()
 
-    async def __cleanup_downstream_tasks(self):
+    async def __cleanup_downstream_tasks(self, caller_onset=None):
+        """caller_onset: when the caller began talking over the reply being cut, if this is a barge-in."""
         current_ts = time.time()
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
@@ -2921,7 +3057,13 @@ class TaskManager(BaseManager):
         if not self.tools["input"].welcome_message_played():
             self.tools["input"].is_welcome_message_played = True
 
-        await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
+        # Credit the chunk that was mid-playback, or the next reply re-asks what the caller already heard.
+        await self.sync_history(
+            self.mark_event_meta_data.fetch_cleared_mark_event_data().items(),
+            current_ts,
+            extend_with_playback_estimate=True,
+            caller_onset=caller_onset,
+        )
         self.tools["input"].reset_response_heard_by_user()
 
         self.interruption_manager.invalidate_pending_responses()
@@ -4356,9 +4498,12 @@ class TaskManager(BaseManager):
         # Pass detected language to LLM for pre_call_message selection
         meta_info["detected_language"] = self.language
 
+        llm_messages = with_prompt_transcript(messages) if self.prompt_transcript_due() else messages
+
         try:
+            # The transcript goes to the LLM only: `messages` is written back into history below.
             async for llm_message in self.tools["llm_agent"].generate(
-                messages, synthesize=synthesize, meta_info=meta_info
+                llm_messages, synthesize=synthesize, meta_info=meta_info
             ):
                 if (
                     isinstance(llm_message, dict) and "messages" in llm_message
@@ -5078,7 +5223,8 @@ class TaskManager(BaseManager):
                 "message_category": "agent_hangup",
                 "end_of_llm_stream": True,
             }
-            await self._synthesize(create_ws_data_packet(message, meta_info=meta_info))
+            if not await self.__play_fixed_line_clip(message, meta_info):
+                await self._synthesize(create_ws_data_packet(message, meta_info=meta_info))
             # Stamp after goodbye is queued — actual disconnect happens after it plays
             self.hangup_triggered_at = time.time()
         return
@@ -5126,7 +5272,9 @@ class TaskManager(BaseManager):
             call_sid = self.tools["input"].get_call_sid()
             payload["call_sid"] = call_sid
 
-        if url is None:
+        # A URL on the tool is the customer's; the fallback is operator config and may be internal.
+        customer_url = bool(url)
+        if not customer_url:
             url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
 
             try:
@@ -5218,7 +5366,7 @@ class TaskManager(BaseManager):
             await self.tools["output"].handle(eos_packet)
             return
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=outbound_connector(url) if customer_url else None) as session:
             logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
             while self.tools["input"].is_audio_being_played_to_user():
                 await asyncio.sleep(1)
@@ -5248,7 +5396,9 @@ class TaskManager(BaseManager):
             )
             _transfer_end_recorded = False
             try:
-                async with session.post(url, json=payload) as response:
+                if customer_url:
+                    await validate_outbound_url(url)
+                async with session.post(url, json=payload, allow_redirects=not customer_url) as response:
                     response_text = await response.text()
                     logger.info(f"Response from the server after call transfer: {response_text}")
                     convert_to_request_log(
@@ -5261,13 +5411,17 @@ class TaskManager(BaseManager):
                         run_id=self.run_id,
                         tool_name=called_fun,
                     )
+                    # A customer URL's redirect is not followed, so the transfer never reached its endpoint.
+                    redirected = customer_url and 300 <= response.status < 400
+                    refused = redirected or response.status >= 400
                     self._finalize_api_call_detail(
                         function_call_log,
                         response=response_text,
                         status_code=response.status,
                         content_type=response.headers.get("Content-Type"),
+                        error="redirect not followed" if redirected else None,
                     )
-                    if self._is_trunk_call() and response.status >= 400 and not self._transfer_unsettled(response_text):
+                    if self._is_trunk_call() and refused and not self._transfer_unsettled(response_text):
                         # Nothing was dialled, so no ringback holds the caller and the watchdog takes over again.
                         self._trunk_transfer_refused = True
                     self.transfer_call_events.append(
@@ -5279,13 +5433,16 @@ class TaskManager(BaseManager):
                             "sequence_id": meta_info.get("sequence_id"),
                             "status_code": response.status,
                             "latency_ms": function_call_log.get("latency_ms"),
-                            "success": response.status < 400,
+                            "success": not refused,
                         }
                     )
                     _transfer_end_recorded = True
             except Exception as transfer_exc:
                 logger.warning(f"Transfer webhook did not respond (call likely redirected): {transfer_exc}")
-                self._finalize_api_call_detail(function_call_log, error=transfer_exc)
+                blocked = isinstance(transfer_exc, SSRFError)
+                self._finalize_api_call_detail(
+                    function_call_log, error="blocked by outbound URL policy" if blocked else transfer_exc
+                )
                 self.transfer_call_events.append(
                     {
                         "type": "transfer_end",
@@ -5755,7 +5912,8 @@ class TaskManager(BaseManager):
             if transcriber_message != original_message:
                 logger.info(f"Merged transcript with unheard response: {transcriber_message}")
             if any(activity.values()):
-                await self.__cleanup_downstream_tasks()
+                # A final over agent audio is a barge-in too; its interims were the ignored ones.
+                await self.__cleanup_downstream_tasks(caller_onset=self.interruption_manager.get_barge_in_onset())
             # Cleanup invalidated every pending seq id; without this _synthesize drops this turn.
             self.interruption_manager.revalidate_sequence_id(current_sequence_id)
             logger.info(
@@ -5978,7 +6136,7 @@ class TaskManager(BaseManager):
                         isinstance(message.get("data"), dict)
                         and message["data"].get("type", "") == "interim_transcript_received"
                     ):
-                        self.time_since_last_spoken_human_word = time.time()
+                        self._note_caller_speech()
                         # Before every early exit below: a changed interim is proof the caller is
                         # still talking, so it must refresh liveness even when this turn ignores it.
                         self.interruption_manager.note_user_liveness(message["data"].get("content", ""))
@@ -6031,6 +6189,9 @@ class TaskManager(BaseManager):
                             welcome_played=self.tools["input"].welcome_message_played(),
                         ):
                             logger.info(f"Condition for interruption hit")
+                            caller_onset = self.interruption_manager.get_barge_in_onset(
+                                meta_info.get("user_start_ts_wall")
+                            )
                             self.interruption_manager.on_user_speech_started(meta_info.get("user_start_ts_wall"))
                             _t = self.tools.get("transcriber")
                             if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
@@ -6040,7 +6201,7 @@ class TaskManager(BaseManager):
                             # Also record in the interrupted set for was_interrupted annotation
                             self.interruption_manager.record_interrupted_transcriber_turn(_asr_turn_id)
                             self.tools["input"].update_is_audio_being_played(False, AudioPlaybackReason.BARGE_IN)
-                            await self.__cleanup_downstream_tasks()
+                            await self.__cleanup_downstream_tasks(caller_onset=caller_onset)
                         # User continuation detection: cancel pending response if user continues within grace period
                         elif (
                             not self.tools["input"].is_audio_being_played_to_user()
@@ -6079,6 +6240,7 @@ class TaskManager(BaseManager):
                             and self.number_of_words_for_interruption != 0
                         ):
                             # Not enough words for interruption - ignore (don't set callee_speaking)
+                            self.interruption_manager.note_ignored_interim()
                             logger.info(f"Ignoring transcript: {transcript_content.strip()}")
                             continue
                         else:
@@ -6370,6 +6532,17 @@ class TaskManager(BaseManager):
     #################################################################
     # Synthesizer task
     #################################################################
+    def __enqueue_synthesized(self, message):
+        """Queue one synthesizer message for output, split into output-sized chunks where the transport takes them."""
+        if self.tools["output"].process_in_chunks(self.yield_chunks):
+            number_of_chunks = math.ceil(len(message["data"]) / self.output_chunk_size)
+            for chunk_idx, chunk in enumerate(
+                yield_chunks_from_memory(message["data"], chunk_size=self.output_chunk_size)
+            ):
+                self.__enqueue_chunk(chunk, chunk_idx, number_of_chunks, message["meta_info"])
+        else:
+            self.buffered_output_queue.put_nowait(message)
+
     def __enqueue_chunk(self, chunk, i, number_of_chunks, meta_info):
         meta_info["chunk_id"] = i
         copied_meta_info = copy.deepcopy(meta_info)
@@ -7498,7 +7671,7 @@ class TaskManager(BaseManager):
             # Pre-warmed wire-format clip pushed straight to the transport. Both end-flags required
             handoff_meta.update(
                 {
-                    "format": "mulaw" if self.__handoff_mulaw_wire() else "pcm",
+                    "format": "mulaw" if self.__mulaw_wire() else "pcm",
                     "end_of_llm_stream": True,
                     "end_of_synthesizer_stream": True,
                     "is_first_chunk": True,
@@ -7539,7 +7712,7 @@ class TaskManager(BaseManager):
         # As in the legacy handoff: render after the runtime placeholders so {customer_name} resolves.
         return update_prompt_with_context(text, self.context_data)
 
-    def __handoff_mulaw_wire(self) -> bool:
+    def __mulaw_wire(self) -> bool:
         """True on telephony (mu-law@8k clip), False on web/freeswitch (raw PCM@24k)."""
         return self.tools["output"].get_provider() in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
 
@@ -7551,7 +7724,7 @@ class TaskManager(BaseManager):
             return
 
         # A call has exactly one transport, so render in its wire format only.
-        mulaw_wire = self.__handoff_mulaw_wire()
+        mulaw_wire = self.__mulaw_wire()
         multilingual = (self.task_config["tools_config"].get("synthesizer") or {}).get("multilingual") or {}
 
         async def render(label, synth):
@@ -7575,62 +7748,185 @@ class TaskManager(BaseManager):
             if cached:
                 self.handoff_audio_cache[label] = cached
                 return
-            # Under ~50ms is a failed one-shot returning a sentinel, not a clip.
-            min_clip_bytes = 400 if mulaw_wire else 2400
             try:
-                clip = None
-                # Prefer a native one-shot in the wire format when the provider offers it.
-                if mulaw_wire:
-                    telephony_one_shot = getattr(synth, "synthesize_telephony_clip", None)
-                    if telephony_one_shot is not None:
-                        clip = await telephony_one_shot(text)
-                else:
-                    pcm_one_shot = getattr(synth, "synthesize_pcm_clip", None)
-                    if pcm_one_shot is not None:
-                        clip = await pcm_one_shot(text, WEBCALL_TTS_SAMPLE_RATE)
-                # Before the fallback, so synthesize() still gets its turn.
-                if clip and len(clip) < min_clip_bytes:
-                    logger.warning(
-                        f"LanguageSwitcher: one-shot for '{label}' returned {len(clip)}B — falling back to synthesize()"
-                    )
-                    clip = None
-                if not clip:
-                    audio = await synth.synthesize(text)
-                    if not audio:
-                        return
-                    # pydub decode shells out to ffprobe/ffmpeg — keep it off the event loop.
-                    clip = await asyncio.to_thread(self.__handoff_clip_convert, synth, audio, mulaw_wire)
-                if clip and len(clip) < min_clip_bytes:
-                    logger.error(f"LanguageSwitcher: handoff clip for '{label}' is {len(clip)}B — discarding")
-                    return
+                clip = await render_clip(synth, text, mulaw_wire)
                 if clip:
+                    synth.synthesized_characters = getattr(synth, "synthesized_characters", 0) + len(text)
                     self.handoff_audio_cache[label] = clip
                     if len(HANDOFF_CLIP_CACHE) >= HANDOFF_CLIP_CACHE_MAX:
                         HANDOFF_CLIP_CACHE.pop(next(iter(HANDOFF_CLIP_CACHE)))
                     HANDOFF_CLIP_CACHE[cache_key] = clip
-                    synth.synthesized_characters = getattr(synth, "synthesized_characters", 0) + len(text)
                     logger.info(f"LanguageSwitcher: pre-warmed handoff clip '{label}' ({len(clip)} bytes)")
             except Exception as e:
                 logger.error(f"LanguageSwitcher: handoff prewarm failed for '{label}': {e}")
 
         await asyncio.gather(*(render(label, synth) for label, synth in pool.synthesizers.items()))
 
-    def __handoff_clip_convert(self, synth, audio, mulaw_wire):
-        """Decode a one-shot render into the wire format. Blocking — run off-loop."""
-        kwargs = {
-            "rate_hint": getattr(synth, "sampling_rate", 0) or getattr(synth, "sample_rate", 0) or 8000,
-            "format_hint": getattr(synth, "format", "") or "",
+    def __fixed_line_wire_format(self):
+        """Wire format a stored fixed-line clip plays in on this call, or None when it has no single one."""
+        if self.turn_based_conversation:
+            return None
+        if self.__mulaw_wire():
+            return "mulaw"
+        if self.is_web_based_call or self.tools["output"].get_provider() == TelephonyProvider.FREESWITCH.value:
+            return "pcm"
+        return None
+
+    async def __play_fixed_line_clip(self, text, meta_info):
+        """Play a fixed line from the clip this process holds; on a miss speak it live and load the clip for later calls."""
+        category = meta_info["message_category"]
+        if not text or category not in self.fixed_line_categories or not self.assistant_id:
+            return False
+        wire_format = self.__fixed_line_wire_format()
+        if not wire_format:
+            return False
+        synth = self.tools["synthesizer"]
+        label = None
+        if isinstance(synth, SynthesizerPool):
+            label = synth.active_label
+            synth = synth.synthesizers[label]
+        voice_identity = self.fixed_line_voices.get(label)
+        if voice_identity is None or not synth.one_shot_matches_stream:
+            return False
+        mulaw_wire = wire_format == "mulaw"
+        clip_key = fixed_line_clip_key(text, voice_identity, wire_format)
+        storage = {
+            "agent_name": self.assistant_name,
+            "audio_format": wire_format,
+            "assistant_id": self.assistant_id,
+            "local": self.is_local,
         }
-        if mulaw_wire:
-            clip = audio_to_mulaw8k(audio, **kwargs)
-        else:
-            clip = audio_to_pcm(audio, target_sample_rate=WEBCALL_TTS_SAMPLE_RATE, **kwargs)
+        clip = recall_clip(clip_key)
         if clip is None:
-            logger.error(
-                f"LanguageSwitcher: handoff clip for {synth.__class__.__name__} is a compressed container "
-                f"pydub can't decode into {'mulaw' if mulaw_wire else 'pcm'} — skipping"
+            load_fixed_line_clip(synth, text, clip_key, mulaw_wire, storage)
+            return False
+
+        meta_info = {
+            **meta_info,
+            "format": wire_format,
+            "text": text,
+            "type": "audio",
+            "cached": True,
+            "end_of_llm_stream": True,
+        }
+        for direction in (LogDirection.REQUEST, LogDirection.RESPONSE):
+            convert_to_request_log(
+                message=text,
+                meta_info=meta_info,
+                component=LogComponent.SYNTHESIZER,
+                direction=direction,
+                model=self.synthesizer_provider,
+                is_cached=True,
+                engine=self.tools["synthesizer"].get_engine(),
+                run_id=self.run_id,
             )
-        return clip
+        pieces = clip_pieces(clip, mulaw_wire)
+        for index, piece in enumerate(pieces):
+            piece_meta = {
+                **meta_info,
+                "is_first_chunk": index == 0,
+                "end_of_synthesizer_stream": index == len(pieces) - 1,
+            }
+            self.__enqueue_chunk(piece, index, len(pieces), piece_meta)
+        self.synthesizer_cached_characters += len(text)
+        logger.info(f"Playing stored {category} clip {clip_key} ({len(clip)} bytes)")
+        return True
+
+    def __reply_cache_slot(self, text, meta_info):
+        """(prefix, object_key, wire_format) when this push is a whole LLM reply in one piece, else None."""
+        if not self.tts_response_cache:
+            return None
+        sequence_id = meta_info.get("sequence_id")
+        first_push = sequence_id not in self._synth_pushed_sequences
+        self._synth_pushed_sequences.add(sequence_id)
+        if not first_push or sequence_id in (None, -1) or meta_info.get("message_category"):
+            return None
+        if not meta_info.get("end_of_llm_stream") or not text or not text.strip():
+            return None
+        wire_format = self.__fixed_line_wire_format()
+        synth = self.tools["synthesizer"]
+        voice_identity = self.fixed_line_voices.get(synth.active_label if isinstance(synth, SynthesizerPool) else None)
+        if not wire_format or voice_identity is None:
+            return None
+        prefix = self.tts_response_cache.prefix(voice_identity, wire_format)
+        self.tts_response_cache.warm(prefix)
+        return prefix, self.tts_response_cache.object_key(prefix, " ".join(text.split())), wire_format
+
+    async def __replay_cached_reply(self, text, meta_info):
+        """Play a whole reply from its stored clip; False means synthesize it live, capturing it to learn the line."""
+        slot = self.__reply_cache_slot(text, meta_info)
+        if slot is None:
+            return False
+        prefix, object_key, wire_format = slot
+        cache = self.tts_response_cache
+        if not cache.has(object_key, prefix):
+            self._response_captures[meta_info["sequence_id"]] = Capture(
+                object_key, prefix, " ".join(text.split()), wire_format=wire_format
+            )
+            return False
+        # The same line twice in one call goes live, so a re-prompt is not word-for-word identical audio.
+        if object_key in self._replayed_reply_keys:
+            return False
+        started = time.perf_counter()
+        clip = cache.fetch(object_key)
+        if clip is None:
+            return False
+        audio_format, chunks = clip
+        fetch_s = time.perf_counter() - started
+        self._replayed_reply_keys.add(object_key)
+        self.synthesizer_cached_characters += len(text)
+        base = {**meta_info, "format": audio_format, "text": text, "is_cached": True, "synthesizer_latency": fetch_s}
+        for index, (audio, text_synthesized) in enumerate(chunks):
+            chunk_meta = {**base, "text_synthesized": text_synthesized, "is_first_chunk": index == 0}
+            self.__enqueue_synthesized({"data": audio, "meta_info": {**chunk_meta, "mark_id": str(uuid.uuid4())}})
+        end_meta = {**base, "text_synthesized": "", "end_of_synthesizer_stream": True, "mark_id": str(uuid.uuid4())}
+        self.__enqueue_synthesized({"data": b"\x00", "meta_info": end_meta})
+        self.__record_cached_reply_latency(meta_info, text, fetch_s)
+        convert_to_request_log(
+            message=text,
+            meta_info=base,
+            component=LogComponent.SYNTHESIZER,
+            direction=LogDirection.RESPONSE,
+            model=self.synthesizer_provider,
+            is_cached=True,
+            engine=self.tools["synthesizer"].get_engine(),
+            run_id=self.run_id,
+        )
+        logger.info(f"Replayed reply clip {object_key} for sequence {meta_info.get('sequence_id')}")
+        return True
+
+    def __record_cached_reply_latency(self, meta_info, text, fetch_s):
+        synth = self.tools["synthesizer"]
+        if isinstance(synth, SynthesizerPool):
+            synth = synth.synthesizers[synth.active_label]
+        synth._upsert_turn_latency(
+            {
+                "turn_id": meta_info.get("turn_id"),
+                "sequence_id": meta_info.get("sequence_id"),
+                "tts_start_ms": meta_info.get("tts_start_ms"),
+                "first_result_latency_ms": round(fetch_s * 1000),
+                "total_stream_duration_ms": round(fetch_s * 1000),
+                "characters": len(text),
+                "message_category": meta_info.get("message_category"),
+                "cached": True,
+            }
+        )
+
+    def __capture_reply_audio(self, message):
+        """Keep a learning reply's live audio; at its end, hand the whole clip to the cache."""
+        meta_info = message["meta_info"]
+        capture = self._response_captures.get(meta_info.get("sequence_id"))
+        if capture is None:
+            return
+        if message["data"] != b"\x00":
+            capture.chunks.append((message["data"], meta_info.get("text_synthesized", "")))
+            capture.audio_format = meta_info.get("format")
+        if not meta_info.get("end_of_synthesizer_stream"):
+            return
+        del self._response_captures[meta_info["sequence_id"]]
+        if capture.chunks:
+            seconds = sum(wire_seconds(audio, capture.wire_format == "mulaw") for audio, _ in capture.chunks)
+            self.tts_response_cache.finish_capture(capture, seconds)
 
     def __language_directive(self, label: str) -> str:
         """The one standing language order, installed at setup and on every switch."""
@@ -7647,6 +7943,23 @@ class TaskManager(BaseManager):
             f"alphanumeric identifiers, digits, codes, or lines these instructions mark as "
             f"verbatim/legal — read those exactly as written; they are language-neutral."
         )
+
+    def prompt_transcript_due(self, speculative: bool = False) -> bool:
+        """Whether this reply gets the earlier turns as prompt text (language_switch_prompt_transcript flag).
+
+        From the speculative post-switch reply to the end of the call: some models follow the language of
+        the chat history over every instruction, and go back to the old language as soon as the history is
+        sent as messages again, even after several replies in the new one. Simple LLM agents only: graph and
+        knowledge-base agents build their own request and get it unchanged.
+        """
+        tools_config = self.task_config.get("tools_config", {})
+        if (
+            not tools_config.get("language_switch_prompt_transcript")
+            or not self.language_switcher
+            or (tools_config.get("llm_agent") or {}).get("agent_type", "simple_llm_agent") != "simple_llm_agent"
+        ):
+            return False
+        return speculative or bool(self.language_switch_events)
 
     def __apply_language_directive(self, label: str, context_note: str = None) -> None:
         """Install or refresh the language directive at the end of the system prompt.
@@ -7818,6 +8131,8 @@ class TaskManager(BaseManager):
         else:
             # Idle-flush: the locked ASR produced no turn — append the SAME trailing-utterance
             messages.append({"role": "user", "content": idle_user_text or detector_transcript})
+        if self.prompt_transcript_due(speculative=True):
+            messages = with_prompt_transcript(messages)
         spec_meta = {
             "request_id": str(uuid.uuid4()),
             "sequence_id": -1,
@@ -8006,14 +8321,8 @@ class TaskManager(BaseManager):
                                             "_cb_synthesizer_connect_reported",
                                         )
 
-                                if self.tools["output"].process_in_chunks(self.yield_chunks):
-                                    number_of_chunks = math.ceil(len(message["data"]) / self.output_chunk_size)
-                                    for chunk_idx, chunk in enumerate(
-                                        yield_chunks_from_memory(message["data"], chunk_size=self.output_chunk_size)
-                                    ):
-                                        self.__enqueue_chunk(chunk, chunk_idx, number_of_chunks, meta_info)
-                                else:
-                                    self.buffered_output_queue.put_nowait(message)
+                                self.__enqueue_synthesized(message)
+                                self.__capture_reply_audio(message)
                             else:
                                 # Non-streaming output
                                 logger.info("Stream not enabled, sending entire audio")
@@ -8037,6 +8346,7 @@ class TaskManager(BaseManager):
                                 )
                         else:
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
+                            self._response_captures.pop(sequence_id, None)
                             # A retired sequence's final chunk is skipped here, so its
                             # is_final_chunk mark never reaches Plivo and no mark echo ever
                             # arrives to clear is_audio_being_played. Without this, the flag
@@ -8264,7 +8574,7 @@ class TaskManager(BaseManager):
                             run_id=self.run_id,
                         )
                         await self.__send_preprocessed_audio(meta_info, get_md5_hash(text))
-                    else:
+                    elif not await self.__replay_cached_reply(text, meta_info):
                         self.synthesizer_characters += len(text)
                         await self.tools["synthesizer"].push(message)
                 else:
@@ -8301,7 +8611,10 @@ class TaskManager(BaseManager):
             if self.tools["input"].welcome_message_played():
                 logger.info(f"Welcome message has been played")
                 self.first_message_passing_time = time.time()
-                if len(self.transcriber_message):
+                if self.__opening_node_ends_call():
+                    logger.info(f"Opening node {self.opening_node.get('id')!r} ends the call after its message")
+                    await self.__hang_up_after_reply()
+                elif len(self.transcriber_message):
                     logger.info(f"Sending the accumulated transcribed message - {self.transcriber_message}")
                     await self.__send_first_message(self.transcriber_message)
                     self.transcriber_message = ""
@@ -8561,20 +8874,16 @@ class TaskManager(BaseManager):
             )
         return fires
 
-    def _silence_repeat_cap(self):
-        """[silence] re-prompts allowed in the current silence period. A period restarts when the user
-        speaks or the graph moves to another node, and the cap never drops below what the node's own
-        _silence_repeats exit edge needs, so that edge can still fire."""
+    def _note_caller_speech(self):
+        """Restart the silence clock and the [silence] re-prompt budget: the caller spoke."""
+        self.time_since_last_spoken_human_word = time.time()
+        self._silence_repeats_sent = 0
+
+    def _silence_reprompt_allowed(self):
+        """Whether another [silence] re-prompt may go out since the caller last spoke."""
         if self.hang_conversation_after <= 0:
-            return math.inf  # no silence hangup to hand over to: a cap would leave the caller in dead air
-        llm_agent = self.tools.get("llm_agent")
-        # time_since_last_spoken_human_word holds the user's last-speech timestamp, so a change means they spoke
-        period = (self.time_since_last_spoken_human_word, getattr(llm_agent, "current_node_id", None))
-        if period != self._silence_period:
-            self._silence_period = period
-            self._silence_repeats_sent = 0
-        exit_at = llm_agent.silence_exit_threshold() if hasattr(llm_agent, "silence_exit_threshold") else 0
-        return max(self.max_silence_repeats, exit_at)
+            return True  # no silence hangup to hand over to: a cap would leave the caller in dead air
+        return self._silence_repeats_sent < self.max_silence_repeats or self.tools["llm_agent"].silence_exit_pending()
 
     def _pipeline_busy(self, audio_playing):
         """True while the agent is speaking or about to: response_in_pipeline can read False in the gap between a response's synth push and its first audio chunk, so _synthesis_awaiting_first_audio covers it."""
@@ -8691,20 +9000,19 @@ class TaskManager(BaseManager):
             if self._pipeline_busy(self.tools["input"].is_audio_being_played_to_user()):
                 continue
 
-            silence_repeat_cap = self._silence_repeat_cap() if self.repeat_after_silence_seconds else 0
             if (
                 self.repeat_after_silence_seconds
-                and self._silence_repeats_sent < silence_repeat_cap
+                # An opening node arms its re-prompt before its message has played.
+                and (self.opening_node is None or self.tools["input"].welcome_message_played())
                 and time_since_last_spoken_ai_word > self.repeat_after_silence_seconds
                 and time_since_user_last_spoke > self.repeat_after_silence_seconds
                 and not self.response_in_pipeline
                 and not has_pending_generation
+                and self._silence_reprompt_allowed()
             ):
                 self._silence_repeats_sent += 1
-                if self._silence_repeats_sent == silence_repeat_cap:
-                    logger.info(
-                        f"Silence re-prompt cap reached ({silence_repeat_cap}), the silence hangup can now fire"
-                    )
+                if self._silence_repeats_sent == self.max_silence_repeats:
+                    logger.info(f"Silence re-prompt cap reached ({self.max_silence_repeats})")
                 await self._inject_and_run_llm(
                     f"[silence] User was silent for {self.repeat_after_silence_seconds} seconds"
                 )
@@ -8747,28 +9055,23 @@ class TaskManager(BaseManager):
                         continue
 
                     self.tools["input"].reset_response_heard_by_user()
+                    # Clear what is still queued before the prompt goes out, or the clear cuts the prompt.
+                    await self.tools["output"].handle_interruption()
+                    # The clear wipes the marks of the audio it cut, so no echo resets this flag for them.
+                    self.tools["input"].update_is_audio_being_played(
+                        False, AudioPlaybackReason.SILENCE_HANGUP_INTERRUPT
+                    )
 
-                    if self.should_record:
-                        meta_info = {
-                            "io": "default",
-                            "request_id": str(uuid.uuid4()),
-                            "cached": False,
-                            "sequence_id": -1,
-                            "format": "wav",
-                            "message_category": "is_user_online_message",
-                            "end_of_llm_stream": True,
-                        }
-                        await self._synthesize(create_ws_data_packet(user_online_message, meta_info=meta_info))
-                    else:
-                        meta_info = {
-                            "io": self.tools["output"].get_provider(),
-                            "request_id": str(uuid.uuid4()),
-                            "cached": False,
-                            "sequence_id": -1,
-                            "format": "pcm",
-                            "message_category": "is_user_online_message",
-                            "end_of_llm_stream": True,
-                        }
+                    meta_info = {
+                        "io": "default" if self.should_record else self.tools["output"].get_provider(),
+                        "request_id": str(uuid.uuid4()),
+                        "cached": False,
+                        "sequence_id": -1,
+                        "format": "wav" if self.should_record else "pcm",
+                        "message_category": IS_USER_ONLINE_MESSAGE,
+                        "end_of_llm_stream": True,
+                    }
+                    if not await self.__play_fixed_line_clip(user_online_message, meta_info):
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info=meta_info))
                     if self.user_online_message_in_llm_history:
                         # Tells the LLM why it asked, so a "yes" answers the check and the open question stays open.
@@ -8782,18 +9085,9 @@ class TaskManager(BaseManager):
                         sequence_id=-1,
                         message_category="is_user_online_message",
                     )
-
-                    # Explicitly reset the audio flag after synthesizing the prompt.
-                    # handle_interruption() below sends clearAudio to Plivo and wipes the
-                    # mark dictionary, so the final-chunk mark echo will never arrive and
-                    # is_audio_being_played would stay stuck True forever — blocking the
-                    # silence-hangup gate in this loop indefinitely.
-                    self.tools["input"].update_is_audio_being_played(
-                        False, AudioPlaybackReason.SILENCE_HANGUP_INTERRUPT
-                    )
-
-                # Just in case we need to clear messages sent before
-                await self.tools["output"].handle_interruption()
+                else:
+                    # Just in case we need to clear messages sent before
+                    await self.tools["output"].handle_interruption()
             else:
                 logger.info(
                     f"Only {time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence not cutting the phone call"
@@ -9238,7 +9532,7 @@ class TaskManager(BaseManager):
                     logger.info(f"S2S caller: {event.content[:200]}")
                     self.user_spoke = True
                     self.conversation_history.append_user(event.content)
-                    self.time_since_last_spoken_human_word = time.time()
+                    self._note_caller_speech()
                     # Cleared here rather than in the output loop: the prompt's audio is not
                     # distinguishable from any other turn, but the caller answering is.
                     self.asked_if_user_is_still_there = False
@@ -9256,7 +9550,7 @@ class TaskManager(BaseManager):
                 # can give the agent the floor back. Barge-in sensitivity is tuned provider-side.
                 self.interruption_manager.on_user_speech_started()
                 # A speech start refreshes liveness, barge-in or not.
-                self.time_since_last_spoken_human_word = time.time()
+                self._note_caller_speech()
                 if self._s2s_agent_has_floor():
                     logger.info("S2S: caller barged in, dropping queued audio")
                     self.interruption_manager.on_interruption_triggered()
@@ -9867,6 +10161,7 @@ class TaskManager(BaseManager):
                     "synthesizer_characters": (
                         self.tools["synthesizer"].get_synthesized_characters() if _has_asr_tts else 0
                     ),
+                    "synthesizer_cached_characters": self.synthesizer_cached_characters,
                     "ended_by_assistant": self.ended_by_assistant,
                     "user_spoke": self.user_spoke,
                     "node_extracted_data": (

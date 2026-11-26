@@ -64,6 +64,9 @@ class InterruptionManager:
         self._last_user_start_ts: float = -1
         self._pending_user_start_ts: float = -1  # snapshot of user_start paired with _adjusted_user_stop_ts
         self.user_bot_latencies: List[Dict] = []
+        # Arrival of the first below-threshold interim over agent audio, and when the caller last stopped speaking.
+        self.first_ignored_interim_ts: float = -1
+        self.last_speech_ended_ts: float = -1
 
         logger.info(
             f"InterruptionManager initialized: "
@@ -180,6 +183,7 @@ class InterruptionManager:
         for user_bot_latencies; the former avoids vendor endpointing lag.
         """
         self.callee_speaking = False
+        self.last_speech_ended_ts = time.time()
         self.let_remaining_audio_pass_through = True
         self.time_since_first_interim_result = -1
         self.last_interim_ts = -1
@@ -473,6 +477,22 @@ class InterruptionManager:
     def is_user_speaking(self) -> bool:
         """Returns True if user is currently speaking."""
         return self.callee_speaking
+
+    def note_ignored_interim(self) -> None:
+        """An interim too short to barge in arrived over agent audio: the earliest sign the caller started."""
+        if self.first_ignored_interim_ts <= self.last_speech_ended_ts:
+            self.first_ignored_interim_ts = time.time()
+
+    def get_barge_in_onset(self, user_start_ts_wall: Optional[float] = None) -> Optional[float]:
+        """When the caller began talking over the agent in the current utterance, None if unknown.
+        No candidate is earlier than the speech, so the earliest is closest; any from before
+        the caller's last speech end belongs to an earlier utterance and is dropped."""
+        candidates = [
+            ts
+            for ts in (user_start_ts_wall, self.first_ignored_interim_ts)
+            if ts is not None and ts > 0 and ts > self.last_speech_ended_ts
+        ]
+        return min(candidates) if candidates else None
 
     def is_valid_sequence(self, sequence_id: int) -> bool:
         """Returns True if sequence_id is still valid."""

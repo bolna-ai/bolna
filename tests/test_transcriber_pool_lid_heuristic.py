@@ -6,8 +6,9 @@ heuristic that (in LID_MODE=active) delegates the switch to on_lid_switch.
 """
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 
 from bolna.transcriber.transcriber_pool import TranscriberPool
 
@@ -85,3 +86,29 @@ async def test_cooldown_suppresses_rapid_resignal():
     await pool._handle_lid_signal("en", 0.95)
     cb.assert_not_awaited()
     assert pool.lid_detection_events[0]["suppressed_reason"] == "cooldown"
+
+
+@pytest.mark.parametrize(
+    "switch_on,mode,detector_opened",
+    [(True, "shadow", True), (False, "shadow", False), (False, "active", True)],
+    ids=["switch-on", "switch-off-shadow", "switch-off-active"],
+)
+async def test_detector_opens_only_when_its_result_is_used(switch_on, mode, detector_opened):
+    pool = TranscriberPool(
+        transcribers={"hi": FakeTranscriber(), "en": FakeTranscriber()},
+        shared_input_queue=asyncio.Queue(),
+        output_queue=asyncio.Queue(),
+        active_label="hi",
+        multilingual_config={"hi": {"language": "hi"}, "en": {"language": "en"}},
+        lid_provider="sarvam",
+        on_lid_switch=None if switch_on else AsyncMock(),
+    )
+    pool._lid_mode = mode
+    detector = MagicMock(start=AsyncMock())
+    with patch("bolna.transcriber.transcriber_pool.LIDProvider.create", return_value=detector) as create:
+        await pool.run()
+    for task in (pool._router_task, pool._keepalive_task):
+        if task:
+            task.cancel()
+    assert create.called is detector_opened
+    assert (pool._lid is detector) is detector_opened

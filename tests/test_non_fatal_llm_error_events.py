@@ -170,6 +170,7 @@ async def test_an_empty_turn_names_the_finish_reason():
     tm.tools = {"input": MagicMock(reset_response_heard_by_user=MagicMock())}
     tm._stamp_llm_latency_dict = MagicMock()
     tm._inject_language_instruction = lambda messages: messages
+    tm.prompt_transcript_due = lambda speculative=False: False
     tm._handle_llm_output = AsyncMock()
     tm._TaskManager__process_stop_words = lambda data, meta_info: data
     tm._TaskManager__store_into_history = MagicMock()
@@ -242,6 +243,7 @@ async def test_azure_chat_stream_stashes_the_finish_reason():
 
 async def test_litellm_stream_stashes_the_finish_reason():
     llm = stub_chat_llm()
+    llm._acompletion = LiteLLM._acompletion.__get__(llm)
     chunks = [
         {"choices": [{"delta": SimpleNamespace(content=None, tool_calls=None), "finish_reason": None}]},
         {"choices": [{"delta": SimpleNamespace(content=None, tool_calls=None), "finish_reason": "length"}]},

@@ -33,7 +33,7 @@ from bolna.constants import (
     END_CALL_FUNCTION_PREFIX,
     UPDATE_MEMORY_FUNCTION_NAME,
 )
-from bolna.enums import LogComponent, LogDirection, SynthesizerProvider, UsageSource
+from bolna.enums import LogComponent, LogDirection, NodeType, SynthesizerProvider, UsageSource
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
 import audioop
@@ -286,7 +286,12 @@ async def get_s3_file(bucket_name=BUCKET_NAME, file_key=""):
         s3_client = await exit_stack.enter_async_context(session.create_client("s3"))
         try:
             response = await s3_client.get_object(Bucket=bucket_name, Key=file_key)
-        except (BotoCoreError, ClientError) as error:
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") == "NoSuchKey":
+                logger.info("No S3 object at the requested key")
+            else:
+                logger.error(error)
+        except BotoCoreError as error:
             logger.error(error)
         else:
             file_content = await response["Body"].read()
@@ -310,9 +315,23 @@ async def delete_s3_file_by_prefix(bucket_name, file_key):
             return error
 
 
+async def list_s3_objects(bucket_name, prefix):
+    """(key, last-modified epoch seconds) for every object under prefix."""
+    session = AioSession()
+    async with AsyncExitStack() as exit_stack:
+        s3_client = await exit_stack.enter_async_context(session.create_client("s3"))
+        objects = []
+        paginator = s3_client.get_paginator("list_objects_v2")
+        async for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+            for item in page.get("Contents", []):
+                objects.append((item["Key"], item["LastModified"].timestamp()))
+        return objects
+
+
 async def store_file(
     bucket_name=None, file_key=None, file_data=None, content_type="json", local=False, preprocess_dir=None
 ):
+    """Write file_data to S3, or under PREPROCESS_DIR when local; True once it is written."""
     if not local:
         session = AioSession()
 
@@ -325,10 +344,12 @@ async def store_file(
                 data = file_data
             try:
                 await s3_client.put_object(Bucket=bucket_name, Key=file_key, Body=data)
+                return True
             except (BotoCoreError, ClientError) as error:
                 logger.error(error)
             except Exception as e:
                 logger.error("Exception occurred while s3 put object: {}".format(e))
+            return False
     if local:
         dir_name = PREPROCESS_DIR if preprocess_dir is None else preprocess_dir
         directory_path = os.path.join(dir_name, os.path.dirname(file_key))
@@ -347,8 +368,17 @@ async def store_file(
                 with open(f"{dir_name}/{file_key}", "wb") as f:
                     data = file_data
                     f.write(data)
+            return True
         except Exception as e:
             logger.error(f"Could not save local file {e}")
+            return False
+
+
+def agent_audio_key(filename, audio_format, agent_name=None, assistant_id=None, local=False):
+    """Where an agent's stored clip lives: a path under PREPROCESS_DIR locally, an S3 key otherwise."""
+    if local:
+        return f"{agent_name}/{audio_format}/{filename}.{audio_format}"
+    return f"{assistant_id}/audio/{filename}.{audio_format}"
 
 
 async def get_raw_audio_bytes(
@@ -358,7 +388,7 @@ async def get_raw_audio_bytes(
     audio_data = None
     if local:
         if not is_location:
-            file_name = f"{PREPROCESS_DIR}/{agent_name}/{audio_format}/{filename}.{audio_format}"
+            file_name = f"{PREPROCESS_DIR}/{agent_audio_key(filename, audio_format, agent_name=agent_name, local=True)}"
         else:
             file_name = filename
         if os.path.isfile(file_name):
@@ -369,7 +399,7 @@ async def get_raw_audio_bytes(
             audio_data = None
     else:
         if not is_location:
-            object_key = f"{assistant_id}/audio/{filename}.{audio_format}"
+            object_key = agent_audio_key(filename, audio_format, assistant_id=assistant_id)
         else:
             object_key = filename
 
@@ -377,6 +407,14 @@ async def get_raw_audio_bytes(
         audio_data = await get_s3_file(BUCKET_NAME, object_key)
 
     return audio_data
+
+
+async def store_raw_audio_bytes(audio, filename, agent_name=None, audio_format="mp3", assistant_id=None, local=False):
+    """Store a clip where get_raw_audio_bytes reads it back."""
+    file_key = agent_audio_key(filename, audio_format, agent_name=agent_name, assistant_id=assistant_id, local=local)
+    await store_file(
+        bucket_name=BUCKET_NAME, file_key=file_key, file_data=audio, content_type=audio_format, local=local
+    )
 
 
 def scalar_fields(data, max_len=120):
@@ -408,6 +446,25 @@ def static_node_audio_key(
     if pronunciation:
         identity = f"{identity}|{pronunciation}"
     return get_md5_hash(f"{identity}|{text}")
+
+
+def tts_voice_identity(provider, provider_config, pronunciation_rules=None):
+    """Digest of every synthesizer setting that shapes the rendered audio."""
+    rules = [rule.model_dump() if hasattr(rule, "model_dump") else rule for rule in pronunciation_rules or []]
+    settings = {"provider": provider, "provider_config": provider_config, "pronunciation_rules": rules}
+    return get_md5_hash(json.dumps(settings, sort_keys=True, default=str))
+
+
+def fixed_line_clip_key(text, voice_identity, wire_format):
+    """Filename stem for a stored fixed-line clip, bound to its voice and wire format; a new month renders it afresh."""
+    month = time.strftime("%Y-%m", time.gmtime())
+    return get_md5_hash(f"{voice_identity}|{wire_format}|{month}|{text}")
+
+
+def has_template_variables(message_config):
+    """True when any language's text carries a {variable}, so it renders differently per call."""
+    texts = message_config.values() if isinstance(message_config, dict) else [message_config]
+    return any(isinstance(text, str) and render_prompt(text, {}) != text for text in texts)
 
 
 def cartesia_supports_pronunciation_dict(model):
@@ -1231,6 +1288,60 @@ def select_message_by_language(message_config: Union[str, dict], detected_langua
 
         return next((v for v in message_config.values() if v and v.strip()), "")
     return ""
+
+
+def static_start_node(task: dict) -> Optional[dict]:
+    """A graph agent task's start node, when that node is static."""
+    llm_agent = (task.get("tools_config") or {}).get("llm_agent") or {}
+    if llm_agent.get("agent_type") != "graph_agent":
+        return None
+    llm_config = llm_agent.get("llm_config") or {}
+    start_node_id = llm_config.get("current_node_id")
+    start_node = next((n for n in llm_config.get("nodes") or [] if n.get("id") == start_node_id), None)
+    return start_node if start_node and start_node.get("node_type") == NodeType.STATIC else None
+
+
+def message_language_key(language: Optional[str]) -> Optional[str]:
+    """The key a language-keyed message is stored under: "hi-IN" and "multi-hi" both read "hi"."""
+    parts = (language or "").split("-")
+    return (parts[1] if parts[0] == "multi" and len(parts) > 1 else parts[0]) or None
+
+
+def static_node_message(node: dict, language: Optional[str] = None) -> str:
+    """A static node's message in a transcriber language, keyed as message_language_key reads it."""
+    return select_message_by_language(node.get("static_message"), message_language_key(language))
+
+
+def graph_opening_language(task: dict) -> Optional[str]:
+    """The language a graph call opens in: the one call setup pinned when it rendered the opening audio,
+    otherwise the transcriber's starting language."""
+    tools_config = task.get("tools_config") or {}
+    llm_config = (tools_config.get("llm_agent") or {}).get("llm_config") or {}
+    transcriber = tools_config.get("transcriber") or {}
+    return llm_config.get("opening_language") or message_language_key(
+        transcriber.get("active") or transcriber.get("language")
+    )
+
+
+def graph_opening_node(task: dict) -> Optional[dict]:
+    """The static start node that opens the call in place of the welcome message: only on a call whose
+    graph config sets static_start_opening, and only when the node has a message to say."""
+    llm_config = ((task.get("tools_config") or {}).get("llm_agent") or {}).get("llm_config") or {}
+    if not llm_config.get("static_start_opening"):
+        return None
+    node = static_start_node(task)
+    return node if node and static_node_message(node, graph_opening_language(task)).strip() else None
+
+
+def graph_opening_message(agent_config: dict) -> str:
+    """The line an agent opens the call with: its graph opening node's message when it has one, otherwise
+    its welcome message. The runtime and the call-setup pre-render both resolve it here so the audio and
+    the transcript carry one text."""
+    tasks = agent_config.get("tasks") or []
+    node = graph_opening_node(tasks[0]) if tasks else None
+    if node:
+        return static_node_message(node, graph_opening_language(tasks[0]))
+    return agent_config.get("agent_welcome_message") or ""
 
 
 def has_non_english_variants(message_config: Union[str, dict]) -> bool:

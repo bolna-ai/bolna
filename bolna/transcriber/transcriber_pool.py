@@ -243,8 +243,8 @@ class TranscriberPool:
             self._keepalive_task = asyncio.create_task(self._standby_keepalive())
         logger.info(f"TranscriberPool: audio router started, active='{self.active_label}'")
 
-        # Start LID tap if configured
-        if self._lid_provider_name:
+        # The detector runs only when the switch is on or the legacy heuristic is active.
+        if self._lid_provider_name and (self._on_lid_switch is None or self._lid_mode == "active"):
             await self._start_lid_tap()
 
     @staticmethod

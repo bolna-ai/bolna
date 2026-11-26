@@ -49,7 +49,7 @@ from .output_handlers import (
     SipTrunkOutputHandler,
     FreeSwitchOutputHandler,
 )
-from .llms import OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
+from .llms import OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM, BedrockLLM
 from .s2s import GeminiLiveS2S, OpenAIRealtimeS2S
 from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider, S2SProvider
 from .constants import ELEVENLABS_DIALOGUE_MODEL_PREFIXES
@@ -133,6 +133,7 @@ SUPPORTED_LLM_PROVIDERS = {
     LLMProvider.GOOGLE.value: GeminiLLM,
     LLMProvider.BOLNA.value: OpenAiLLM,
     LLMProvider.SARVAM.value: OpenAiLLM,
+    LLMProvider.BEDROCK.value: BedrockLLM,
 }
 SUPPORTED_INPUT_HANDLERS = {
     TelephonyProvider.DEFAULT.value: DefaultInputHandler,

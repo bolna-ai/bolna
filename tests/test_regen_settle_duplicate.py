@@ -394,8 +394,8 @@ class _NothingAckedYet:
 
 async def _reply_cut_then_regenerated(heard):
     tm = _live_manager()
-    tm.tools["input"].get_response_heard_for_response.return_value = heard
-    tm.tools["input"].get_response_heard_for_turn.return_value = heard
+    tm.tools["input"].response_heard_by_response = {"r4": heard}
+    tm.tools["input"].response_heard_by_turn = {4: heard}
     tm.mark_event_meta_data = _NothingAckedYet()
     tm._active_llm_client = lambda: None
 
