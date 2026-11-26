@@ -28,7 +28,8 @@ logger = configure_logger(__name__)
 load_dotenv()
 
 _CUSTOM_ENDPOINT_TIMEOUT_SECONDS = 20
-# Our own servers answer fast or not at all: a stalled request fails within seconds instead of being retried.
+# Our own servers answer fast or not at all: a stalled request fails within seconds, and one retry rides out a blip
+# before the error reaches the call (and its fallback, if the agent has one).
 _PLATFORM_TIMEOUT = httpx.Timeout(20.0, connect=2.0, read=5.0)
 # The load balancer keeps idle connections open far longer than httpx's 5 s, so the call-start warm-up and
 # a quiet stretch of the call still reuse the connection.
@@ -85,7 +86,7 @@ class OPENAISynthesizer(BaseSynthesizer):
         # Our own endpoint comes from the server's environment and may be private; only a customer's is guarded.
         if platform_endpoint:
             http_client = DefaultAsyncHttpxClient(follow_redirects=False, limits=_PLATFORM_CONNECTION_LIMITS)
-            limits = {"timeout": _PLATFORM_TIMEOUT, "max_retries": 0}
+            limits = {"timeout": _PLATFORM_TIMEOUT, "max_retries": 1}
         elif endpoint:
             http_client = DefaultAsyncHttpxClient(follow_redirects=False, transport=guarded_transport())
             limits = {"timeout": _CUSTOM_ENDPOINT_TIMEOUT_SECONDS, "max_retries": 1}
@@ -200,9 +201,9 @@ class OPENAISynthesizer(BaseSynthesizer):
         return buffer.getvalue()
 
     async def synthesize(self, text):
-        if not self.platform_endpoint:
+        if not self.streams_pcm:
             return await self._generate_http(text)
-        # Callers of our own servers get WAV, whose header carries the rate; they decode nothing else for it.
+        # A PCM server's clip comes back as WAV, whose header carries the rate; callers decode nothing else for it.
         audio = await self._generate_http(text, response_format="pcm")
         trimmer = PcmEdgeTrimmer(self.pcm_sample_rate)
         audio = trimmer.feed(audio or b"") + trimmer.finish(FINAL_TAIL_MS)
@@ -239,6 +240,7 @@ class OPENAISynthesizer(BaseSynthesizer):
             await self.async_client.models.list()
         except Exception as e:
             logger.info(f"Speech endpoint warm-up did not complete: {e}")
+            return
         self.connection_time = round((time.perf_counter() - started) * 1000)
 
     def _reset_pcm_stream(self):

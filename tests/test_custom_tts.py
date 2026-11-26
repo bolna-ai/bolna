@@ -605,7 +605,7 @@ class TestBolnaProvider:
 
     def test_our_own_endpoint_fails_fast_and_keeps_idle_connections(self, monkeypatch):
         client = self._bolna(monkeypatch).async_client
-        assert (client.timeout, client.max_retries) == (httpx.Timeout(20.0, connect=2.0, read=5.0), 0)
+        assert (client.timeout, client.max_retries) == (httpx.Timeout(20.0, connect=2.0, read=5.0), 1)
         assert client._client._transport._pool._keepalive_expiry == 120
         assert _custom_tts().async_client._client._transport._pool._keepalive_expiry == 5
 
@@ -653,6 +653,20 @@ class TestBolnaProvider:
         assert clip[:4] == b"RIFF" and clip.endswith(_A)
         assert int.from_bytes(clip[24:28], "little") == 24000
         assert create.call_args.kwargs["response_format"] == "pcm"
+
+    async def test_a_customer_pcm_server_gets_one_shot_renders_as_pcm_too(self, monkeypatch):
+        monkeypatch.setattr("bolna.synthesizer.openai_synthesizer.validate_outbound_url", AsyncMock())
+        synth = _custom_tts(response_format="pcm", sampling_rate=8000)
+        create = AsyncMock(return_value=MagicMock(iter_bytes=lambda chunk_size: [_A]))
+        synth.async_client.audio.speech.create = create
+        clip = await synth.synthesize("hello")
+        assert clip[:4] == b"RIFF" and create.call_args.kwargs["response_format"] == "pcm"
+
+    async def test_a_failed_warm_up_reports_no_connection_time(self, monkeypatch):
+        synth = self._bolna(monkeypatch)
+        synth.async_client.models.list = AsyncMock(side_effect=httpx.ConnectTimeout("no route"))
+        await synth.monitor_connection()
+        assert synth.connection_time is None
 
     @pytest.mark.parametrize(
         "language, sent",
