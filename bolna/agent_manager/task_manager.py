@@ -2713,8 +2713,21 @@ class TaskManager(BaseManager):
         return "".join(played_text)
 
     @staticmethod
-    def _pending_text_chunks(mark_events_data, target_turn_id):
-        """The target turn's pending audio marks for the playback estimate, or none when no mark carries text."""
+    def _fold_textless_marks(chunks):
+        """Where text rides on a request's closing mark only (Azure, OpenAI-compatible PCM streaming), the text-less
+        marks before it are its speech, credited nothing, and the closing mark ends the request: its text counts in
+        full once that speech has played, so a caller speaking in the pause after a sentence heard all of it."""
+        folded = []
+        for chunk in chunks:
+            if chunk["text"] and folded and not folded[-1]["text"]:
+                folded.append({**chunk, "duration": 0})
+                chunk = {**chunk, "text": ""}
+            folded.append(chunk)
+        return folded
+
+    @classmethod
+    def _pending_text_chunks(cls, mark_events_data, target_turn_id):
+        """The target turn's pending audio for the playback estimate, or none when no mark carries text."""
         chunks = [
             {
                 "text": mark_data.get("text_synthesized") or "",
@@ -2725,9 +2738,7 @@ class TaskManager(BaseManager):
             if mark_data.get("type", "") not in ("pre_mark_message", "backchanneling")
             and (target_turn_id is None or mark_data.get("turn_id") == target_turn_id)
         ]
-        # Where text rides on some marks only (a request's closing one), the text-less ones are the audio before
-        # it: they keep their playing time, and the turn's first mark starts the clock.
-        return chunks if any(chunk["text"] for chunk in chunks) else []
+        return cls._fold_textless_marks(chunks) if any(chunk["text"] for chunk in chunks) else []
 
     async def sync_history(
         self, mark_events_data, interruption_processed_at, extend_with_playback_estimate=False, caller_onset=None
@@ -2797,6 +2808,7 @@ class TaskManager(BaseManager):
                             "sent_ts": sent_ts,
                         }
                     )
+                pending_tail = self._fold_textless_marks(pending_tail)
                 if pending_tail and last_acked:
                     # Proportional by the wall clock since playback of the tail could start: the last ACK,
                     # or the tail's send if it was still being generated then. The ACK lags true playout end,

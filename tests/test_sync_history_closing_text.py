@@ -54,11 +54,14 @@ def test_marks_with_no_text_select_nothing_as_before():
     assert TaskManager._pending_text_chunks(marks, 8) == _selected_before(marks, 8) == []
 
 
-def test_closing_text_keeps_the_audio_before_it():
-    marks = _closing_text_marks()
-    chunks = TaskManager._pending_text_chunks(marks, 8)
-    assert len(chunks) == 12 and chunks[0]["sent_ts"] == 100.0
-    assert sum(chunk["duration"] for chunk in chunks) == 9.9
+def test_closing_text_counts_once_the_speech_before_it_played():
+    chunks = TaskManager._pending_text_chunks(_closing_text_marks(), 8)
+    sentence = [("", 1.0)] * 3
+    expected = []
+    for text in ["First sentence. ", "Second sentence. ", "Third sentence. "]:
+        expected += sentence + [(text, 0), ("", 0.3)]
+    assert [(chunk["text"], chunk["duration"]) for chunk in chunks] == expected
+    assert chunks[0]["sent_ts"] == 100.0
 
 
 class _Input:
@@ -77,7 +80,7 @@ class _MarkMeta:
     heard_text_by_turn = {}
 
 
-async def test_a_barge_in_inside_the_second_sentence_credits_the_first_only():
+def _sync_target():
     history = ConversationHistory()
     history.append_user("hello")
     history.append_assistant("First sentence. Second sentence. Third sentence.", turn_id=8)
@@ -88,8 +91,18 @@ async def test_a_barge_in_inside_the_second_sentence_credits_the_first_only():
     tm._turn_msg_map = {}
     tm._last_spoken_assistant = None
     tm._pending_assistant_history = {}
+    return tm, history
 
+
+async def test_a_barge_in_inside_the_second_sentence_credits_the_first_only():
+    tm, history = _sync_target()
     # 4.0 s after the first packet went out: the first sentence (3.3 s) is over, the second is under way.
     await tm.sync_history(_closing_text_marks(), interruption_processed_at=104.0)
+    assert [m["content"] for m in history.messages if m["role"] == "assistant"] == ["First sentence."]
 
+
+async def test_a_barge_in_in_the_pause_after_a_sentence_credits_all_of_it():
+    tm, history = _sync_target()
+    # 3.2 s in: the first sentence's speech is over and its closing pause is playing.
+    await tm.sync_history(_closing_text_marks(), interruption_processed_at=103.2)
     assert [m["content"] for m in history.messages if m["role"] == "assistant"] == ["First sentence."]
