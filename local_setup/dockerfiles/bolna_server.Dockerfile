@@ -43,6 +43,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY quickstart_server.py /app/
 COPY presets /app/presets
 
+COPY synthesizers.html /app/
+
 EXPOSE 5001
 
 CMD ["uvicorn", "quickstart_server:app", "--host", "0.0.0.0", "--port", "5001"]

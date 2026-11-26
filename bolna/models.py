@@ -15,6 +15,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 from .providers import *
+from .synthesizer.gnani_config import GnaniConfig, timbre_speed
 from .enums import (
     TelephonyProvider,
     SynthesizerProvider,
@@ -182,6 +183,12 @@ def tts_provider_config_error(provider: str, provider_config: Optional[dict]) ->
             return locators_error
     model = provider_config.get("model")
     for key, value in provider_config.items():
+        if provider == SynthesizerProvider.GNANI and key == "speed":
+            try:
+                timbre_speed(model or GnaniConfig.model_fields["model"].default, value)
+            except ValueError as exc:
+                return str(exc)
+            continue
         bounds = tts_control_range(provider, key, model)
         if bounds is None or value is None:
             continue
@@ -352,6 +359,7 @@ class NavanaConfig(StandardVoiceConfig):
 # one entry here.
 SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.POLLY.value: PollyConfig,
+    SynthesizerProvider.GNANI.value: GnaniConfig,
     SynthesizerProvider.ELEVENLABS.value: ElevenLabsConfig,
     SynthesizerProvider.OPENAI.value: OpenAIConfig,
     SynthesizerProvider.DEEPGRAM.value: DeepgramConfig,
@@ -449,7 +457,7 @@ PronunciationRules = Annotated[
 
 
 class Synthesizer(BaseModel):
-    provider: str
+    provider: str = Field(json_schema_extra={"enum": SynthesizerProvider.all_values()})
     # Derived from the registry so a provider registered there is always accepted here.
     provider_config: Union[tuple(SYNTHESIZER_CONFIG_MODELS.values())] = Field(union_mode="smart")
     stream: bool = False

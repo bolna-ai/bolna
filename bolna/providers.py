@@ -1,5 +1,6 @@
 from .synthesizer import (
     PollySynthesizer,
+    GnaniSynthesizer,
     ElevenlabsSynthesizer,
     ElevenlabsV3Synthesizer,
     OPENAISynthesizer,
@@ -76,6 +77,7 @@ def custom_synthesizer(**kwargs):
 
 SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.POLLY.value: PollySynthesizer,
+    SynthesizerProvider.GNANI.value: GnaniSynthesizer,
     SynthesizerProvider.ELEVENLABS.value: elevenlabs_synthesizer,
     SynthesizerProvider.OPENAI.value: OPENAISynthesizer,
     SynthesizerProvider.DEEPGRAM.value: DeepgramSynthesizer,

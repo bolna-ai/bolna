@@ -94,12 +94,15 @@ EXPECTED_FIELDS = {
         "chunk_length_schedule": False,
     },
     "navana": {"voice": True, "voice_id": True, "model": True, "language": True},
+    "gnani": {"model": False, "voice": True, "language": False, "speed": False, "stream_transport": False},
     "custom": {"voice": True, "model": True, "speed": False, "extra_body": False},
 }
 
 
 # Every required field on every config is a plain string, so one filler serves them all.
 def _minimal_config(provider):
+    if provider == "gnani":
+        return {"voice": "Nalini"}
     return {field: "x" for field, required in EXPECTED_FIELDS[provider].items() if required}
 
 

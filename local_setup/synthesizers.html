@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Text-to-speech configuration · Bolna</title>
+  <style>
+    body { font: 1rem/1.5 system-ui,sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; color: #192e29; }
+    h1 { font-size: 1.6rem; }
+    fieldset { display: grid; grid-template-columns: repeat(auto-fit,minmax(12rem,1fr)); gap: 1rem; border: 0; padding: 0; }
+    label { font-weight: 600; }
+    input,select { display: block; width: 100%; box-sizing: border-box; padding: .55rem; font: inherit; }
+    pre { padding: .8rem; background: #f2f5f4; white-space: pre-wrap; overflow-wrap: anywhere; }
+    [hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Text-to-speech configuration</h1>
+  <label>Search providers <input id="provider" list="providers" placeholder="Provider name" disabled></label>
+  <datalist id="providers"></datalist>
+  <fieldset id="settings" hidden>
+    <legend>Voice settings</legend>
+    <label>Model<select id="model"></select></label>
+    <label>Voice<select id="voice"></select></label>
+    <label>Language<select id="language"></select></label>
+  </fieldset>
+  <p>Use <code>tools_config.synthesizer</code> when <a href="/docs#/default/create_agent_agent_post">creating an agent</a>.</p>
+  <pre id="config" aria-live="polite">Loading providers…</pre>
+  <script type="module">
+    const byId = id => document.getElementById(id);
+    function setChoices(field, values) {
+      byId(field).replaceChildren(...values.map(value => new Option(value, value)));
+    }
+    try {
+      const response = await fetch('/openapi.json');
+      if (!response.ok) throw new Error('Schema unavailable');
+      const schemas = (await response.json()).components.schemas;
+      const providers = schemas.Synthesizer.properties.provider.enum;
+      const catalog = schemas.GnaniConfig['x-model-voices'];
+      byId('providers').replaceChildren(...providers.map(id => new Option(id === 'gnani' ? 'Gnani AI' : id, id)));
+      setChoices('model', schemas.GnaniConfig.properties.model.enum);
+      setChoices('language', schemas.GnaniConfig.properties.language.enum);
+      function show() {
+        const provider = byId('provider').value;
+        byId('settings').hidden = provider !== 'gnani';
+        if (provider === 'gnani') {
+          byId('config').textContent = JSON.stringify({provider, provider_config: {
+            model: byId('model').value, voice: byId('voice').value, language: byId('language').value
+          }}, null, 2);
+        } else {
+          byId('config').textContent = providers.includes(provider)
+            ? 'See the agent API schema for the settings accepted by ' + provider + '.'
+            : 'Select a provider.';
+        }
+      }
+      function changeModel() {
+        setChoices('voice', catalog[byId('model').value]);
+        show();
+      }
+      byId('model').addEventListener('change', changeModel);
+      byId('voice').addEventListener('change', show);
+      byId('language').addEventListener('change', show);
+      byId('provider').addEventListener('input', show);
+      byId('provider').disabled = false;
+      changeModel();
+    } catch {
+      byId('config').textContent = 'Could not load the agent schema. Reload to try again.';
+    }
+  </script>
+</body>
+</html>

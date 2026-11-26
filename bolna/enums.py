@@ -61,6 +61,7 @@ class SynthesizerProvider(str, Enum):
     AZURETTS = "azuretts"
     CARTESIA = "cartesia"
     SMALLEST = "smallest"
+    GNANI = "gnani"
     SARVAM = "sarvam"
     RIME = "rime"
     PIXA = "pixa"
