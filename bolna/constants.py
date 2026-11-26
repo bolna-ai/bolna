@@ -324,6 +324,7 @@ RESERVED_LLM_REQUEST_KEYS = frozenset(
 # OpenAI-compatible LLM vendors: (base URL, env var holding the platform key).
 LLM_VENDOR_ENDPOINTS = {
     LLMProvider.SARVAM.value: ("https://api.sarvam.ai/v1", "SARVAM_API_KEY"),
+    LLMProvider.ATLASCLOUD.value: ("https://api.atlascloud.ai/v1", "ATLASCLOUD_API_KEY"),
 }
 # Speech request fields that shape what bolna sends and gets back; a custom TTS's extra_body may not set them.
 RESERVED_TTS_REQUEST_KEYS = frozenset({"model", "voice", "input", "response_format", "stream_format"})

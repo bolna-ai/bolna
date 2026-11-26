@@ -191,6 +191,8 @@ class OpenAIWSConnection:
 
 
 class OpenAiLLM(OpenAICompatibleLLM):
+    # Stop sequences sent on chat streaming requests to non-reasoning models; None sends none.
+    STOP_SEQUENCES = ("User:",)
     _base_url = None
     _base_url_validated = False
 
@@ -344,8 +346,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
             "stream_options": {"include_usage": True},
         }
 
-        if not is_reasoning_model(self.model_family):
-            model_args["stop"] = ["User:"]
+        if self.STOP_SEQUENCES and not is_reasoning_model(self.model_family):
+            model_args["stop"] = list(self.STOP_SEQUENCES)
 
         if self.trigger_function_call:
             _tools = self._parse_tools(tools)
