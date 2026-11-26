@@ -190,7 +190,11 @@ def test_a_provider_switch_runs_on_the_credentials_resolved_for_that_node():
         service_tier="priority",
         overflow_llm={"api_key": "o", "base_url": "https://o.example", "model": "m"},
         node_llm_credentials={
-            "n1": {"llm_key": "node-azure-key", "base_url": "https://node.openai.azure.com", "api_version": "2024-12-01"}
+            "n1": {
+                "llm_key": "node-azure-key",
+                "base_url": "https://node.openai.azure.com",
+                "api_version": "2024-12-01",
+            }
         },
     ) as agent:
         llm = agent._conversation_llm_for(
