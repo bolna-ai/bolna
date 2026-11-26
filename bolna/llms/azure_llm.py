@@ -51,7 +51,8 @@ def azure_openai_allowed_domains() -> tuple:
 def is_azure_openai_endpoint(url) -> bool:
     """Whether an endpoint is a plain https URL on an allowed domain or one of its subdomains."""
     try:
-        parts = urlsplit(url.strip())
+        url = url.strip()
+        parts = urlsplit(url)
         port = parts.port
     except (AttributeError, ValueError):
         return False
@@ -60,8 +61,9 @@ def is_azure_openai_endpoint(url) -> bool:
         parts.scheme == "https"
         and parts.username is None
         and port in (None, 443)
-        and not parts.query
-        and not parts.fragment
+        # Not just an empty query or fragment: a bare "?" or "#" would swallow the API path appended to the endpoint.
+        and "?" not in url
+        and "#" not in url
         and any(host == domain or host.endswith(f".{domain}") for domain in azure_openai_allowed_domains())
     )
 

@@ -34,6 +34,8 @@ def test_azure_openai_hosts_are_accepted(url):
         "https://user@acme.openai.azure.com/",
         "https://acme.openai.azure.com:8080/",
         "https://acme.openai.azure.com:bad/",
+        "https://acme.openai.azure.com?",
+        "https://acme.openai.azure.com/#",
         "https://169.254.169.254/",
         "",
         None,
