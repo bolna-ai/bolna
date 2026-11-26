@@ -291,7 +291,8 @@ _CLOSER = {"<<": ">>", "[[": "]]", "^^": "^^", "<": ">", "</": ">", "[": "]"}
 
 MAX_TAG_CHARS = 80  # an open tag longer than this was never a tag
 # The head of a tag that never closed: "<<spell:" keeps the "4821" after it; only a pause's number goes with it.
-_TAG_HEAD = re.compile(r"<<\s*[\w-]*:?|\[\[\s*[\w-]*(?:\s+\d+(?:\.\d+)?\s*(?:ms|s)?)?|\^\^")
+# The number needs a name before it, so no two space matchers can share the same spaces.
+_TAG_HEAD = re.compile(r"<<\s*[\w-]*:?|\[\[\s*(?:[\w-]+(?:\s+\d+(?:\.\d+)?\s*(?:ms|s)?)?)?|\^\^")
 
 
 def split_unfinished(text, final=False):
@@ -332,7 +333,8 @@ def kept_text(segments):
     return _SPACES.sub(" ", "".join(s.text for s in segments if isinstance(s, (Words, RawTag))))
 
 
-_GAP_BEFORE_PUNCTUATION = re.compile(r"\s+([.,!?;:।])")
+# Matched only from the start of a run of spaces, so a long run is scanned once, not once per space.
+_GAP_BEFORE_PUNCTUATION = re.compile(r"(?<!\s)\s+(?=[.,!?;:।])")
 
 
 def remove_tags(text):
@@ -340,7 +342,7 @@ def remove_tags(text):
     ready = split_unfinished(text, final=True)[0]  # a tag an interruption cut off loses its head too
     if ready == text and all(isinstance(s, Words) and not s.delivery for s in parse(text)):
         return text  # nothing to remove: the text stays exactly as written
-    return _GAP_BEFORE_PUNCTUATION.sub(r"\1", words_only(segments(ready, NO_TAGS))).strip()
+    return _GAP_BEFORE_PUNCTUATION.sub("", words_only(segments(ready, NO_TAGS))).strip()
 
 
 def has_tags(text):

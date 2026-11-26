@@ -272,6 +272,9 @@ def test_crafted_text_cannot_stall_the_parser():
         "<<a" + " " * 5000 + "x" * 4000,
         "[[pause 5" + " " * 9000 + "x",
         "[[laugh" + " " * 9000 + "]",
+        "<<warm>> Hello" + "\n" * 40000 + "there",  # a long run of line breaks, no punctuation after it
+        "[[pause 1]] Hi" + " \n" * 20000 + "x",
+        "[[" + " " * 40000,
     ]
     for text in crafted:
         started = time.perf_counter()
