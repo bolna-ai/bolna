@@ -19,7 +19,7 @@ GPT5_MODELS = sorted(m for m in MODEL_REASONING_EFFORT_MAP if m.startswith(GPT5_
 AZURE_DEPLOYMENT_FORMS = ["azure/gpt-5.4-mini", "ptu-gpt-5.4-mini"]
 PLATFORM_ENV = {
     "OPENAI_API_KEY": "platform-openai-key",
-    "AZURE_OPENAI_BASE_URL": "https://platform.azure.example",
+    "AZURE_OPENAI_BASE_URL": "https://platform.openai.azure.com",
     "AZURE_OPENAI_API_KEY": "platform-azure-key",
 }
 

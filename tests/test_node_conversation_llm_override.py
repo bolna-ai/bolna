@@ -18,7 +18,7 @@ from bolna.models import GraphNode
 
 ENV = {
     "OPENAI_API_KEY": "platform-openai-key",
-    "AZURE_OPENAI_BASE_URL": "https://platform.azure.example",
+    "AZURE_OPENAI_BASE_URL": "https://platform.openai.azure.com",
     "AZURE_OPENAI_API_KEY": "platform-azure-key",
 }
 PROVIDERS = ["openai", "azure", "google", "groq"]
@@ -190,7 +190,7 @@ def test_a_provider_switch_runs_on_the_credentials_resolved_for_that_node():
         service_tier="priority",
         overflow_llm={"api_key": "o", "base_url": "https://o.example", "model": "m"},
         node_llm_credentials={
-            "n1": {"llm_key": "node-azure-key", "base_url": "https://node.azure.example", "api_version": "2024-12-01"}
+            "n1": {"llm_key": "node-azure-key", "base_url": "https://node.openai.azure.com", "api_version": "2024-12-01"}
         },
     ) as agent:
         llm = agent._conversation_llm_for(
@@ -202,7 +202,7 @@ def test_a_provider_switch_runs_on_the_credentials_resolved_for_that_node():
     assert kwargs["model"] == "azure/gpt-4.1-mini"
     assert (kwargs["llm_key"], kwargs["base_url"], kwargs["api_version"]) == (
         "node-azure-key",
-        "https://node.azure.example",
+        "https://node.openai.azure.com",
         "2024-12-01",
     )
     # Settings of the agent's own backend do not follow the node onto another provider.
@@ -231,7 +231,7 @@ def test_a_node_switched_to_azure_builds_a_real_client_on_the_resolved_endpoint(
         provider="google",
         model="gemini-3.7-flash",
         node_llm_credentials={
-            "n1": {"llm_key": "k", "base_url": "https://node.azure.example", "api_version": "2024-12-01-preview"}
+            "n1": {"llm_key": "k", "base_url": "https://node.openai.azure.com", "api_version": "2024-12-01-preview"}
         },
     ) as agent:
         llm = agent._conversation_llm_for(
@@ -239,7 +239,7 @@ def test_a_node_switched_to_azure_builds_a_real_client_on_the_resolved_endpoint(
         )
     assert isinstance(llm, AzureLLM)
     assert llm.model == "gpt-4.1-mini"
-    assert llm.llm_host == "node.azure.example"
+    assert llm.llm_host == "node.openai.azure.com"
 
 
 def test_a_model_override_on_the_agents_own_provider_is_served():
@@ -525,7 +525,7 @@ async def test_a_real_override_client_picks_the_transport_from_its_own_model():
 
 
 AZURE_OVERRIDE = {"provider": "azure", "model": "azure/gpt-4.1-mini"}
-NODE_AZURE = {"llm_key": "k", "base_url": "https://node.azure.example", "api_version": "2024-12-01"}
+NODE_AZURE = {"llm_key": "k", "base_url": "https://node.openai.azure.com", "api_version": "2024-12-01"}
 
 
 @pytest.mark.parametrize("first", ["with_credentials", "without_credentials"])
