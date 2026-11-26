@@ -404,6 +404,29 @@ class TestPcmStreaming:
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(waiting, 1)
 
+    async def test_a_second_cancel_while_the_read_closes_still_ends_the_stream(self, monkeypatch):
+        synth = _streaming_tts(monkeypatch, [_A])
+        gate = asyncio.Event()
+
+        async def stalled(text, tail_ms, pad_tail):
+            yield _A, False
+            try:
+                await gate.wait()
+            finally:
+                await asyncio.sleep(0.05)  # the HTTP response closing
+
+        synth._stream_pcm = stalled
+        await _push(synth)
+        stream = synth.generate()
+        await stream.__anext__()
+        waiting = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0)
+        waiting.cancel()
+        await asyncio.sleep(0.01)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(waiting, 1)
+
     async def test_a_barge_in_while_parked_at_a_packet_reads_nothing_more_of_the_dead_reply(self, monkeypatch):
         synth = _streaming_tts(monkeypatch, [_A])
         gate = asyncio.Event()

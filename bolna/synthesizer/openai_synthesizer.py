@@ -295,14 +295,24 @@ class OPENAISynthesizer(BaseSynthesizer):
 
         reading = asyncio.ensure_future(read())
         self._wake = asyncio.get_running_loop().create_future()
+        cancelled = False
         try:
             await asyncio.wait({reading, self._wake}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            self._wake = None
-            if not reading.done():
-                reading.cancel()
-                # The stream is closed next; it must not still be running in the read.
+        except asyncio.CancelledError:
+            cancelled = True
+        self._wake = None
+        if not reading.done():
+            reading.cancel()
+        # The stream is closed next, so the read must have stopped running, however often this task is cancelled.
+        while not reading.done():
+            try:
                 await asyncio.wait({reading})
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            if not reading.cancelled():
+                reading.exception()
+            raise asyncio.CancelledError
         if reading.cancelled():
             return _WOKEN
         return reading.result()
