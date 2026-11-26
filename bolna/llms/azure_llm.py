@@ -131,9 +131,10 @@ class AzureLLM(OpenAICompatibleLLM):
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
         self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
-        azure_endpoint = kwargs.get("base_url", os.getenv("AZURE_OPENAI_ENDPOINT"))
-        # The endpoint may come from a caller's saved credentials, so only allowed domains are dialled.
-        if azure_endpoint and not is_azure_openai_endpoint(azure_endpoint):
+        # The endpoint may come from a caller's saved credentials. Resolved here, not by the SDK's env fallback,
+        # so whichever endpoint is dialled is checked against the allowed domains.
+        azure_endpoint = kwargs.get("base_url") or os.getenv("AZURE_OPENAI_ENDPOINT")
+        if not is_azure_openai_endpoint(azure_endpoint):
             raise ValueError(
                 f"Azure OpenAI endpoint must be an https URL on {', '.join(azure_openai_allowed_domains())}; "
                 "set AZURE_OPENAI_ALLOWED_DOMAINS to allow others"

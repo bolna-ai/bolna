@@ -56,6 +56,28 @@ def test_a_non_azure_endpoint_from_the_environment_is_refused_too(monkeypatch):
     client.assert_not_called()
 
 
+@pytest.mark.parametrize("base_url", [None, ""])
+def test_an_empty_base_url_falls_back_to_the_environment_and_is_still_checked(monkeypatch, base_url):
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://attacker.example/")
+    with patch("bolna.llms.azure_llm.AsyncAzureOpenAI") as client, pytest.raises(ValueError):
+        AzureLLM(model="gpt-4.1-mini", llm_key="k", base_url=base_url)
+    client.assert_not_called()
+
+
+def test_no_endpoint_at_all_is_refused(monkeypatch):
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    with patch("bolna.llms.azure_llm.AsyncAzureOpenAI") as client, pytest.raises(ValueError):
+        AzureLLM(model="gpt-4.1-mini", llm_key="k", base_url=None)
+    client.assert_not_called()
+
+
+def test_an_empty_base_url_uses_an_allowed_environment_endpoint(monkeypatch):
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://platform.openai.azure.com")
+    with patch("bolna.llms.azure_llm.AsyncAzureOpenAI") as client:
+        AzureLLM(model="gpt-4.1-mini", llm_key="k", base_url=None)
+    assert client.call_args.kwargs["azure_endpoint"] == "https://platform.openai.azure.com"
+
+
 def test_an_azure_endpoint_is_dialled():
     with patch("bolna.llms.azure_llm.AsyncAzureOpenAI") as client:
         llm = AzureLLM(model="gpt-4.1-mini", llm_key="k", base_url="https://acme.openai.azure.com")
