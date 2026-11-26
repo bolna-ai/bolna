@@ -1,5 +1,7 @@
 """Expressive tags: how a reply's neutral tags are read, checked against a voice, and removed."""
 
+import re
+
 from bolna.helpers import expression_tags as tags
 
 
@@ -257,6 +259,35 @@ def test_the_prompt_guide_offers_only_what_the_voice_performs():
     turbo = tags.prompt_guide(tags.capabilities_for("elevenlabs", "eleven_turbo_v2_5"))
     assert "[[pause" in turbo and "<<warm>>" not in turbo and "[[laugh]]" not in turbo and "<<slow:" not in turbo
     assert tags.prompt_guide(tags.NO_TAGS) == ""
+
+
+def test_every_voice_gets_an_example_with_only_the_tags_it_performs():
+    for provider, model in (
+        ("cartesia", "sonic-3"),
+        ("cartesia", "sonic-3.6"),
+        ("elevenlabs", "eleven_turbo_v2_5"),
+        ("elevenlabs", "eleven_v3_conversational"),
+        ("elevenlabs", "eleven_v4_turbo"),
+    ):
+        caps = tags.capabilities_for(provider, model)
+        guide = tags.prompt_guide(caps)
+        assert "\nExample: " in guide, model
+        for s in tags.parse(guide):
+            if isinstance(s, tags.Pause):
+                assert caps.pause_ms, model
+            elif isinstance(s, tags.Mood):
+                assert s.name in caps.moods, (model, s)
+            elif isinstance(s, tags.Sound):
+                assert s.name in caps.sounds, (model, s)
+            elif isinstance(s, tags.Words) and s.delivery:
+                assert s.delivery in caps.deliveries, (model, s)
+
+
+def test_the_prompt_guide_says_which_moment_each_mood_is_for():
+    v4 = tags.capabilities_for("elevenlabs", "eleven_v4_turbo")
+    guide = tags.prompt_guide(v4)
+    for mood in v4.moods:
+        assert re.search(rf"<<{mood}>> [a-z]", guide), mood
 
 
 def test_the_transcript_keeps_bracketed_text_that_is_not_a_tag_and_no_gap_where_a_tag_was():

@@ -418,24 +418,42 @@ def format_audio_tags(segments):
     return _SPACES.sub(" ", "".join(out))
 
 
+_MOOD_MOMENTS = {
+    "apologetic": "after a delay, a mistake or a problem",
+    "sympathetic": "when the caller is worried or upset",
+    "calm": "when the caller is angry or stressed",
+    "warm": "for a greeting, thanks or good news",
+    "excited": "for an offer or something worth celebrating",
+}
+
+
 def prompt_guide(caps):
     """Instructions for the agent's LLM, offering only the tags this voice performs; empty when it performs none."""
     lines = []
+    moments = "; ".join(f"<<{m}>> {_MOOD_MOMENTS[m]}" for m in sorted(caps.moods) if m in _MOOD_MOMENTS)
+    if moments:
+        lines.append(f"Start a sentence with a tone that fits the moment: {moments}. It lasts until the next tone tag.")
     if caps.pause_ms:
-        lines.append("[[pause 400]] a short pause between two separate facts, at most two in a reply")
+        lines.append("Put [[pause 400]] between two separate facts or steps, so the caller can take each one in.")
     if "slow" in caps.deliveries:
-        lines.append("<<slow: …>> around an amount, date or number the caller must note down")
-    if caps.moods:
-        moods = " ".join(f"<<{m}>>" for m in sorted(caps.moods))
-        lines.append(f"{moods} at the very start of a reply, only when the moment calls for that tone")
+        lines.append("Wrap a number, amount, date or code the caller must note down in <<slow: …>>.")
     if "laugh" in caps.sounds:
-        lines.append("[[laugh]] only right after something genuinely light-hearted")
+        lines.append("Use [[laugh]] only when the caller says something genuinely funny; at most one in a reply.")
     if not lines:
         return ""
+    if "apologetic" in caps.moods:
+        example = "<<apologetic>> Sorry for the wait. [[pause 400]] Your booking for Monday is confirmed."
+    elif "slow" in caps.deliveries:
+        example = "Your booking is confirmed. [[pause 400]] Your reference is <<slow: 4 7 2 9>>."
+    else:
+        example = "Your booking is confirmed. [[pause 400]] Please carry your ID card."
     return (
-        "You can shape how your reply is spoken with these tags. Most replies need none; use them rarely.\n"
+        "Your replies are spoken by a voice that understands these tags. A tag changes how your words sound and "
+        "is never read out. Use them wherever they fit, so you sound natural instead of flat:\n"
         + "".join(f"- {line}\n" for line in lines)
-        + "Never change the words of your answer because of a tag, and never write any other tag or bracketed text."
+        + f"Example: {example}\n"
+        "Write exactly the words you would say without tags: a tag never adds, removes or rewords anything. "
+        "Short, routine replies need no tag. Never write any other tag or bracketed text."
     )
 
 
