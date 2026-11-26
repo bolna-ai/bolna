@@ -128,7 +128,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         "response_uid": meta_info.get("response_uid"),
                         "response_group_uid": meta_info.get("response_group_uid"),
                         "duration": duration,
-                        "closing_pause": meta_info.get("closing_pause", False),
+                        "closing_pause_ms": meta_info.get("closing_pause_ms"),
                         "sent_ts": time.time(),  # Track when audio was actually sent to telephony provider
                     }
                     mark_id = (

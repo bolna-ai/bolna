@@ -106,8 +106,8 @@ async def test_a_closing_pause_reaches_the_mark():
     marks = MarkEventMetaData()
     handler = PlivoOutputHandler(websocket=_RecordingWebSocket(), mark_event_meta_data=marks)
     packet = _audio_packet()
-    packet["meta_info"].update(text_synthesized="Hello there. ", closing_pause=True, mark_id="m1")
+    packet["meta_info"].update(text_synthesized="Hello there. ", closing_pause_ms=100, mark_id="m1")
 
     await asyncio.wait_for(handler.handle(packet), timeout=1.0)
 
-    assert marks.fetch_data("m1")["closing_pause"] is True
+    assert marks.fetch_data("m1")["closing_pause_ms"] == 100

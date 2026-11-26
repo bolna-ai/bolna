@@ -107,6 +107,11 @@ class PcmEdgeTrimmer:
             self._started = True
         return bytes(out)
 
+    @property
+    def passed_ms(self):
+        """Milliseconds of the current silence already passed on; just before finish, the part of the tail sent."""
+        return self._passed // self.frame_bytes * _FRAME_MS
+
     def finish(self, tail_ms, pad=False):
         """The request's tail: up to tail_ms of its trailing silence, padded to tail_ms with silence when pad is set."""
         keep = max(0, self._ms(tail_ms) - self._passed)

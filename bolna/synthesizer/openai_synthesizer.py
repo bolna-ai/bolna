@@ -117,6 +117,8 @@ class OPENAISynthesizer(BaseSynthesizer):
             self._dropped_turn = None
             # The text of the open turn's requests that ended in full.
             self._turn_rendered = []
+            # How much of the last request's pause went out before its closing packet.
+            self._closing_pause_ms = 0
 
     def supports_websocket(self):
         return True
@@ -278,7 +280,9 @@ class OPENAISynthesizer(BaseSynthesizer):
                 audio = self._convert_pcm_chunk(self.pcm_trimmer.feed(chunk))
                 if audio:
                     yield audio, False
-        # Always sent, even as a frame of silence: the request's text rides on its closing packet.
+        # Always sent, even as a frame of silence: the request's text rides on its closing packet. Up to tail_ms of the
+        # pause was passed on with the speech; the closing packet holds the rest.
+        self._closing_pause_ms = self.pcm_trimmer.passed_ms
         tail = self.pcm_trimmer.finish(tail_ms, pad=pad_tail) or bytes(self.pcm_trimmer.frame_bytes)
         yield self._convert_pcm_chunk(tail), True
 
@@ -390,13 +394,14 @@ class OPENAISynthesizer(BaseSynthesizer):
                                 continue
                             # Only the end packet closes the turn; audio that says so releases a hangup wait early.
                             # The heard-text tracker credits a request's text once its closing packet is played.
-                            # The closing packet holds only the pause after the speech: its text was heard once it plays.
                             packet_meta = {
                                 **meta_info,
                                 "end_of_llm_stream": False,
                                 "text_synthesized": f"{text} " if closing else "",
-                                "closing_pause": closing,
                             }
+                            if closing:
+                                # The speech ended this long before the closing packet: its text was heard by then.
+                                packet_meta["closing_pause_ms"] = self._closing_pause_ms
                             if first_audio:
                                 first_audio = False
                                 if "first_result_latency_ms" not in self._timed_turn:

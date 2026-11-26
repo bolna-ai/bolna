@@ -333,7 +333,15 @@ class TestPcmStreaming:
         await _push(synth, "Hello there.")
         packets = [p async for p in _take(synth.generate(), 4)]
         assert [p["meta_info"].get("text_synthesized", "") for p in packets] == ["", "", "Hello there. ", ""]
-        assert [p["meta_info"].get("closing_pause", False) for p in packets] == [False, False, True, False]
+        assert [p["meta_info"].get("closing_pause_ms") for p in packets] == [None, None, 0, None]
+
+    async def test_the_closing_packet_says_how_much_of_the_pause_went_out_before_it(self, monkeypatch):
+        # The server pads the speech with 300 ms of silence; the final request's 100 ms tail passes on with the speech.
+        synth = _streaming_tts(monkeypatch, [_A, bytes(len(_A) * 30)])
+        await _push(synth, "Hello there.")
+        packets = [p async for p in _take(synth.generate(), 4)]
+        assert [p["meta_info"].get("text_synthesized", "") for p in packets] == ["", "", "Hello there. ", ""]
+        assert packets[2]["meta_info"]["closing_pause_ms"] == 100
 
     async def test_a_retired_sequence_ends_with_its_own_end_packet_and_the_next_reply_plays(self, monkeypatch):
         synth = _streaming_tts(monkeypatch, [_A, _B, _C])

@@ -6,7 +6,7 @@ from bolna.agent_manager.task_manager import TaskManager
 from bolna.helpers.conversation_history import ConversationHistory
 
 
-def _mark(turn_id, text, duration, sent_ts, mark_type="", closing_pause=False):
+def _mark(turn_id, text, duration, sent_ts, mark_type="", closing_pause_ms=None):
     return {
         "type": mark_type,
         "turn_id": turn_id,
@@ -14,7 +14,7 @@ def _mark(turn_id, text, duration, sent_ts, mark_type="", closing_pause=False):
         "text_synthesized": text,
         "duration": duration,
         "sent_ts": sent_ts,
-        "closing_pause": closing_pause,
+        "closing_pause_ms": closing_pause_ms,
     }
 
 
@@ -31,15 +31,16 @@ def _selected_before(mark_events_data, target_turn_id):
     return chunks
 
 
-def _closing_text_marks(closing_pause=True):
+def _closing_text_marks(closing_pause_ms=0):
     """Three sentences, each 3 s of audio then a 0.3 s closing packet with its text, all sent within 0.1 s. Our TTS
-    servers' closing packet is the pause after the speech; Azure's last chunk still carries speech."""
+    servers' closing packet holds the pause after the speech, less closing_pause_ms already sent with it; Azure's last
+    chunk (closing_pause_ms None) still carries speech."""
     marks, sent_ts = [], 100.0
     for index, sentence in enumerate(["First sentence. ", "Second sentence. ", "Third sentence. "]):
         for part in range(3):
             marks.append((f"m{index}{part}", _mark(8, "", 1.0, sent_ts)))
             sent_ts += 0.005
-        marks.append((f"m{index}c", _mark(8, sentence, 0.3, sent_ts, closing_pause=closing_pause)))
+        marks.append((f"m{index}c", _mark(8, sentence, 0.3, sent_ts, closing_pause_ms=closing_pause_ms)))
         sent_ts += 0.005
     return marks
 
@@ -66,8 +67,14 @@ def test_closing_text_counts_once_the_speech_before_it_played():
     assert chunks[0]["sent_ts"] == 100.0
 
 
+def test_closing_text_counts_where_the_speech_ended_when_part_of_the_pause_went_out_first():
+    chunks = TaskManager._pending_text_chunks(_closing_text_marks(closing_pause_ms=200), 8)
+    first = [(chunk["text"], round(chunk["duration"], 6)) for chunk in chunks[:5]]
+    assert first == [("", 1.0), ("", 1.0), ("", 0.8), ("First sentence. ", 0), ("", 0.5)]
+
+
 def test_a_closing_chunk_that_carries_speech_keeps_its_own_time():
-    chunks = TaskManager._pending_text_chunks(_closing_text_marks(closing_pause=False), 8)
+    chunks = TaskManager._pending_text_chunks(_closing_text_marks(closing_pause_ms=None), 8)
     assert [(chunk["text"], chunk["duration"]) for chunk in chunks[:4]] == [("", 1.0)] * 3 + [("First sentence. ", 0.3)]
 
 
@@ -115,7 +122,14 @@ async def test_a_barge_in_in_the_pause_after_a_sentence_credits_all_of_it():
     assert [m["content"] for m in history.messages if m["role"] == "assistant"] == ["First sentence."]
 
 
+async def test_a_barge_in_early_in_a_pause_sent_with_the_speech_credits_the_sentence():
+    tm, history = _sync_target()
+    # 2.9 s in: the speech ended at 2.8 s; the first 200 ms of the pause went out with it.
+    await tm.sync_history(_closing_text_marks(closing_pause_ms=200), interruption_processed_at=102.9)
+    assert [m["content"] for m in history.messages if m["role"] == "assistant"] == ["First sentence."]
+
+
 async def test_a_closing_chunk_that_carries_speech_is_still_credited_by_its_share():
     tm, history = _sync_target()
-    await tm.sync_history(_closing_text_marks(closing_pause=False), interruption_processed_at=103.2)
+    await tm.sync_history(_closing_text_marks(closing_pause_ms=None), interruption_processed_at=103.2)
     assert [m["content"] for m in history.messages if m["role"] == "assistant"] == ["First"]

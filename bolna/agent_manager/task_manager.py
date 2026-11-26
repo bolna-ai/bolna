@@ -2716,9 +2716,9 @@ class TaskManager(BaseManager):
 
     @staticmethod
     def _playback_chunks(marks):
-        """Marks as the playback estimate reads them. A request's closing pause (`closing_pause`: its audio is only
-        the silence after the speech, its text the whole request) becomes that text at zero length, then the pause,
-        so a clock inside the pause credits the whole request."""
+        """Marks as the playback estimate reads them. A request's closing mark (`closing_pause_ms` set) carries the
+        text of the whole request, and its speech ended that many ms of pause before the mark: the text is placed
+        there at zero length, so a clock inside the pause credits the whole request."""
         chunks = []
         for mark_data in marks:
             chunk = {
@@ -2726,9 +2726,18 @@ class TaskManager(BaseManager):
                 "duration": mark_data.get("duration", 0),
                 "sent_ts": mark_data.get("sent_ts") or 0,
             }
-            if chunk["text"] and mark_data.get("closing_pause"):
+            pause_ms = mark_data.get("closing_pause_ms")
+            if chunk["text"] and pause_ms is not None:
+                pause, moved = pause_ms / 1000, 0.0
+                while pause > 0 and chunks and not chunks[-1]["text"]:
+                    last = chunks.pop()
+                    taken = min(pause, last["duration"])
+                    pause, moved = pause - taken, moved + taken
+                    if taken < last["duration"]:
+                        chunks.append({**last, "duration": last["duration"] - taken})
+                        break
                 chunks.append({**chunk, "duration": 0})
-                chunk = {**chunk, "text": ""}
+                chunk = {**chunk, "text": "", "duration": moved + chunk["duration"]}
             chunks.append(chunk)
         return chunks
 
