@@ -290,6 +290,19 @@ def test_the_prompt_guide_says_which_moment_each_mood_is_for():
         assert re.search(rf"<<{mood}>> [a-z]", guide), mood
 
 
+def test_the_guide_leaves_codes_to_the_spelling_rule():
+    # The rules spell a code out but skip anything already inside a tag, so a code the LLM slows is never spelled.
+    for provider, model in (("cartesia", "sonic-3.6"), ("elevenlabs", "eleven_v3_conversational")):
+        guide = tags.prompt_guide(tags.capabilities_for(provider, model))
+        slow_line = next(line for line in guide.splitlines() if "<<slow: …>>" in line)
+        assert "code" not in slow_line.split("<<slow: …>>")[0], model
+        assert "codes and IDs as they are" in slow_line, model
+        assert not re.search(r"<<slow:\s*[A-Z0-9 -]+>>", guide), model  # no example slows a code either
+    assert tags.segments("Your reference is BK48217.", tags.capabilities_for("cartesia", "sonic-3.6"), rules=True)[
+        1
+    ] == tags.Words("BK48217", "spell")
+
+
 def test_the_transcript_keeps_bracketed_text_that_is_not_a_tag_and_no_gap_where_a_tag_was():
     assert tags.remove_tags("Pick [Gold] now [smiling]. Thanks [warm and friendly]!") == "Pick Gold now. Thanks!"
 

@@ -436,7 +436,10 @@ def prompt_guide(caps):
     if caps.pause_ms:
         lines.append("Put [[pause 400]] between two separate facts or steps, so the caller can take each one in.")
     if "slow" in caps.deliveries:
-        lines.append("Wrap a number, amount, date or code the caller must note down in <<slow: …>>.")
+        lines.append(
+            "Wrap a number, amount or date the caller must note down in <<slow: …>>. "
+            "Write codes and IDs as they are; they are spelled out automatically."
+        )
     if "laugh" in caps.sounds:
         lines.append("Use [[laugh]] only when the caller says something genuinely funny; at most one in a reply.")
     if not lines:
@@ -444,7 +447,7 @@ def prompt_guide(caps):
     if "apologetic" in caps.moods:
         example = "<<apologetic>> Sorry for the wait. [[pause 400]] Your booking for Monday is confirmed."
     elif "slow" in caps.deliveries:
-        example = "Your booking is confirmed. [[pause 400]] Your reference is <<slow: 4 7 2 9>>."
+        example = "Your booking is confirmed. [[pause 400]] The fare is <<slow: ₹1,250>>."
     else:
         example = "Your booking is confirmed. [[pause 400]] Please carry your ID card."
     return (
