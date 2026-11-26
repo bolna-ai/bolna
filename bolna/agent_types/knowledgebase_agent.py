@@ -9,7 +9,7 @@ from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
 from bolna.helpers.function_calling_helpers import guard_llm_base_url
-from bolna.helpers.utils import format_messages
+from bolna.helpers.utils import format_messages, latest_user_message
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.llms import AzureLLM, OpenAiLLM
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
@@ -203,7 +203,7 @@ class KnowledgeBaseAgent(BaseAgent):
         try:
             client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
 
-            latest_message = messages[-1]["content"] if messages else ""
+            latest_message = latest_user_message(messages)
 
             rag_response = await client.query_for_conversation(
                 query=latest_message,

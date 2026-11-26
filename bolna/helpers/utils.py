@@ -1511,3 +1511,17 @@ def structure_system_prompt(
     final_prompt = f"{final_prompt}\n{DATE_PROMPT.format(current_date, current_time, timezone)}"
 
     return final_prompt
+
+
+def latest_user_message(messages: list) -> str:
+    """Content of the most recent user turn, or "" if it is none.
+
+    The last message is not always the caller's: after a tool call the history ends in the
+    tool result, so callers that need "what the caller just said" (e.g. a knowledge-base
+    query) must look back for the user turn instead of using messages[-1].
+    """
+    for message in reversed(messages or []):
+        if message.get("role") == "user":
+            content = message.get("content")
+            return content if isinstance(content, str) else ""
+    return ""

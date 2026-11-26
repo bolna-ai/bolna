@@ -16,6 +16,7 @@ from bolna.helpers.function_calling_helpers import guard_llm_base_url
 from bolna.helpers.utils import (
     now_ms,
     format_messages,
+    latest_user_message,
     update_prompt_with_context,
     render_prompt,
     enrich_context_with_time_variables,
@@ -1658,7 +1659,7 @@ class GraphAgent(BaseAgent):
         if rag_config and rag_config.get("collections"):
             try:
                 client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
-                latest_message = history[-1]["content"] if history else ""
+                latest_message = latest_user_message(history)
                 rag_response = await client.query_for_conversation(
                     query=latest_message,
                     collections=rag_config["collections"],
