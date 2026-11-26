@@ -77,6 +77,7 @@ async def test_hangup_does_not_clear_the_reply_before_it_plays():
     tm.hangup_triggered = False
     tm._hangup_interruptible_window = False
     tm.call_hangup_message_config = "Thank you, goodbye!"
+    tm.fixed_line_categories = set()
     tm.language = "en"
     tm.voicemail_handler = SimpleNamespace(detected=False)
     tm.tools["output"] = MagicMock(get_provider=MagicMock(return_value="twilio"))

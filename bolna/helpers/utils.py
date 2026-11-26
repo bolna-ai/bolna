@@ -285,7 +285,12 @@ async def get_s3_file(bucket_name=BUCKET_NAME, file_key=""):
         s3_client = await exit_stack.enter_async_context(session.create_client("s3"))
         try:
             response = await s3_client.get_object(Bucket=bucket_name, Key=file_key)
-        except (BotoCoreError, ClientError) as error:
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") == "NoSuchKey":
+                logger.info("No S3 object at the requested key")
+            else:
+                logger.error(error)
+        except BotoCoreError as error:
             logger.error(error)
         else:
             file_content = await response["Body"].read()
@@ -309,9 +314,23 @@ async def delete_s3_file_by_prefix(bucket_name, file_key):
             return error
 
 
+async def list_s3_objects(bucket_name, prefix):
+    """(key, last-modified epoch seconds) for every object under prefix."""
+    session = AioSession()
+    async with AsyncExitStack() as exit_stack:
+        s3_client = await exit_stack.enter_async_context(session.create_client("s3"))
+        objects = []
+        paginator = s3_client.get_paginator("list_objects_v2")
+        async for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+            for item in page.get("Contents", []):
+                objects.append((item["Key"], item["LastModified"].timestamp()))
+        return objects
+
+
 async def store_file(
     bucket_name=None, file_key=None, file_data=None, content_type="json", local=False, preprocess_dir=None
 ):
+    """Write file_data to S3, or under PREPROCESS_DIR when local; True once it is written."""
     if not local:
         session = AioSession()
 
@@ -324,10 +343,12 @@ async def store_file(
                 data = file_data
             try:
                 await s3_client.put_object(Bucket=bucket_name, Key=file_key, Body=data)
+                return True
             except (BotoCoreError, ClientError) as error:
                 logger.error(error)
             except Exception as e:
                 logger.error("Exception occurred while s3 put object: {}".format(e))
+            return False
     if local:
         dir_name = PREPROCESS_DIR if preprocess_dir is None else preprocess_dir
         directory_path = os.path.join(dir_name, os.path.dirname(file_key))
@@ -346,8 +367,17 @@ async def store_file(
                 with open(f"{dir_name}/{file_key}", "wb") as f:
                     data = file_data
                     f.write(data)
+            return True
         except Exception as e:
             logger.error(f"Could not save local file {e}")
+            return False
+
+
+def agent_audio_key(filename, audio_format, agent_name=None, assistant_id=None, local=False):
+    """Where an agent's stored clip lives: a path under PREPROCESS_DIR locally, an S3 key otherwise."""
+    if local:
+        return f"{agent_name}/{audio_format}/{filename}.{audio_format}"
+    return f"{assistant_id}/audio/{filename}.{audio_format}"
 
 
 async def get_raw_audio_bytes(
@@ -357,7 +387,7 @@ async def get_raw_audio_bytes(
     audio_data = None
     if local:
         if not is_location:
-            file_name = f"{PREPROCESS_DIR}/{agent_name}/{audio_format}/{filename}.{audio_format}"
+            file_name = f"{PREPROCESS_DIR}/{agent_audio_key(filename, audio_format, agent_name=agent_name, local=True)}"
         else:
             file_name = filename
         if os.path.isfile(file_name):
@@ -368,7 +398,7 @@ async def get_raw_audio_bytes(
             audio_data = None
     else:
         if not is_location:
-            object_key = f"{assistant_id}/audio/{filename}.{audio_format}"
+            object_key = agent_audio_key(filename, audio_format, assistant_id=assistant_id)
         else:
             object_key = filename
 
@@ -376,6 +406,14 @@ async def get_raw_audio_bytes(
         audio_data = await get_s3_file(BUCKET_NAME, object_key)
 
     return audio_data
+
+
+async def store_raw_audio_bytes(audio, filename, agent_name=None, audio_format="mp3", assistant_id=None, local=False):
+    """Store a clip where get_raw_audio_bytes reads it back."""
+    file_key = agent_audio_key(filename, audio_format, agent_name=agent_name, assistant_id=assistant_id, local=local)
+    await store_file(
+        bucket_name=BUCKET_NAME, file_key=file_key, file_data=audio, content_type=audio_format, local=local
+    )
 
 
 def scalar_fields(data, max_len=120):
@@ -407,6 +445,25 @@ def static_node_audio_key(
     if pronunciation:
         identity = f"{identity}|{pronunciation}"
     return get_md5_hash(f"{identity}|{text}")
+
+
+def tts_voice_identity(provider, provider_config, pronunciation_rules=None):
+    """Digest of every synthesizer setting that shapes the rendered audio."""
+    rules = [rule.model_dump() if hasattr(rule, "model_dump") else rule for rule in pronunciation_rules or []]
+    settings = {"provider": provider, "provider_config": provider_config, "pronunciation_rules": rules}
+    return get_md5_hash(json.dumps(settings, sort_keys=True, default=str))
+
+
+def fixed_line_clip_key(text, voice_identity, wire_format):
+    """Filename stem for a stored fixed-line clip, bound to its voice and wire format; a new month renders it afresh."""
+    month = time.strftime("%Y-%m", time.gmtime())
+    return get_md5_hash(f"{voice_identity}|{wire_format}|{month}|{text}")
+
+
+def has_template_variables(message_config):
+    """True when any language's text carries a {variable}, so it renders differently per call."""
+    texts = message_config.values() if isinstance(message_config, dict) else [message_config]
+    return any(isinstance(text, str) and render_prompt(text, {}) != text for text in texts)
 
 
 def cartesia_supports_pronunciation_dict(model):
