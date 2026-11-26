@@ -143,6 +143,7 @@ from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.tts_audio_monitor import TtsAudioMonitor
 from ..helpers.tts_clips import clip_pieces, load_fixed_line_clip, recall_clip, render_clip, wire_seconds
 from ..helpers.tts_response_cache import Capture, TtsResponseCache
+from ..helpers import expression_tags
 from ..helpers.observable_variable import ObservableVariable
 from bolna.models import S2SConfig, WebSearchConfig, tts_render_settings
 from bolna.helpers.web_search import SEARCH_UNAVAILABLE, run_web_search
@@ -667,6 +668,7 @@ class TaskManager(BaseManager):
         # Non-streaming transcription bills per result; streaming usage is read from the transcriber.
         self.http_transcriber_duration = 0
         self.synthesizer_characters = 0
+        self.expressive_tags = False
         self.ended_by_assistant = False
         self._caller_on_line_at_hangup = False
         # False until the caller's own words land in conversation history as a user turn.
@@ -2054,6 +2056,7 @@ class TaskManager(BaseManager):
             )
         if self.task_config["tools_config"]["synthesizer"] is not None:
             synth_config = self.task_config["tools_config"]["synthesizer"]
+            self.expressive_tags = bool(synth_config.get("expressive_tags"))
 
             # --- Multilingual pool path ---
             if "multilingual" in synth_config:
@@ -2101,7 +2104,7 @@ class TaskManager(BaseManager):
                     leg_kwargs = self.__pool_leg_kwargs(synthesizer_kwargs, "synthesizer_key", provider_name)
                     synthesizers[label] = cls(**cfg, **provider_config, **leg_kwargs, caching=caching)
                     self.fixed_line_voices[label] = tts_voice_identity(
-                        provider_name, provider_config, cfg.get("pronunciation_rules")
+                        provider_name, provider_config, cfg.get("pronunciation_rules"), cfg.get("expressive_tags")
                     )
 
                 # Use active synth's provider/voice for logging metadata, and buffer_size
@@ -2153,7 +2156,10 @@ class TaskManager(BaseManager):
                 on_platform_key=not self.kwargs.get("synthesizer_key"),
             )
             self.fixed_line_voices[None] = tts_voice_identity(
-                self.synthesizer_provider, provider_config, synth_config.get("pronunciation_rules")
+                self.synthesizer_provider,
+                provider_config,
+                synth_config.get("pronunciation_rules"),
+                synth_config.get("expressive_tags"),
             )
             if self.turn_based_conversation:
                 synth_config["audio_format"] = "mp3"  # Hard code mp3 if we're connected through dashboard
@@ -2348,6 +2354,7 @@ class TaskManager(BaseManager):
         notes = "### Note:\n"
         if self._is_conversation_task() and self.use_fillers:
             notes += f"1.{FILLER_PROMPT}\n"
+        notes = self.__with_expressive_tags_note(notes)
         return f"{enriched_prompt}\n{notes}\n{DATE_PROMPT.format(today, current_time, current_timezone)}"
 
     async def load_prompt(self, assistant_name, task_id, local, **kwargs):
@@ -2417,6 +2424,7 @@ class TaskManager(BaseManager):
             if self._is_conversation_task() and self.use_fillers:
                 notes = "### Note:\n"
                 notes += f"1.{FILLER_PROMPT}\n"
+            notes = self.__with_expressive_tags_note(notes)
 
             final_prompt = f"\n## Agent Prompt:\n\n{enriched_prompt}\n{notes}\n\n## Transcript:\n"
             self.prompts["system_prompt"] = final_prompt
@@ -2446,6 +2454,7 @@ class TaskManager(BaseManager):
                 if self._is_conversation_task() and self.use_fillers:
                     notes = "### Note:\n"
                     notes += f"1.{FILLER_PROMPT}\n"
+                notes = self.__with_expressive_tags_note(notes)
                 self.multilingual_prompts[lang_code] = f"\n## Agent Prompt:\n\n{enriched}\n{notes}\n\n## Transcript:\n"
             logger.info(f"Loaded multilingual prompts for languages: {list(self.multilingual_prompts.keys())}")
 
@@ -2528,6 +2537,10 @@ class TaskManager(BaseManager):
         if not heard_text or not heard_text.strip():
             return ""
 
+        if self.expressive_tags:
+            # What the voice spoke has no tags (or its own), so compare words with words.
+            original_stream = expression_tags.remove_tags(original_stream)
+            heard_text = expression_tags.remove_tags(heard_text)
         heard_text = heard_text.strip()
 
         # Try exact match
@@ -2549,6 +2562,37 @@ class TaskManager(BaseManager):
             f"original[:30]={original_stream[:30]!r} heard[:30]={heard_text[:30]!r}"
         )
         return ""
+
+    def __billed_characters(self, text):
+        """Characters billed for a line: with expressive tags on, the spoken words only, as a live reply is billed."""
+        return len(expression_tags.remove_tags(text) if self.expressive_tags else text)
+
+    def __output_messages(self, history):
+        """The call's messages for the transcript; with expressive tags on, the agent's lines without their tags."""
+        messages = self._prepare_precise_transcript_messages(history)
+        if self.expressive_tags:
+            for message in messages:  # copies: the LLM's own history keeps the tags it wrote
+                if message.get("role") == "assistant" and isinstance(message.get("content"), str):
+                    message["content"] = expression_tags.remove_tags(message["content"])
+        return messages
+
+    def __with_expressive_tags_note(self, notes):
+        """The prompt notes plus a guide to the tags the agent's voice performs, when expressive tags are on.
+
+        No guide when any language's voice lacks the tag step: that voice would speak the tags aloud."""
+        synth = self.tools.get("synthesizer")
+        pool = isinstance(synth, SynthesizerPool)
+        voices = list(synth.synthesizers.values()) if pool else [synth]
+        handled = all(
+            getattr(v, "expressive_tags", False) is True and hasattr(v, "expression_capabilities") for v in voices
+        )
+        if not (self.expressive_tags and self._is_conversation_task() and handled):
+            return notes
+        active = synth.synthesizers.get(synth.active_label) if pool else synth
+        guide = expression_tags.prompt_guide(active.expression_capabilities())
+        if not guide:
+            return notes
+        return (notes or "### Note:\n") + f"{guide}\n"
 
     @staticmethod
     def _trim_partial_to_complete_words(text):
@@ -7692,6 +7736,8 @@ class TaskManager(BaseManager):
         category = meta_info["message_category"]
         if not text or category not in self.fixed_line_categories or not self.assistant_id:
             return False
+        if self.expressive_tags and expression_tags.has_tags(text):
+            return False  # a one-shot render skips the tag conversion, so the line is only ever spoken live
         wire_format = self.__fixed_line_wire_format()
         if not wire_format:
             return False
@@ -7789,7 +7835,7 @@ class TaskManager(BaseManager):
         audio_format, chunks = clip
         fetch_s = time.perf_counter() - started
         self._replayed_reply_keys.add(object_key)
-        self.synthesizer_cached_characters += len(text)
+        self.synthesizer_cached_characters += self.__billed_characters(text)
         base = {**meta_info, "format": audio_format, "text": text, "is_cached": True, "synthesizer_latency": fetch_s}
         for index, (audio, text_synthesized) in enumerate(chunks):
             chunk_meta = {**base, "text_synthesized": text_synthesized, "is_first_chunk": index == 0}
@@ -8430,6 +8476,11 @@ class TaskManager(BaseManager):
                 is_welcome = meta_info.get("message_category") == "agent_welcome_message"
                 if is_welcome or meta_info.get("sequence_id") not in (None, -1):
                     self._synthesis_awaiting_first_audio = True
+                prerendered = meta_info.get("is_md5_hash") or meta_info.get("cached") is True
+                if prerendered and self.expressive_tags and expression_tags.has_tags(meta_info.get("text") or ""):
+                    # Audio rendered ahead of time skipped the tag conversion, so this line is spoken live instead.
+                    text = message["data"] = meta_info["text"]
+                    meta_info["is_md5_hash"], meta_info["cached"] = False, False
                 if meta_info["is_md5_hash"]:
                     logger.info(
                         "sending preprocessed audio response to {}".format(
@@ -10035,7 +10086,7 @@ class TaskManager(BaseManager):
                 self._settle_hangup_detail()
 
                 output = {
-                    "messages": self._prepare_precise_transcript_messages(self.history),
+                    "messages": self.__output_messages(self.history),
                     "conversation_time": time.time() - self.start_time,
                     "label_flow": self.label_flow,
                     "function_tool_api_call_details": copy.deepcopy(self.function_tool_api_call_details),

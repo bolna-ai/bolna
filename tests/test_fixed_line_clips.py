@@ -41,6 +41,7 @@ def _tm(output="plivo", web=False):
     tm.is_local = False
     tm.run_id = "run"
     tm.synthesizer_provider = "elevenlabs"
+    tm.expressive_tags = False
     tm.fixed_line_categories = {IS_USER_ONLINE_MESSAGE, "agent_hangup"}
     tm.fixed_line_voices = {None: VOICE}
     tm.tools = {"output": SimpleNamespace(get_provider=lambda: output), "synthesizer": _synth()}
