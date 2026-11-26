@@ -1008,6 +1008,22 @@ async def write_request_logs(message, run_id):
             await log_file.write(log_string)
 
 
+def _to_mono_pcm16(segment, sampling_rate):
+    return segment.set_frame_rate(sampling_rate).set_channels(1).set_sample_width(2)
+
+
+def _pad_mono_pcm16(segment, frames, sampling_rate):
+    missing_frames = frames - int(segment.frame_count())
+    if missing_frames <= 0:
+        return segment
+    return AudioSegment(
+        data=segment.raw_data + b"\x00\x00" * missing_frames,
+        sample_width=2,
+        frame_rate=sampling_rate,
+        channels=1,
+    )
+
+
 async def save_audio_file_to_s3(conversation_recording, sampling_rate=24000, assistant_id=None, run_id=None):
     last_frame_end_time = conversation_recording["output"][0]["start_time"]
     logger.info(f"LENGTH OF OUTPUT AUDIO {len(conversation_recording['output'])}")
@@ -1027,47 +1043,23 @@ async def save_audio_file_to_s3(conversation_recording, sampling_rate=24000, ass
         frame_as = AudioSegment.from_file(io.BytesIO(frame["data"]), format="wav")
         combined_audio += frame_as
 
-    webm_segment = AudioSegment.from_file(io.BytesIO(conversation_recording["input"]["data"]))
-    wav_bytes = io.BytesIO()
-    webm_segment.export(wav_bytes, format="wav")
-    wav_bytes.seek(0)  # Reset the pointer to the start
-    waveform, sample_rate = torchaudio.load(wav_bytes)
-    resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=sampling_rate)
-    downsampled_waveform = resampler(waveform)
-    torchaudio_wavio = io.BytesIO()
-    torchaudio.save(torchaudio_wavio, downsampled_waveform, sampling_rate, format="wav")
-    audio_segment_bytes = io.BytesIO()
-    combined_audio.export(audio_segment_bytes, format="wav")
-    audio_segment_bytes.seek(0)
-    waveform_audio_segment, sample_rate = torchaudio.load(audio_segment_bytes)
-
-    if waveform_audio_segment.shape[0] > 1:
-        waveform_audio_segment = waveform_audio_segment[:1, :]
-
-    # Adjust shapes to be [1, N] if not already
-    downsampled_waveform = (
-        downsampled_waveform.unsqueeze(0) if downsampled_waveform.dim() == 1 else downsampled_waveform
+    input_segment = _to_mono_pcm16(
+        AudioSegment.from_file(io.BytesIO(conversation_recording["input"]["data"])), sampling_rate
     )
-    waveform_audio_segment = (
-        waveform_audio_segment.unsqueeze(0) if waveform_audio_segment.dim() == 1 else waveform_audio_segment
-    )
+    output_segment = _to_mono_pcm16(combined_audio, sampling_rate)
 
-    # Ensure both waveforms have the same length
-    max_length = max(downsampled_waveform.size(1), waveform_audio_segment.size(1))
-    downsampled_waveform_padded = torch.nn.functional.pad(
-        downsampled_waveform, (0, max_length - downsampled_waveform.size(1))
-    )
-    waveform_audio_segment_padded = torch.nn.functional.pad(
-        waveform_audio_segment, (0, max_length - waveform_audio_segment.size(1))
-    )
-    stereo_waveform = torch.cat((downsampled_waveform_padded, waveform_audio_segment_padded), 0)
+    # Pad the shorter side with silence so both channels have the same number of frames
+    max_frames = max(int(input_segment.frame_count()), int(output_segment.frame_count()))
+    input_segment = _pad_mono_pcm16(input_segment, max_frames, sampling_rate)
+    output_segment = _pad_mono_pcm16(output_segment, max_frames, sampling_rate)
 
-    # Verify the stereo waveform shape is [2, M]
-    assert stereo_waveform.shape[0] == 2, "Stereo waveform should have 2 channels."
+    # Left channel is the caller (input), right channel is the assistant (output)
+    stereo_segment = AudioSegment.from_mono_audiosegments(input_segment, output_segment)
+    assert stereo_segment.channels == 2, "Stereo audio should have 2 channels."
     key = f"{assistant_id + run_id}.wav"
 
     audio_buffer = io.BytesIO()
-    torchaudio.save(audio_buffer, stereo_waveform, 24000, format="wav")
+    stereo_segment.export(audio_buffer, format="wav")
     audio_buffer.seek(0)
 
     logger.info(f"Storing in {RECORDING_BUCKET_URL}{key}")
