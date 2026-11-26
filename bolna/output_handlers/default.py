@@ -147,6 +147,7 @@ class DefaultOutputHandler:
                         "is_final_chunk": meta_info.get("end_of_llm_stream", False)
                         and meta_info.get("end_of_synthesizer_stream", False),
                         "sequence_id": meta_info["sequence_id"],
+                        "closing_pause": meta_info.get("closing_pause", False),
                         "sent_ts": time.time(),
                         # Feeds the completion watchdog's playout estimate, as on telephony.
                         "duration": self._playout_duration(packet["data"], meta_info.get("format", "pcm")),

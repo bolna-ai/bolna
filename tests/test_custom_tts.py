@@ -333,6 +333,7 @@ class TestPcmStreaming:
         await _push(synth, "Hello there.")
         packets = [p async for p in _take(synth.generate(), 4)]
         assert [p["meta_info"].get("text_synthesized", "") for p in packets] == ["", "", "Hello there. ", ""]
+        assert [p["meta_info"].get("closing_pause", False) for p in packets] == [False, False, True, False]
 
     async def test_a_retired_sequence_ends_with_its_own_end_packet_and_the_next_reply_plays(self, monkeypatch):
         synth = _streaming_tts(monkeypatch, [_A, _B, _C])

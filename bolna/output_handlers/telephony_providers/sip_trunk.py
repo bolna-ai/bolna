@@ -283,6 +283,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                 "is_final_chunk": is_final,
                 "sequence_id": meta_info.get("sequence_id", 0),
                 "duration": audio_duration,
+                "closing_pause": meta_info.get("closing_pause", False),
                 "sent_ts": time.time(),
             },
         )

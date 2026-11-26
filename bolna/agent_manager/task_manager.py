@@ -2715,32 +2715,35 @@ class TaskManager(BaseManager):
         return "".join(played_text)
 
     @staticmethod
-    def _fold_textless_marks(chunks):
-        """Where text rides on a request's closing mark only (Azure, OpenAI-compatible PCM streaming), the text-less
-        marks before it are its speech, credited nothing, and the closing mark ends the request: its text counts in
-        full once that speech has played, so a caller speaking in the pause after a sentence heard all of it."""
-        folded = []
-        for chunk in chunks:
-            if chunk["text"] and folded and not folded[-1]["text"]:
-                folded.append({**chunk, "duration": 0})
+    def _playback_chunks(marks):
+        """Marks as the playback estimate reads them. A request's closing pause (`closing_pause`: its audio is only
+        the silence after the speech, its text the whole request) becomes that text at zero length, then the pause,
+        so a clock inside the pause credits the whole request."""
+        chunks = []
+        for mark_data in marks:
+            chunk = {
+                "text": mark_data.get("text_synthesized") or "",
+                "duration": mark_data.get("duration", 0),
+                "sent_ts": mark_data.get("sent_ts") or 0,
+            }
+            if chunk["text"] and mark_data.get("closing_pause"):
+                chunks.append({**chunk, "duration": 0})
                 chunk = {**chunk, "text": ""}
-            folded.append(chunk)
-        return folded
+            chunks.append(chunk)
+        return chunks
 
     @classmethod
     def _pending_text_chunks(cls, mark_events_data, target_turn_id):
         """The target turn's pending audio for the playback estimate, or none when no mark carries text."""
-        chunks = [
-            {
-                "text": mark_data.get("text_synthesized") or "",
-                "duration": mark_data.get("duration", 0),
-                "sent_ts": mark_data.get("sent_ts", 0),
-            }
+        chunks = cls._playback_chunks(
+            mark_data
             for _, mark_data in mark_events_data
             if mark_data.get("type", "") not in ("pre_mark_message", "backchanneling")
             and (target_turn_id is None or mark_data.get("turn_id") == target_turn_id)
-        ]
-        return cls._fold_textless_marks(chunks) if any(chunk["text"] for chunk in chunks) else []
+        )
+        # Text-less marks before a mark with text are its audio: they keep their playing time, and the turn's first
+        # mark starts the clock.
+        return chunks if any(chunk["text"] for chunk in chunks) else []
 
     async def sync_history(
         self, mark_events_data, interruption_processed_at, extend_with_playback_estimate=False, caller_onset=None
@@ -2803,14 +2806,8 @@ class TaskManager(BaseManager):
                     if sent_ts and sent_ts <= last_acked_sent_ts:
                         continue
                     # Text-less marks (Azure sets text on a sentence's last chunk only) still take playback time.
-                    pending_tail.append(
-                        {
-                            "text": mark_data.get("text_synthesized") or "",
-                            "duration": mark_data.get("duration", 0),
-                            "sent_ts": sent_ts,
-                        }
-                    )
-                pending_tail = self._fold_textless_marks(pending_tail)
+                    pending_tail.append(mark_data)
+                pending_tail = self._playback_chunks(pending_tail)
                 if pending_tail and last_acked:
                     # Proportional by the wall clock since playback of the tail could start: the last ACK,
                     # or the tail's send if it was still being generated then. The ACK lags true playout end,

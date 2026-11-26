@@ -390,10 +390,12 @@ class OPENAISynthesizer(BaseSynthesizer):
                                 continue
                             # Only the end packet closes the turn; audio that says so releases a hangup wait early.
                             # The heard-text tracker credits a request's text once its closing packet is played.
+                            # The closing packet holds only the pause after the speech: its text was heard once it plays.
                             packet_meta = {
                                 **meta_info,
                                 "end_of_llm_stream": False,
                                 "text_synthesized": f"{text} " if closing else "",
+                                "closing_pause": closing,
                             }
                             if first_audio:
                                 first_audio = False
