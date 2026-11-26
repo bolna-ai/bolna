@@ -33,6 +33,8 @@ _PLATFORM_TIMEOUT = httpx.Timeout(20.0, connect=2.0, read=5.0)
 # a quiet stretch of the call still reuse the connection.
 _PLATFORM_CONNECTION_LIMITS = httpx.Limits(keepalive_expiry=120)
 MULAW_SAMPLE_RATE = 8000
+# What _next_audio returns when handle_interruption woke it.
+_WOKEN = object()
 
 
 _LANGUAGE_CODE = re.compile(r"[a-z]{2}")
@@ -106,7 +108,8 @@ class OPENAISynthesizer(BaseSynthesizer):
             # (sequence_id, text): the end of a piece that stops mid-sentence, spoken with the next piece.
             self._held_text = None
             self._interruptions = 0
-            self._chunk_read = None
+            # Set while a read is in flight; handle_interruption resolves it to stop waiting on the server.
+            self._wake = None
             self._stream_sequence = None
             # Whether the open turn has played audio: a request failing after that costs the turn, not the call.
             self._turn_audio_sent = False
@@ -225,8 +228,8 @@ class OPENAISynthesizer(BaseSynthesizer):
         self._interruptions += 1
         self._reset_pcm_stream()
         # Wakes the loop out of a read that may never return; it then sees the count has moved.
-        if self._chunk_read is not None:
-            self._chunk_read.cancel()
+        if self._wake is not None and not self._wake.done():
+            self._wake.set_result(None)
 
     async def monitor_connection(self):
         """Open the connection at call start, so the first reply does not pay for the handshake."""
@@ -277,7 +280,9 @@ class OPENAISynthesizer(BaseSynthesizer):
         yield self._convert_pcm_chunk(tail), True
 
     async def _next_audio(self, stream):
-        """The stream's next (audio, closing), or None at its end; handle_interruption can cancel the wait."""
+        """The stream's next (audio, closing), None at its end, or _WOKEN once handle_interruption ends the wait.
+
+        A barge-in only stops the read, never this task, so a cancel from outside always gets through."""
 
         async def read():
             try:
@@ -285,11 +290,19 @@ class OPENAISynthesizer(BaseSynthesizer):
             except StopAsyncIteration:
                 return None
 
-        self._chunk_read = asyncio.ensure_future(read())
+        reading = asyncio.ensure_future(read())
+        self._wake = asyncio.get_running_loop().create_future()
         try:
-            return await self._chunk_read
+            await asyncio.wait({reading, self._wake}, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            self._chunk_read = None
+            self._wake = None
+            if not reading.done():
+                reading.cancel()
+                # The stream is closed next; it must not still be running in the read.
+                await asyncio.wait({reading})
+        if reading.cancelled():
+            return _WOKEN
+        return reading.result()
 
     def _record_failed_request(self, error, sequence_id):
         logger.error(f"Speech request failed after the turn's audio began, closing sequence_id {sequence_id}: {error}")
@@ -346,11 +359,6 @@ class OPENAISynthesizer(BaseSynthesizer):
                         while (outcome := stopped()) is None:
                             try:
                                 item = await self._next_audio(stream)
-                            except asyncio.CancelledError:
-                                # Only handle_interruption cancels the read alone; anything else is this task ending.
-                                if self._interruptions == interruptions:
-                                    raise
-                                continue
                             except Exception as e:
                                 # A request nobody is waiting for any more must not end the call.
                                 if stopped():
@@ -362,7 +370,7 @@ class OPENAISynthesizer(BaseSynthesizer):
                                 break
                             if item is None:
                                 break
-                            if stopped():
+                            if item is _WOKEN or stopped():
                                 continue
                             audio, closing = item
                             if not audio:

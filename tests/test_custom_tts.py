@@ -384,6 +384,26 @@ class TestPcmStreaming:
         await synth.push({"data": "next", "meta_info": {"sequence_id": 2, "end_of_llm_stream": True}})
         assert (await asyncio.wait_for(waiting, 1))["meta_info"]["sequence_id"] == 2
 
+    async def test_a_cancel_right_after_a_barge_in_still_ends_the_stream(self, monkeypatch):
+        # A pool switch or the call's end cancels the stream task in the same tick a barge-in lands.
+        synth = _streaming_tts(monkeypatch, [_A])
+        gate = asyncio.Event()
+
+        async def stalled(text, tail_ms, pad_tail):
+            yield _A, False
+            await gate.wait()
+
+        synth._stream_pcm = stalled
+        await _push(synth)
+        stream = synth.generate()
+        await stream.__anext__()
+        waiting = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0)
+        await synth.handle_interruption()
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(waiting, 1)
+
     async def test_a_barge_in_while_parked_at_a_packet_reads_nothing_more_of_the_dead_reply(self, monkeypatch):
         synth = _streaming_tts(monkeypatch, [_A])
         gate = asyncio.Event()
