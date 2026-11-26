@@ -14,7 +14,7 @@ from pydantic import TypeAdapter, ValidationError
 from bolna.helpers.function_calling_helpers import SSRFError, _GuardedNetworkBackend
 from bolna.models import CustomTTSConfig, OpenAIConfig, Synthesizer
 from bolna.providers import SUPPORTED_SYNTHESIZER_MODELS
-from bolna.synthesizer.openai_synthesizer import OPENAISynthesizer
+from bolna.synthesizer.openai_synthesizer import OPENAISynthesizer, _PcmChunk
 
 BASE_URL = "https://tts.customer.example.com/v1"
 CUSTOMER_KEY = "customer-key"
@@ -378,7 +378,7 @@ class TestPcmStreaming:
         gate = asyncio.Event()
 
         async def stalled(text, tail_ms, pad_tail):
-            yield _A, None
+            yield _PcmChunk(_A)
             if text == "hello":
                 await gate.wait()
 
@@ -399,7 +399,7 @@ class TestPcmStreaming:
         gate = asyncio.Event()
 
         async def stalled(text, tail_ms, pad_tail):
-            yield _A, None
+            yield _PcmChunk(_A)
             await gate.wait()
 
         synth._stream_pcm = stalled
@@ -418,7 +418,7 @@ class TestPcmStreaming:
         gate = asyncio.Event()
 
         async def stalled(text, tail_ms, pad_tail):
-            yield _A, None
+            yield _PcmChunk(_A)
             try:
                 await gate.wait()
             finally:
@@ -441,7 +441,7 @@ class TestPcmStreaming:
         gate = asyncio.Event()
 
         async def stalled(text, tail_ms, pad_tail):
-            yield _A, None
+            yield _PcmChunk(_A)
             if text == "hello":
                 await gate.wait()
 

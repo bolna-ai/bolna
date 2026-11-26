@@ -4,10 +4,12 @@ import os
 import re
 import time
 from contextlib import aclosing
+from enum import Enum, auto
+from typing import NamedTuple, Optional
 
 import httpx
 from dotenv import load_dotenv
-from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, AsyncOpenAI, DefaultAsyncHttpxClient
 
 from .base_synthesizer import BaseSynthesizer
 from .pcm_shaping import FINAL_TAIL_MS, PcmEdgeTrimmer, split_speakable
@@ -37,6 +39,20 @@ _PLATFORM_CONNECTION_LIMITS = httpx.Limits(keepalive_expiry=120)
 MULAW_SAMPLE_RATE = 8000
 # What _next_audio returns when handle_interruption woke it.
 _WOKEN = object()
+
+
+class _PcmChunk(NamedTuple):
+    audio: bytes
+    # Set on a request's closing chunk only: how much of its closing pause already went out with the speech.
+    closing_pause_ms: Optional[int] = None
+
+
+class _StreamStop(Enum):
+    """Why a request's audio stopped before the server finished sending it."""
+
+    INTERRUPTED = auto()
+    RETIRED = auto()
+    FAILED = auto()
 
 
 _LANGUAGE_CODE = re.compile(r"[a-z]{2}")
@@ -86,13 +102,15 @@ class OPENAISynthesizer(BaseSynthesizer):
         # Our own endpoint comes from the server's environment and may be private; only a customer's is guarded.
         if platform_endpoint:
             http_client = DefaultAsyncHttpxClient(follow_redirects=False, limits=_PLATFORM_CONNECTION_LIMITS)
-            limits = {"timeout": _PLATFORM_TIMEOUT, "max_retries": 1}
+            timeout, max_retries = _PLATFORM_TIMEOUT, 1
         elif endpoint:
             http_client = DefaultAsyncHttpxClient(follow_redirects=False, transport=guarded_transport())
-            limits = {"timeout": _CUSTOM_ENDPOINT_TIMEOUT_SECONDS, "max_retries": 1}
+            timeout, max_retries = _CUSTOM_ENDPOINT_TIMEOUT_SECONDS, 1
         else:
-            http_client, limits = None, {}
-        self.async_client = AsyncOpenAI(api_key=api_key, base_url=endpoint, http_client=http_client, **limits)
+            http_client, timeout, max_retries = None, DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES
+        self.async_client = AsyncOpenAI(
+            api_key=api_key, base_url=endpoint, http_client=http_client, timeout=timeout, max_retries=max_retries
+        )
         self._timed_turn_key = None
         self._timed_turn = None
         self._timed_turn_started = None
@@ -253,13 +271,11 @@ class OPENAISynthesizer(BaseSynthesizer):
     def _convert_pcm_chunk(self, data):
         """Resample whole samples as part of one stream; mu-law for telephony."""
         audio = self.pcm_resampler.process(data) if data else b""
-        if not audio:
-            return None
-        return pcm_to_ulaw(audio) if self.use_mulaw else audio
+        return pcm_to_ulaw(audio) if self.use_mulaw and audio else audio
 
     async def _stream_pcm(self, text, tail_ms, pad_tail):
-        """One request as (audio, closing_pause_ms) packets, closing_pause_ms None until the closing one: tail_ms of
-        silence after the speech, padded to it when pad_tail."""
+        """One request as _PcmChunks, the last closing it with tail_ms of silence after the speech, padded to it when
+        pad_tail."""
         await self._check_endpoint()
         # Silence inside the speech passes on as it arrives, up to the tail's length; only the excess waits.
         trimmer = PcmEdgeTrimmer(self.pcm_sample_rate, pass_ms=tail_ms)
@@ -269,15 +285,14 @@ class OPENAISynthesizer(BaseSynthesizer):
             async for chunk in response.iter_bytes():
                 audio = self._convert_pcm_chunk(trimmer.feed(chunk))
                 if audio:
-                    yield audio, None
-        # Always sent, even as a frame of silence: the request's text rides on its closing packet, which says how much
-        # of the pause already went out with the speech.
+                    yield _PcmChunk(audio)
+        # Always sent, even as a frame of silence: the request's text rides on its closing chunk.
         closing_pause_ms = trimmer.passed_ms
         tail = trimmer.finish(tail_ms, pad=pad_tail) or bytes(trimmer.frame_bytes)
-        yield self._convert_pcm_chunk(tail), closing_pause_ms
+        yield _PcmChunk(self._convert_pcm_chunk(tail), closing_pause_ms)
 
     async def _next_audio(self, stream):
-        """The stream's next (audio, closing), None at its end, or _WOKEN once handle_interruption ends the wait.
+        """The stream's next _PcmChunk, None at its end, or _WOKEN once handle_interruption ends the wait.
 
         A barge-in only stops the read, never this task, so a cancel from outside always gets through."""
 
@@ -311,12 +326,12 @@ class OPENAISynthesizer(BaseSynthesizer):
             return _WOKEN
         return reading.result()
 
-    def _audio_packet(self, audio, meta_info, text, closing_pause_ms, started):
-        """A packet of one request's audio. Only the turn's end packet closes it; the closing packet carries the text."""
+    def _audio_packet(self, chunk, meta_info, text, started):
+        """A packet of one request's audio. Only the turn's end packet closes it; the closing chunk carries the text."""
         packet_meta = {**meta_info, "end_of_llm_stream": False, "text_synthesized": ""}
-        if closing_pause_ms is not None:
+        if chunk.closing_pause_ms is not None:
             packet_meta["text_synthesized"] = f"{text} "
-            packet_meta["closing_pause_ms"] = closing_pause_ms
+            packet_meta["closing_pause_ms"] = chunk.closing_pause_ms
             self._turn_rendered.append(text)
         if "first_result_latency_ms" not in self._timed_turn:
             latency = time.perf_counter() - started
@@ -325,7 +340,7 @@ class OPENAISynthesizer(BaseSynthesizer):
             packet_meta["synthesizer_latency"] = latency
         self._stamp_first_chunk(packet_meta)
         self._stamp_mark_id(packet_meta)
-        return create_ws_data_packet(audio, packet_meta)
+        return create_ws_data_packet(chunk.audio, packet_meta)
 
     def _record_failed_request(self, error, sequence_id):
         logger.error(f"Speech request failed after the turn's audio began, closing sequence_id {sequence_id}: {error}")
@@ -370,15 +385,15 @@ class OPENAISynthesizer(BaseSynthesizer):
 
                 def stopped():
                     if self._interruptions != interruptions:
-                        return "interrupted"
-                    return None if self.should_synthesize_response(sequence_id) else "retired"
+                        return _StreamStop.INTERRUPTED
+                    return None if self.should_synthesize_response(sequence_id) else _StreamStop.RETIRED
 
                 try:
                     async with aclosing(self._stream_pcm(text, pause_ms, pad_tail=not final)) as stream:
                         # Checked before every read too: a barge-in while this loop sat at its yield cancelled none.
                         while (outcome := stopped()) is None:
                             try:
-                                item = await self._next_audio(stream)
+                                chunk = await self._next_audio(stream)
                             except Exception as e:
                                 # A request nobody is waiting for any more must not end the call.
                                 if stopped():
@@ -386,24 +401,23 @@ class OPENAISynthesizer(BaseSynthesizer):
                                 if not self.first_chunk_generated:
                                     raise
                                 self._record_failed_request(e, sequence_id)
-                                outcome = "failed"
+                                outcome = _StreamStop.FAILED
                                 break
-                            if item is None:
+                            if chunk is None:
                                 break
-                            if item is _WOKEN or stopped():
+                            if chunk is _WOKEN or stopped():
                                 continue
-                            audio, closing_pause_ms = item
-                            if audio:
-                                yield self._audio_packet(audio, meta_info, text, closing_pause_ms, started)
+                            if chunk.audio:
+                                yield self._audio_packet(chunk, meta_info, text, started)
                 except asyncio.CancelledError:
                     # Cancelled from outside, as a pool switch does: the leg's next reply starts clean.
                     self._reset_pcm_stream()
                     raise
 
-                if outcome == "interrupted":
+                if outcome is _StreamStop.INTERRUPTED:
                     logger.info(f"Stopping stream: sequence_id {sequence_id} was interrupted")
                     continue
-                if outcome == "retired":
+                if outcome is _StreamStop.RETIRED:
                     logger.info(f"Stopping stream: sequence_id {sequence_id} not current")
                     self._reset_pcm_stream()
                     # The consumer clears its playing flag on a retired sequence's end packet.
@@ -414,14 +428,14 @@ class OPENAISynthesizer(BaseSynthesizer):
                     }
                     yield create_ws_data_packet(b"\x00", retired)
                     continue
-                if outcome == "failed":
+                if outcome is _StreamStop.FAILED:
                     # The turn ends with what it already played; its end packet goes out now, saying what that was.
                     meta_info["end_of_llm_stream"] = True
                     meta_info["synthesis_failed"] = True
                     meta_info["text_rendered"] = " ".join(self._turn_rendered)
                 self._finish_chunk_timing(meta_info, len(text), started, time.perf_counter())
 
-            if final or outcome == "failed":
+            if final or outcome is _StreamStop.FAILED:
                 self._reset_pcm_stream()
                 if not final:
                     self._turn_dropped = True

@@ -13,6 +13,7 @@ import time
 import json
 import uuid
 import copy
+import dataclasses
 import base64
 import difflib
 import unicodedata
@@ -139,7 +140,7 @@ from bolna.helpers.utils import (
     enrich_context_with_time_variables,
 )
 from bolna.helpers.logger_config import configure_logger
-from ..helpers.mark_event_meta_data import MarkEventMetaData
+from ..helpers.mark_event_meta_data import MarkEventMetaData, PlaybackChunk
 from ..helpers.tts_audio_monitor import TtsAudioMonitor
 from ..helpers.tts_clips import clip_pieces, load_fixed_line_clip, recall_clip, render_clip, wire_seconds
 from ..helpers.tts_response_cache import Capture, TtsResponseCache
@@ -2699,15 +2700,15 @@ class TaskManager(BaseManager):
         for chunk in pending_chunks:
             if cumulative_duration >= actual_play_time:
                 break
-            chunk_duration = chunk["duration"]
+            chunk_duration = chunk.duration
             if cumulative_duration + chunk_duration <= actual_play_time:
-                played_text.append(chunk["text"])
+                played_text.append(chunk.text)
             else:
                 remaining_time = actual_play_time - cumulative_duration
                 proportion = remaining_time / chunk_duration if chunk_duration > 0 else 0
-                char_count = int(len(chunk["text"]) * proportion)
-                partial_text = chunk["text"][:char_count]
-                if partial_text and char_count < len(chunk["text"]):
+                char_count = int(len(chunk.text) * proportion)
+                partial_text = chunk.text[:char_count]
+                if partial_text and char_count < len(chunk.text):
                     partial_text = self._trim_partial_to_complete_words(partial_text)
                 if partial_text:
                     played_text.append(partial_text)
@@ -2721,23 +2722,23 @@ class TaskManager(BaseManager):
         there at zero length, so a clock inside the pause credits the whole request."""
         chunks = []
         for mark_data in marks:
-            chunk = {
-                "text": mark_data.get("text_synthesized") or "",
-                "duration": mark_data.get("duration", 0),
-                "sent_ts": mark_data.get("sent_ts") or 0,
-            }
+            chunk = PlaybackChunk(
+                text=mark_data.get("text_synthesized") or "",
+                duration=mark_data.get("duration", 0),
+                sent_ts=mark_data.get("sent_ts") or 0,
+            )
             pause_ms = mark_data.get("closing_pause_ms")
-            if chunk["text"] and pause_ms is not None:
+            if chunk.text and pause_ms is not None:
                 pause, moved = pause_ms / 1000, 0.0
-                while pause > 0 and chunks and not chunks[-1]["text"]:
+                while pause > 0 and chunks and not chunks[-1].text:
                     last = chunks.pop()
-                    taken = min(pause, last["duration"])
+                    taken = min(pause, last.duration)
                     pause, moved = pause - taken, moved + taken
-                    if taken < last["duration"]:
-                        chunks.append({**last, "duration": last["duration"] - taken})
+                    if taken < last.duration:
+                        chunks.append(dataclasses.replace(last, duration=last.duration - taken))
                         break
-                chunks.append({**chunk, "duration": 0})
-                chunk = {**chunk, "text": "", "duration": moved + chunk["duration"]}
+                chunks.append(dataclasses.replace(chunk, duration=0))
+                chunk = dataclasses.replace(chunk, text="", duration=moved + chunk.duration)
             chunks.append(chunk)
         return chunks
 
@@ -2752,7 +2753,7 @@ class TaskManager(BaseManager):
         )
         # Text-less marks before a mark with text are its audio: they keep their playing time, and the turn's first
         # mark starts the clock.
-        return chunks if any(chunk["text"] for chunk in chunks) else []
+        return chunks if any(chunk.text for chunk in chunks) else []
 
     async def sync_history(
         self, mark_events_data, interruption_processed_at, extend_with_playback_estimate=False, caller_onset=None
@@ -2821,7 +2822,7 @@ class TaskManager(BaseManager):
                     # Proportional by the wall clock since playback of the tail could start: the last ACK,
                     # or the tail's send if it was still being generated then. The ACK lags true playout end,
                     # so this window under-credits — it can't stamp unheard text.
-                    tail_start = max(last_acked["ack_ts"], pending_tail[0]["sent_ts"])
+                    tail_start = max(last_acked["ack_ts"], pending_tail[0].sent_ts)
                     tail_play_time = max(0.0, heard_until - tail_start)
                     tail_text = self.estimate_played_text_for_time(pending_tail, tail_play_time)
                     if tail_text:
@@ -2835,7 +2836,7 @@ class TaskManager(BaseManager):
                 pending_chunks = self._pending_text_chunks(mark_events_data, target_turn_id)
 
                 if pending_chunks:
-                    first_sent_ts = pending_chunks[0].get("sent_ts", 0)
+                    first_sent_ts = pending_chunks[0].sent_ts
                     if first_sent_ts > 0:
                         time_since_first_send = heard_until - first_sent_ts
                         actual_play_time = max(0, time_since_first_send)

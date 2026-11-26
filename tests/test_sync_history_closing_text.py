@@ -4,6 +4,7 @@ so text not yet played is not credited as heard."""
 
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.helpers.conversation_history import ConversationHistory
+from bolna.helpers.mark_event_meta_data import PlaybackChunk
 
 
 def _mark(turn_id, text, duration, sent_ts, mark_type="", closing_pause_ms=None):
@@ -27,7 +28,7 @@ def _selected_before(mark_events_data, target_turn_id):
             continue
         if mark_data.get("type", "") in ["pre_mark_message", "backchanneling"] or not text:
             continue
-        chunks.append({"text": text, "duration": mark_data.get("duration", 0), "sent_ts": mark_data.get("sent_ts", 0)})
+        chunks.append(PlaybackChunk(text, mark_data.get("duration", 0), mark_data.get("sent_ts", 0)))
     return chunks
 
 
@@ -63,19 +64,19 @@ def test_closing_text_counts_once_the_speech_before_it_played():
     expected = []
     for text in ["First sentence. ", "Second sentence. ", "Third sentence. "]:
         expected += sentence + [(text, 0), ("", 0.3)]
-    assert [(chunk["text"], chunk["duration"]) for chunk in chunks] == expected
-    assert chunks[0]["sent_ts"] == 100.0
+    assert [(chunk.text, chunk.duration) for chunk in chunks] == expected
+    assert chunks[0].sent_ts == 100.0
 
 
 def test_closing_text_counts_where_the_speech_ended_when_part_of_the_pause_went_out_first():
     chunks = TaskManager._pending_text_chunks(_closing_text_marks(closing_pause_ms=200), 8)
-    first = [(chunk["text"], round(chunk["duration"], 6)) for chunk in chunks[:5]]
+    first = [(chunk.text, round(chunk.duration, 6)) for chunk in chunks[:5]]
     assert first == [("", 1.0), ("", 1.0), ("", 0.8), ("First sentence. ", 0), ("", 0.5)]
 
 
 def test_a_closing_chunk_that_carries_speech_keeps_its_own_time():
     chunks = TaskManager._pending_text_chunks(_closing_text_marks(closing_pause_ms=None), 8)
-    assert [(chunk["text"], chunk["duration"]) for chunk in chunks[:4]] == [("", 1.0)] * 3 + [("First sentence. ", 0.3)]
+    assert [(chunk.text, chunk.duration) for chunk in chunks[:4]] == [("", 1.0)] * 3 + [("First sentence. ", 0.3)]
 
 
 class _Input:
