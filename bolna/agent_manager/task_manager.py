@@ -7837,6 +7837,20 @@ class TaskManager(BaseManager):
             }
         )
 
+    def __keep_rendered_text(self, meta_info):
+        """A reply whose synthesis failed partway keeps only the text that was rendered, in history and out of the
+        reply cache."""
+        self._response_captures.pop(meta_info.get("sequence_id"), None)
+        rendered = meta_info.get("text_rendered") or ""
+        response_uid = meta_info.get("response_uid")
+        logger.info(f"Synthesis failed partway: keeping {len(rendered)} rendered chars of response_uid {response_uid}")
+        self.conversation_history.sync_response_after_interruption(
+            response_uid, rendered, self.update_transcript_for_interruption
+        )
+        self.conversation_history.sync_interim_response_after_interruption(
+            response_uid, rendered, self.update_transcript_for_interruption
+        )
+
     def __capture_reply_audio(self, message):
         """Keep a learning reply's live audio; at its end, hand the whole clip to the cache."""
         meta_info = message["meta_info"]
@@ -8219,6 +8233,8 @@ class TaskManager(BaseManager):
                                         )
 
                                 self.__enqueue_synthesized(message)
+                                if meta_info.get("synthesis_failed"):
+                                    self.__keep_rendered_text(meta_info)
                                 self.__capture_reply_audio(message)
                             else:
                                 # Non-streaming output

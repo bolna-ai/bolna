@@ -508,9 +508,23 @@ class TestStreamState:
         recorder = _RecordingSequences()
         synth = _scripted_tts(monkeypatch, {"One.": [httpx.ReadError("connection lost")]}, task_manager=recorder)
         await synth.push({"data": "One.", "meta_info": {"sequence_id": 1, "end_of_llm_stream": True}})
-        with pytest.raises(Exception):
+        with pytest.raises(httpx.ReadError):
             await asyncio.wait_for(synth.generate().__anext__(), 1)
         assert recorder.non_fatal == []
+
+    async def test_a_failure_says_which_text_the_turn_rendered(self, monkeypatch):
+        recorder = _RecordingSequences()
+        script = {"One.": [_A], "Two.": [_B, httpx.ReadError("connection lost")]}
+        synth = _scripted_tts(monkeypatch, script, task_manager=recorder)
+        await synth.push({"data": "One.", "meta_info": {"sequence_id": 1, "end_of_llm_stream": False}})
+        await synth.push({"data": "Two.", "meta_info": {"sequence_id": 1, "end_of_llm_stream": True}})
+        stream = synth.generate()
+        while not (packet := await asyncio.wait_for(stream.__anext__(), 1))["meta_info"].get(
+            "end_of_synthesizer_stream"
+        ):
+            pass
+        assert packet["meta_info"]["synthesis_failed"] is True
+        assert packet["meta_info"]["text_rendered"] == "One."
 
 
 class TestSentenceRequests:

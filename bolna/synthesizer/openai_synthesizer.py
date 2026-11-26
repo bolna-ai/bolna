@@ -115,6 +115,8 @@ class OPENAISynthesizer(BaseSynthesizer):
             self._turn_audio_sent = False
             # A turn closed early by a failed request; its later pieces are dropped.
             self._dropped_turn = None
+            # The text of the open turn's requests that ended in full.
+            self._turn_rendered = []
 
     def supports_websocket(self):
         return True
@@ -249,6 +251,7 @@ class OPENAISynthesizer(BaseSynthesizer):
         self._held_text = None
         self._turn_audio_sent = False
         self._dropped_turn = None
+        self._turn_rendered = []
         self.first_chunk_generated = False
 
     def _convert_pcm_chunk(self, data):
@@ -392,6 +395,8 @@ class OPENAISynthesizer(BaseSynthesizer):
                             self._stamp_first_chunk(packet_meta)
                             self._stamp_mark_id(packet_meta)
                             self._turn_audio_sent = True
+                            if closing:
+                                self._turn_rendered.append(text)
                             yield create_ws_data_packet(audio, packet_meta)
                 except asyncio.CancelledError:
                     # Cancelled from outside, as a pool switch does: the leg's next reply starts clean.
@@ -410,8 +415,10 @@ class OPENAISynthesizer(BaseSynthesizer):
                     yield create_ws_data_packet(b"\x00", retired)
                     continue
                 if outcome == "failed":
-                    # The turn ends with what it already played; its end packet goes out now.
+                    # The turn ends with what it already played; its end packet goes out now, saying what that was.
                     meta_info["end_of_llm_stream"] = True
+                    meta_info["synthesis_failed"] = True
+                    meta_info["text_rendered"] = " ".join(self._turn_rendered)
                 self._finish_chunk_timing(meta_info, len(text), started, time.perf_counter())
 
             if final or outcome == "failed":
