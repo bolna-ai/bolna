@@ -2261,6 +2261,11 @@ class TaskManager(BaseManager):
                 injected_cfg["compact_threshold"] = self.llm_config["compact_threshold"]
             injected_cfg["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get("buffer_size")
             injected_cfg["language"] = self.language
+            # Same checks that set up the transcriber and synthesizer language pools.
+            transcriber_config = self.task_config["tools_config"].get("transcriber") or {}
+            injected_cfg["multilingual"] = bool(transcriber_config.get("multilingual")) or (
+                "multilingual" in self.task_config["tools_config"]["synthesizer"]
+            )
             injected_cfg["turn_based_conversation"] = self.turn_based_conversation
             if llm_config.get("static_start_opening"):
                 injected_cfg["opening_language"] = graph_opening_language(self.task_config)
