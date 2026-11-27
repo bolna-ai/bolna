@@ -123,13 +123,17 @@ class DecisionRouter:
         self.model = model or self.api.default_model
         self.key = os.getenv(self.api.key_env)
         if not self.key:
-            raise ValueError(f"No API key for decision routing on {self.provider.value}: set {self.api.key_env}")
+            logger.error(
+                f"No {self.api.key_env} for decision routing on {self.provider.value}; routing on the LLM router"
+            )
         # The LLM router the agent would otherwise use: fills edge parameters and routes when the decision API fails.
         self.fallback = fallback
         self.http = get_shared_http_client(base_url=self.api.url, http2=False)
 
     async def route(self, messages, tools, tool_choice="required", meta_info=None):
         tools = json.loads(tools) if isinstance(tools, str) else tools
+        if not self.key:
+            return await self.fallback.route(messages, tools, tool_choice, meta_info)
         try:
             name, confidence, usage = await self._decide(messages, tools)
         except Exception as e:

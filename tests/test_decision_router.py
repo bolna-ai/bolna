@@ -124,6 +124,18 @@ async def test_a_hop_the_decision_api_cannot_answer_routes_on_the_llm_router(rep
     assert decision["function_name"] == "stay_on_current_node"
 
 
+async def test_without_its_key_every_hop_routes_on_the_llm_router():
+    fallback = MagicMock()
+    fallback.route = AsyncMock(return_value={"function_name": "stay_on_current_node", "arguments": {}})
+    with patch.dict(os.environ, {}, clear=True):
+        r = DecisionRouter("typesafe", fallback=fallback)
+
+    decision = await r.route(MESSAGES, TOOLS)
+
+    assert fallback.route.call_args.args[:3] == (MESSAGES, TOOLS, "required")
+    assert decision["function_name"] == "stay_on_current_node"
+
+
 def test_a_decision_routed_graph_rejects_per_node_routing_overrides():
     config = {
         "agent_information": "a",
