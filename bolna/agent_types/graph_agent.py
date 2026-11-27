@@ -1427,12 +1427,8 @@ class GraphAgent(BaseAgent):
         # and the agent spoke the exception text (topaz 574cd2f9, 31/31 nodes examples:null).
         examples = node.get("examples") or {}
 
-        if detected_lang:
-            # Directive is unconditional once the language is known. It used to be emitted only
-            # when the node had an example for that language, so a node without examples (or
-            # without THIS language's example) silently dropped ALL language instruction — after
-            # an LID switch the pools flipped but replies stayed in the node prompt's authored
-            # language (QA 78c4c4a4: hi→en switch, every reply still Hindi).
+        # Multilingual calls always get it; single-language calls only for a language the node has an example for.
+        if detected_lang and (self.config.get("multilingual") or examples.get(detected_lang)):
             lang_name = LANGUAGE_NAMES.get(detected_lang, detected_lang)
             directive = (
                 f"\n\nLANGUAGE GUIDELINES\n\nThe user is now speaking {lang_name} ('{detected_lang}'). "
