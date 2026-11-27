@@ -198,12 +198,8 @@ class BaseSynthesizer:
     # ------------------------------------------------------------------
 
     def with_cut_space(self, text):
-        """Return `text` with the space the LLM stream dropped at its cut put back.
-
-        The streaming LLM wrappers end each piece at the last space in their buffer and drop that space.
-        A piece with no space at all is part of one long token (a URL or a long number) that the next
-        piece continues, so it gets no space."""
-        # shortcut: a one-word piece just before an over-long token loses its space exact once wrappers mark cuts.
+        """Restore the space the LLM cut dropped; a piece with no space is treated as a long token cut mid-way."""
+        # shortcut: a one-word piece cut at a space (two long words filling a small buffer) still glues; exact once the wrappers mark their cuts.
         return text + " " if text and " " in text else text
 
     def text_chunker(self, text):
