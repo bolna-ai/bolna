@@ -159,7 +159,7 @@ class AzureLLM(OpenAICompatibleLLM):
         )
 
         self.run_id = kwargs.get("run_id", None)
-        self.llm_host = urlparse(azure_endpoint).netloc if azure_endpoint else None
+        self.llm_host = urlparse(azure_endpoint).netloc
 
         # Fallback backend for turns the provisioned deployment cannot serve.
         self._overflow_client = None
