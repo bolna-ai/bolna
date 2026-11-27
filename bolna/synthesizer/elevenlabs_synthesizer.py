@@ -14,6 +14,7 @@ import websockets
 
 from .stream_synthesizer import StreamSynthesizer
 from bolna.constants import ELEVENLABS_CLONE_STRENGTH_MODEL_PREFIXES, ELEVENLABS_MAX_PRONUNCIATION_DICTIONARIES
+from bolna.helpers import expression_tags
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, resample
@@ -263,6 +264,8 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
             f"?model_id={self.model}&output_format={self.wire_format}"
             f"&inactivity_timeout=170&sync_alignment=true&optimize_streaming_latency=4"
         )
+        if self.expressive_tags:
+            self.ws_url += "&enable_ssml_parsing=true"
         self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/stream?optimize_streaming_latency=2&output_format="
 
         # One context per turn: closed at end_of_llm_stream and on interruption, so each
@@ -280,6 +283,9 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
         self._reported_closed_ws = None  # socket whose close was already logged
         self.pending_text = ""
         self.pending_sequence_id = None
+
+    def _format_tags(self, segments):
+        return expression_tags.format_eleven_ssml(segments)
 
     def _report_closed_socket(self, ws):
         """Log why ElevenLabs closed a socket, once per socket."""
@@ -652,6 +658,9 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
 
     def get_sleep_time(self):
         return 0.01
+
+    def _format_tags(self, segments):
+        return expression_tags.format_audio_tags(segments)
 
     async def establish_connection(self):
         try:

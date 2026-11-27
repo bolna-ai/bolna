@@ -152,6 +152,7 @@ def _tm(cache):
     tm._synth_pushed_sequences = set()
     tm._replayed_reply_keys = set()
     tm.synthesizer_cached_characters = 0
+    tm.expressive_tags = False
     tm.turn_based_conversation = False
     tm.is_web_based_call = False
     tm.sampling_rate = 8000

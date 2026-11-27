@@ -11,6 +11,7 @@ from websockets.exceptions import InvalidHandshake
 
 from .stream_synthesizer import StreamSynthesizer
 from bolna.constants import CARTESIA_VOLUME_MAX, CARTESIA_VOLUME_MIN, CARTESIA_VOLUME_MODELS
+from bolna.helpers import expression_tags
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import cartesia_supports_pronunciation_dict
@@ -103,6 +104,9 @@ class CartesiaSynthesizer(StreamSynthesizer):
         elif self.turn_id != meta_info.get("turn_id", 0) or self.sequence_id != meta_info.get("sequence_id", 0):
             self._update_context(meta_info)
         self.context_finalized = meta_info.get("end_of_llm_stream", False)
+
+    def _format_tags(self, segments):
+        return expression_tags.format_cartesia(segments, speed=float(self.speed or 1.0))
 
     def _update_context(self, meta_info):
         self.context_id = str(uuid.uuid4())

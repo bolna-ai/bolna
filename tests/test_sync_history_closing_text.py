@@ -106,6 +106,7 @@ def _sync_target():
     tm._turn_msg_map = {}
     tm._last_spoken_assistant = None
     tm._pending_assistant_history = {}
+    tm.expressive_tags = False
     return tm, history
 
 

@@ -200,7 +200,7 @@ class BaseSynthesizer:
     def with_cut_space(self, text):
         """Restore the space the LLM cut dropped; a piece with no space is treated as a long token cut mid-way."""
         # shortcut: a one-word piece cut at a space (two long words filling a small buffer) still glues; exact once the wrappers mark their cuts.
-        return text + " " if text and " " in text else text
+        return text + " " if text and " " in text and not text[-1].isspace() else text
 
     def text_chunker(self, text):
         """Split text into word-sized chunks, each ending in one space."""

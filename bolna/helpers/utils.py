@@ -447,10 +447,15 @@ def static_node_audio_key(
     return get_md5_hash(f"{identity}|{text}")
 
 
-def tts_voice_identity(provider, provider_config, pronunciation_rules=None):
+EXPRESSIVE_TAGS_AUDIO_VERSION = 1  # bump when the tag conversion changes, so audio stored before it is not replayed
+
+
+def tts_voice_identity(provider, provider_config, pronunciation_rules=None, expressive_tags=False):
     """Digest of every synthesizer setting that shapes the rendered audio."""
     rules = [rule.model_dump() if hasattr(rule, "model_dump") else rule for rule in pronunciation_rules or []]
     settings = {"provider": provider, "provider_config": provider_config, "pronunciation_rules": rules}
+    if expressive_tags:
+        settings["expressive_tags"] = EXPRESSIVE_TAGS_AUDIO_VERSION
     return get_md5_hash(json.dumps(settings, sort_keys=True, default=str))
 
 

@@ -457,6 +457,10 @@ PronunciationRules = Annotated[
     List[PronunciationRule], Field(max_length=PRONUNCIATION_RULES_MAX), AfterValidator(unique_pronunciation_words)
 ]
 
+EXPRESSIVE_TAG_PROVIDERS = (SynthesizerProvider.CARTESIA.value, SynthesizerProvider.ELEVENLABS.value)
+# Below this the LLM cut lands inside words often enough that a tag can't be put back together reliably.
+EXPRESSIVE_TAGS_MIN_BUFFER = 20
+
 
 class Synthesizer(BaseModel):
     provider: str
@@ -468,6 +472,15 @@ class Synthesizer(BaseModel):
     caching: Optional[bool] = True
     # Word -> say-as pairs to build a provider dictionary from; synthesis applies dictionaries by ID only.
     pronunciation_rules: Optional[PronunciationRules] = None
+    # Neutral pause, speed, spelling and mood tags in replies, turned into the voice's own SSML or audio tags.
+    expressive_tags: Optional[bool] = False
+
+    @model_validator(mode="after")
+    def expressive_tags_only_where_supported(self):
+        too_small = self.buffer_size is not None and self.buffer_size < EXPRESSIVE_TAGS_MIN_BUFFER
+        if self.expressive_tags and (self.provider not in EXPRESSIVE_TAG_PROVIDERS or too_small):
+            self.expressive_tags = False
+        return self
 
     @model_validator(mode="before")
     def preprocess(cls, values):

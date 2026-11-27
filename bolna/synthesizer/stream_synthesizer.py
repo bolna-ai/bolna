@@ -24,6 +24,7 @@ from collections import deque
 import websockets
 
 from .base_synthesizer import BaseSynthesizer
+from bolna.helpers import expression_tags
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
 
@@ -71,6 +72,11 @@ class StreamSynthesizer(BaseSynthesizer):
         self.current_sequence_chars = 0
         # Socket this turn's text was attempted on; only that socket's loss settles the turn.
         self.current_turn_socket = None
+
+        # Expressive tags (off unless the agent turns them on): a tag a piece ended inside, and the reply's pause budget.
+        self.expressive_tags = bool(kwargs.get("expressive_tags"))
+        self._held_tag = ("", None)
+        self._pause_budget = (None, expression_tags.MAX_PAUSES_PER_REPLY, False)  # (reply, pauses left, after a pause)
 
     # ------------------------------------------------------------------
     # Subclass hooks (override these)
@@ -181,10 +187,56 @@ class StreamSynthesizer(BaseSynthesizer):
         self._on_push(meta_info, text)
 
         end_of_llm_stream = meta_info.get("end_of_llm_stream", False)
+        if self.expressive_tags:
+            piece = text or ""
+            text, spoken = self._expressive_text(piece, meta_info.get("sequence_id"), end_of_llm_stream)
+            # Billing and the end-of-turn match follow the words the voice speaks, not the tags.
+            self.synthesized_characters += len(spoken) - len(piece)
+            self.current_sequence_chars += len(spoken) - len(piece)
+            self.current_text = spoken
+            if not text and not end_of_llm_stream:
+                return  # the whole piece is an unfinished tag: it goes out with the next piece
         self.sender_task = asyncio.create_task(
             self.sender(self._sender_text(text), meta_info.get("sequence_id"), end_of_llm_stream)
         )
         self.text_queue.append(meta_info)
+
+    def _expressive_text(self, piece, sequence_id, end_of_stream):
+        """(text for the voice, words it speaks): the piece with its expressive tags in this voice's own syntax, and
+        every tag it can't perform removed.
+
+        A tag the piece ends inside waits for the next piece of the same reply; a new reply drops it."""
+        held, held_sequence = self._held_tag
+        text = f"{held} {piece}" if held and held_sequence == sequence_id else piece  # the LLM cut dropped one space
+        reply = (sequence_id, self.current_turn_start_time)  # canned messages share a sequence_id but not a turn
+        if self._pause_budget[0] != reply:
+            self._pause_budget = (reply, expression_tags.MAX_PAUSES_PER_REPLY, False)
+        _, pauses_left, after_pause = self._pause_budget
+        # A canned line (sequence -1) is always pushed whole, even when its end is deferred (a handoff).
+        last_piece = end_of_stream or sequence_id == -1
+        ready, held = expression_tags.split_unfinished(text, final=last_piece)
+        self._held_tag = (held, sequence_id)
+        kept = expression_tags.segments(
+            ready,
+            self.expression_capabilities(),
+            getattr(self, "language", None),
+            pauses_left,
+            rules=True,
+            after_pause=after_pause,
+            end_of_reply=last_piece,
+        )
+        pauses_left -= sum(isinstance(s, expression_tags.Pause) for s in kept)
+        self._pause_budget = (reply, pauses_left, expression_tags.ends_with_pause(kept, after_pause))
+        return self._format_tags(kept), expression_tags.words_only(kept)
+
+    def expression_capabilities(self):
+        """Provider hook: the tags this voice performs. By default, the capability table's entry for its model."""
+        return expression_tags.capabilities_for(self.provider_name, getattr(self, "model", None))
+
+    def _format_tags(self, segments):
+        """Provider hook: the segments in this voice's own syntax. By default the words, plus the provider tags written
+        in the text that the voice performs; neutral tags need a provider override to be performed."""
+        return expression_tags.kept_text(segments)
 
     def _stamp_turn_start(self, meta_info):
         """Only stamp on the first push of a new turn (don't re-stamp on subsequent chunks)."""
