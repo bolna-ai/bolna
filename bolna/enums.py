@@ -136,7 +136,7 @@ class LLMProvider(str, Enum):
 
 
 class DecisionProvider(str, Enum):
-    """Decision-model APIs a graph agent can route on: they score each edge instead of decoding text."""
+    """Decision-model APIs: they answer a choice question with one of its choices instead of text."""
 
     TYPESAFE = "typesafe"
     OPENAI_DECISIONS = "openai-decisions"

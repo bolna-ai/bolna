@@ -36,6 +36,7 @@ from bolna.enums import (
 )
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import AzureLLM, OpenAiLLM, LiteLLM
+from bolna.llms.decision_model import DecisionModel
 from bolna.llms.decision_router import DecisionRouter
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
@@ -487,10 +488,10 @@ class GraphAgent(BaseAgent):
         }
 
     def _init_routing_client(self):
-        """Build the routing LLM from the same registry as the conversation model, under a decision model if one is set."""
+        """Build the routing LLM from the same registry as the conversation model, behind a decision model if one is set."""
         decision_provider = self.routing_provider if self.routing_provider in DecisionProvider.all_values() else None
         if decision_provider:
-            # The decision model picks the edge; the LLM router built below fills its parameters and stands in for it.
+            # The LLM router is built as if no routing provider were set, and the decision model goes in front of it.
             decision_model, self.routing_provider, self.routing_model = self.routing_model, None, None
         conv_provider = self.config.get("provider") or self.config.get("llm_provider") or "openai"
         # Self-hosted OpenAI-compatible endpoints (custom/ola) have no platform router, so they route on
@@ -542,12 +543,13 @@ class GraphAgent(BaseAgent):
         self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
         self.routing_llm = self._routing_llm_class()(**routing_kwargs)
         if decision_provider:
-            self.routing_llm = DecisionRouter(decision_provider, fallback=self.routing_llm, model=decision_model)
-            self.routing_provider, self.routing_model = decision_provider, self.routing_llm.model
+            llm_router_identity = (self.routing_provider, self.routing_model, self._routing_reasoning_effort_used)
+            decision = DecisionModel(decision_provider, decision_model)
+            self.routing_llm = DecisionRouter(decision, self.routing_llm, llm_router_identity)
+            self.routing_provider, self.routing_model = decision_provider, decision.model
             self._routing_reasoning_effort_used = None
         # What the last routing call actually ran on; a node override moves these for one call.
-        self._last_routing_model = self.routing_model
-        self._last_routing_effort = self._routing_reasoning_effort_used
+        self._reset_routing_identity()
         logger.info(f"Routing initialized with {self.routing_provider} ({self.routing_model})")
 
     def _routing_llm_class(self):
@@ -573,6 +575,7 @@ class GraphAgent(BaseAgent):
 
     def _reset_routing_identity(self) -> None:
         """Back to the agent's routing model, so a turn that makes no LLM call reports it."""
+        self._last_routing_provider = self.routing_provider
         self._last_routing_model = self.routing_model
         self._last_routing_effort = self._routing_reasoning_effort_used
 
@@ -953,7 +956,7 @@ class GraphAgent(BaseAgent):
             "transitioned": True,
             "routing_type": routing_type,
             "routing_model": self._last_routing_model if made_llm_call else None,
-            "routing_provider": self.routing_provider if made_llm_call else None,
+            "routing_provider": self._last_routing_provider if made_llm_call else None,
             "routing_latency_ms": round(latency_ms, 1),
             # Wall clock at hop start — the trace row is written after the hop finished.
             "routing_started_at": started_at,
@@ -1302,12 +1305,16 @@ class GraphAgent(BaseAgent):
 
         try:
             routing_llm, self._last_routing_model, self._last_routing_effort = self._routing_llm_for(node)
+            self._last_routing_provider = self.routing_provider
             result = await routing_llm.route(messages, tools)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
             if result is None:
                 logger.warning("No tool call in response")
                 return None, None, latency_ms, messages, tools, None, None, None
+
+            if result.get("routed_by"):
+                self._last_routing_provider, self._last_routing_model, self._last_routing_effort = result["routed_by"]
 
             function_name = result["function_name"]
             function_args = result["arguments"]
@@ -1866,7 +1873,7 @@ class GraphAgent(BaseAgent):
                         "routing_type": routing_type,
                         # Reset each turn, so this names the model any routing call this turn ran on.
                         "routing_model": self._last_routing_model,
-                        "routing_provider": getattr(self, "routing_provider", None),
+                        "routing_provider": self._last_routing_provider,
                         "routing_latency_ms": round(routing_latency_ms, 1),
                         "routing_started_at": routing_started_at,
                         "routing_reasoning_effort": self._last_routing_effort,

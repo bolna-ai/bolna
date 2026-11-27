@@ -4325,6 +4325,7 @@ class TaskManager(BaseManager):
         """Fold in the rationale, confidence and usage that arrive after the routing decision."""
         node = routing_info.get("previous_node", "?")
         usage = {}
+        parameter_fill = None
         try:
             result = await tail
             # A deterministic hop that carries a declined intent call's telemetry keeps its
@@ -4342,6 +4343,9 @@ class TaskManager(BaseManager):
             for key in ("input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens"):
                 if usage.get(key) is not None:
                     entry[key] = usage[key]
+            parameter_fill = result.get("parameter_fill")
+            if parameter_fill:
+                entry["parameter_fill"] = parameter_fill
 
             # Only routing that followed the conversation onto its pool draws on that pool's capacity.
             overflowed = (routing_info.get("routing_usage") or {}).get("overflowed")
@@ -4355,6 +4359,14 @@ class TaskManager(BaseManager):
             # Deferred from the hop so the row carries the rationale and the token counts, but
             # a hop always gets a row even when the tail was cancelled at teardown.
             self._log_routing_response(routing_info, usage, meta_info)
+            if parameter_fill:
+                # A decision-routed hop's parameters are filled by a second model, which gets its own usage row.
+                fill_call = {
+                    **routing_info,
+                    "routing_model": parameter_fill["routing_model"],
+                    "routing_latency_ms": None,
+                }
+                self._log_routing_response(fill_call, parameter_fill["usage"], meta_info)
 
     async def __do_llm_generation(
         self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False
