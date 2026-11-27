@@ -273,3 +273,20 @@ async def test_stopping_a_fork_the_node_already_dropped_closes_nothing(client_st
 
     assert handler.websocket.close.await_count == (client_state == WebSocketState.CONNECTED)
     assert handler.running is False
+
+
+@pytest.mark.parametrize("refused", [False, True], ids=["ringing", "refused"])
+async def test_no_hangup_closes_the_fork_while_a_trunk_transfer_rings(refused):
+    # A refused transfer dialled nothing, so its hangup still goes through.
+    tm = _transfer_call(transfer_call_params={"provider": "trunk"})
+    tm.has_transfer = True
+    tm._trunk_transfer_refused = refused
+    tm._hangup_processing = False
+    tm.hangup_decision_at = None
+    tm.call_hangup_message_config = None
+    tm._TaskManager__end_without_goodbye = AsyncMock()
+
+    await tm.process_call_hangup()
+
+    assert tm._TaskManager__end_without_goodbye.await_count == refused
+    assert tm.hangup_triggered is refused

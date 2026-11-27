@@ -19,6 +19,8 @@ def graph_agent(node):
     agent = GraphAgent.__new__(GraphAgent)
     agent.current_node_id = node
     agent.get_node_by_id = lambda node_id: None
+    agent.context_data = {}
+    agent.node_extracted_data = {}
     return agent
 
 
@@ -31,6 +33,7 @@ def task_manager(agent):
     tm._pending_user_input = None
     tm._sent_audio_sequences = set()
     tm._committed_assistant_sequences = set()
+    tm._rendered_before_failure = {}
     tm._blocked_sequences = set()
     tm._last_spoken_assistant = None
     tm._last_spoken_user_input = None
@@ -280,3 +283,22 @@ async def test_an_events_static_line_names_the_node_the_event_moved_to():
         "payment_received",
         -1,
     )
+
+
+async def test_an_events_static_line_fills_in_an_extracted_value():
+    agent = graph_agent("payment_received")
+    agent.context_data = {"recipient_data": {"name": "Asha"}}
+    agent.node_extracted_data = {"amount": "500"}
+    tm = task_manager(agent)
+    tm.language = "en"
+    tm.repeat_after_silence_seconds = None
+    tm._apply_node_interruption_threshold = lambda node: None
+    tm.tools["output"] = SimpleNamespace(get_provider=lambda: "plivo")
+    tm.task_config = {"tools_config": {"output": {"format": "pcm"}}}
+    tm._TaskManager__play_static_clip = AsyncMock()
+    target = {"id": "payment_received", "static_message": "Thanks {name}, we got your payment of {amount}."}
+
+    await tm._proactive_generate_for_event({}, {"node_type": "static", "target_node": target})
+
+    (line,) = assistants(tm)
+    assert line["content"] == "Thanks Asha, we got your payment of 500."

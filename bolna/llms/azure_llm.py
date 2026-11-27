@@ -2,7 +2,7 @@ import os
 import json
 import re
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import httpx
 from bolna.llms.http_client_pool import get_shared_http_client
@@ -37,6 +37,35 @@ from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 load_dotenv()
+
+DEFAULT_AZURE_OPENAI_DOMAINS = ("openai.azure.com", "cognitiveservices.azure.com")
+
+
+def azure_openai_allowed_domains() -> tuple:
+    """Domains an Azure OpenAI endpoint may be on. AZURE_OPENAI_ALLOWED_DOMAINS (comma-separated) replaces the default,
+    for deployments that reach Azure through a gateway or a custom domain."""
+    configured = (d.strip().strip(".").lower() for d in os.getenv("AZURE_OPENAI_ALLOWED_DOMAINS", "").split(","))
+    return tuple(d for d in configured if d) or DEFAULT_AZURE_OPENAI_DOMAINS
+
+
+def is_azure_openai_endpoint(url) -> bool:
+    """Whether an endpoint is a plain https URL on an allowed domain or one of its subdomains."""
+    try:
+        url = url.strip()
+        parts = urlsplit(url)
+        port = parts.port
+    except (AttributeError, ValueError):
+        return False
+    host = parts.hostname or ""
+    return (
+        parts.scheme == "https"
+        and parts.username is None
+        and port in (None, 443)
+        # Not just an empty query or fragment: a bare "?" or "#" would swallow the API path appended to the endpoint.
+        and "?" not in url
+        and "#" not in url
+        and any(host == domain or host.endswith(f".{domain}") for domain in azure_openai_allowed_domains())
+    )
 
 
 def should_overflow(error) -> bool:
@@ -104,7 +133,14 @@ class AzureLLM(OpenAICompatibleLLM):
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
         self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
-        azure_endpoint = kwargs.get("base_url", os.getenv("AZURE_OPENAI_ENDPOINT"))
+        # The endpoint may come from a caller's saved credentials. Resolved here, not by the SDK's env fallback,
+        # so whichever endpoint is dialled is checked against the allowed domains.
+        azure_endpoint = kwargs.get("base_url") or os.getenv("AZURE_OPENAI_ENDPOINT")
+        if not is_azure_openai_endpoint(azure_endpoint):
+            raise ValueError(
+                f"Azure OpenAI endpoint must be an https URL on {', '.join(azure_openai_allowed_domains())}; "
+                "set AZURE_OPENAI_ALLOWED_DOMAINS to allow others"
+            )
         api_key = kwargs.get("llm_key", os.getenv("AZURE_OPENAI_API_KEY"))
         api_version = kwargs.get("api_version", os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"))
 
@@ -123,7 +159,7 @@ class AzureLLM(OpenAICompatibleLLM):
         )
 
         self.run_id = kwargs.get("run_id", None)
-        self.llm_host = urlparse(azure_endpoint).netloc if azure_endpoint else None
+        self.llm_host = urlparse(azure_endpoint).netloc
 
         # Fallback backend for turns the provisioned deployment cannot serve.
         self._overflow_client = None

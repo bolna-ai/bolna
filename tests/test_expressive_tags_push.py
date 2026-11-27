@@ -24,7 +24,7 @@ VOICES = {
     "soniox": lambda **kw: SonioxSynthesizer(voice="Adrian", **kw),
 }
 
-# How the LLM wrappers cut a reply: at the last space, which they drop.
+# How the LLM wrappers cut a reply: at the last space, which they drop. Cartesia, Deepgram and Soniox get it back.
 PIECES = [
     "<<apologetic>> Sorry for the wait. [[pause",
     '400]] Your ID BK4821 is ready <break time="1s"/>',
@@ -51,7 +51,8 @@ async def _sent(synth, pieces, sequence_id=1):
 
 @pytest.mark.parametrize("name", VOICES)
 async def test_with_the_setting_off_every_voice_gets_each_piece_unchanged(name):
-    assert await _sent(_voice(name), PIECES) == PIECES
+    synth = _voice(name)
+    assert await _sent(synth, PIECES) == [synth._sender_text(piece) for piece in PIECES]
 
 
 async def test_with_the_setting_on_a_voice_without_tag_support_gets_words_only():
@@ -77,7 +78,7 @@ async def test_a_new_turn_drops_a_half_tag_held_from_the_last_one():
 async def test_with_the_setting_on_a_provider_tag_the_voice_performs_is_kept():
     pieces = ['Hi <break time="1s"/> there [[pause 400]] ok']
     assert await _sent(_voice("cartesia", expressive_tags=True), pieces) == [
-        'Hi <break time="1s"/> there <break time="400ms"/> ok'
+        'Hi <break time="1s"/> there <break time="400ms"/> ok '
     ]
 
 
@@ -111,7 +112,7 @@ async def test_each_voice_gets_the_reply_in_its_own_syntax(name, expected):
 async def test_cartesia_speed_spans_return_to_the_agents_own_speed():
     synth = _voice("cartesia", expressive_tags=True, speed=1.2)
     sent = await _sent(synth, ["Note <<slow: 4 7 2 9>> please."])
-    assert sent == ['Note <speed ratio="0.96"/> 4 7 2 9 <speed ratio="1.2"/> please.']
+    assert sent == ['Note <speed ratio="0.96"/> 4 7 2 9 <speed ratio="1.2"/> please. ']
 
 
 def _wrapper_pieces(text, buffer_size, token=4):
@@ -204,7 +205,7 @@ async def test_after_a_language_switch_the_new_voice_never_speaks_a_tag():
     pool.active_label = "hi"  # the language switch
     await pool.push({"data": reply, "meta_info": {"sequence_id": 2, "end_of_llm_stream": True}})
     await hindi.sender_task
-    assert english.sender.await_args.args[0] == ' Hi there <break time="1s"/> friend.'
+    assert english.sender.await_args.args[0] == ' Hi there <break time="1s"/> friend. '
     assert hindi.sender.await_args.args[0] == " Hi there friend."
 
 
@@ -217,7 +218,7 @@ async def test_two_pauses_stay_one_even_when_the_llm_cut_falls_between_them():
 async def test_a_cartesia_agent_without_a_speed_setting_still_gets_its_tags():
     synth = _voice("cartesia", expressive_tags=True, speed=None)
     assert await _sent(synth, ["Note <<slow: 4 7 2 9>> please."]) == [
-        'Note <speed ratio="0.8"/> 4 7 2 9 <speed ratio="1.0"/> please.'
+        'Note <speed ratio="0.8"/> 4 7 2 9 <speed ratio="1.0"/> please. '
     ]
 
 
@@ -231,7 +232,7 @@ async def test_a_canned_line_never_carries_a_tag_over_to_the_next_one():
         await synth.push({"data": text, "meta_info": meta})
         if synth.sender_task:
             await synth.sender_task
-    assert synth.sender.await_args_list[-1].args[0] == "Thank you, goodbye."
+    assert synth.sender.await_args_list[-1].args[0] == "Thank you, goodbye. "
 
 
 async def test_elevenlabs_v4_never_gets_a_reply_that_ends_on_a_sound():

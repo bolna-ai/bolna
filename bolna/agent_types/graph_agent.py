@@ -1427,12 +1427,8 @@ class GraphAgent(BaseAgent):
         # and the agent spoke the exception text (topaz 574cd2f9, 31/31 nodes examples:null).
         examples = node.get("examples") or {}
 
-        if detected_lang:
-            # Directive is unconditional once the language is known. It used to be emitted only
-            # when the node had an example for that language, so a node without examples (or
-            # without THIS language's example) silently dropped ALL language instruction — after
-            # an LID switch the pools flipped but replies stayed in the node prompt's authored
-            # language (QA 78c4c4a4: hi→en switch, every reply still Hindi).
+        # Multilingual calls always get it; single-language calls only for a language the node has an example for.
+        if detected_lang and (self.config.get("multilingual") or examples.get(detected_lang)):
             lang_name = LANGUAGE_NAMES.get(detected_lang, detected_lang)
             directive = (
                 f"\n\nLANGUAGE GUIDELINES\n\nThe user is now speaking {lang_name} ('{detected_lang}'). "
@@ -1466,7 +1462,7 @@ class GraphAgent(BaseAgent):
     def _get_tool_choice_for_node(self, history: Optional[List[dict]] = None):
         """Return forced tool_choice for the current node, or None if not forced.
 
-        Drops the force when required prompt vars aren't in recipient_data,
+        Drops the force when required prompt vars have no value yet,
         or when the tool has already been called this node visit.
         """
         if not self.llm or not getattr(self.llm, "trigger_function_call", False):
@@ -1488,7 +1484,7 @@ class GraphAgent(BaseAgent):
         if missing:
             logger.warning(
                 f"Dropping forced function call '{fn}' on node '{self.current_node_id}': "
-                f"recipient_data missing required vars referenced in prompt: {missing}"
+                f"required vars referenced in prompt have no value: {missing}"
             )
             return None
 
@@ -1551,8 +1547,8 @@ class GraphAgent(BaseAgent):
 
         prompt_vars = set(_PROMPT_VAR_PATTERN.findall(node.get("prompt", "") or ""))
         referenced = prompt_vars & required
-        recipient_data = self.context_data.get("recipient_data") or {}
-        return sorted(v for v in referenced if not recipient_data.get(v))
+        variables = self._with_extracted_values(self.context_data).get("recipient_data") or {}
+        return sorted(v for v in referenced if not variables.get(v))
 
     def _forced_function_already_called(self, fn: str, history: List[dict]) -> bool:
         node_history = history[self.current_node_entry_index :] if self.current_node_entry_index < len(history) else []
@@ -1610,17 +1606,30 @@ class GraphAgent(BaseAgent):
         freezes it so its text stays identical across turns and the prompt cache
         keeps hitting, matching normal agents which render time once at setup.
         """
-        if not self.context_data or not isinstance(self.context_data.get("recipient_data"), dict):
-            return self.context_data
-        recipient = self.context_data["recipient_data"]
-        if self._frozen_time_vars is None:
-            timezone_str = recipient.get("timezone")
-            if timezone_str:
-                enrich_context_with_time_variables(self.context_data, timezone_str)
-            self._frozen_time_vars = {k: recipient[k] for k in _TIME_VAR_KEYS if k in recipient}
-        if not self._frozen_time_vars:
-            return self.context_data
-        return {**self.context_data, "recipient_data": {**recipient, **self._frozen_time_vars}}
+        context = self.context_data
+        recipient = context.get("recipient_data")
+        if isinstance(recipient, dict):
+            if self._frozen_time_vars is None:
+                timezone_str = recipient.get("timezone")
+                if timezone_str:
+                    enrich_context_with_time_variables(context, timezone_str)
+                self._frozen_time_vars = {k: recipient[k] for k in _TIME_VAR_KEYS if k in recipient}
+            if self._frozen_time_vars:
+                context = {**context, "recipient_data": {**recipient, **self._frozen_time_vars}}
+        return self._with_extracted_values(context)
+
+    def _with_extracted_values(self, context: dict) -> dict:
+        """context with edge-parameter values laid over recipient_data, the only part prompt substitution reads."""
+        if not self.node_extracted_data:
+            return context
+        recipient = context.get("recipient_data")
+        recipient = recipient if isinstance(recipient, dict) else {}
+        return {**context, "recipient_data": {**recipient, **self.node_extracted_data}}
+
+    def render_static_text(self, text: str) -> str:
+        """Static message text with call variables filled in, edge-parameter values included."""
+        context = self._with_extracted_values(self.context_data)
+        return update_prompt_with_context(text, context) if context else text
 
     async def _build_messages(self, history: List[dict], meta_info: Optional[dict] = None) -> List[dict]:
         """Build messages array: system prompt + conversation history (+ optional trailing RAG)."""
@@ -1706,8 +1715,7 @@ class GraphAgent(BaseAgent):
         )
         if not text:
             return None
-        if self.context_data:
-            text = update_prompt_with_context(text, self.context_data)
+        text = self.render_static_text(text)
         return {
             "static_message": text,
             "static_audio_hash": get_md5_hash(text),

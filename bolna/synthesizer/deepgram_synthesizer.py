@@ -93,6 +93,10 @@ class DeepgramSynthesizer(StreamSynthesizer):
     def _get_audio_format(self):
         return "mulaw" if self.use_mulaw else self.format
 
+    def _sender_text(self, text):
+        """Deepgram joins pieces exactly as sent, so restore the space dropped at each LLM cut."""
+        return self.with_cut_space(text)
+
     # ------------------------------------------------------------------
     # Interruption
     # ------------------------------------------------------------------

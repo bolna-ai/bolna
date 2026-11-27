@@ -258,6 +258,7 @@ def _spawning_manager(pending_user_input, followup_turn_id):
     tm._sent_audio_sequences = set()
     tm._blocked_sequences = set()
     tm._committed_assistant_sequences = set()
+    tm._rendered_before_failure = {}
     tm._last_spoken_assistant = None
     tm._last_spoken_user_input = None
     tm._turn_msg_map = {}
@@ -341,6 +342,7 @@ def _live_manager():
     tm._sent_audio_sequences = set()
     tm._blocked_sequences = set()
     tm._committed_assistant_sequences = set()
+    tm._rendered_before_failure = {}
     tm._last_spoken_assistant = None
     tm._last_spoken_user_input = None
     tm._turn_msg_map = {}

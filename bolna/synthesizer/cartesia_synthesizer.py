@@ -88,6 +88,10 @@ class CartesiaSynthesizer(StreamSynthesizer):
         # WS always requests pcm_mulaw@8kHz (see form_payload)
         return "mulaw"
 
+    def _sender_text(self, text):
+        """Cartesia joins pieces exactly as sent, so restore the space dropped at each LLM cut."""
+        return self.with_cut_space(text)
+
     def _on_push(self, meta_info, text):
         """Fresh context_id on turn/sequence change or after the previous finalized. The handoff
         doesn't finalize — the reply continues its context, avoiding parallel-context overlap."""

@@ -164,6 +164,7 @@ def generation_tm(agent, agent_type):
     tm._pending_user_input = None
     tm._sent_audio_sequences = set()
     tm._committed_assistant_sequences = set()
+    tm._rendered_before_failure = {}
     tm._blocked_sequences = set()
     tm._last_spoken_assistant = None
     tm._last_spoken_user_input = None
