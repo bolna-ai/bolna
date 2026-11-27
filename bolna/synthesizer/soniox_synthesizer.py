@@ -126,6 +126,10 @@ class SonioxSynthesizer(StreamSynthesizer):
     def _get_audio_format(self):
         return "mulaw" if self.use_mulaw else "pcm"
 
+    def _sender_text(self, text):
+        """Soniox joins pieces exactly as sent, so restore the space dropped at each LLM cut."""
+        return self.with_cut_space(text)
+
     def _process_audio_chunk(self, chunk):
         # The wire format is already the target format — decoding base64 is the whole job.
         return chunk or None

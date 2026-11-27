@@ -8,6 +8,7 @@ Subclasses only need to implement a handful of provider-specific methods:
   - form_payload()         -> build the JSON payload for a text chunk (optional)
   - _get_audio_format()    -> return the meta_info 'format' string
   - _process_audio_chunk() -> transform raw audio before yielding (optional)
+  - _sender_text()         -> the text handed to sender() (optional)
 
 Everything else — push routing, latency tracking, first-chunk bookkeeping,
 monitor_connection, cleanup — lives here.
@@ -180,7 +181,9 @@ class StreamSynthesizer(BaseSynthesizer):
         self._on_push(meta_info, text)
 
         end_of_llm_stream = meta_info.get("end_of_llm_stream", False)
-        self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
+        self.sender_task = asyncio.create_task(
+            self.sender(self._sender_text(text), meta_info.get("sequence_id"), end_of_llm_stream)
+        )
         self.text_queue.append(meta_info)
 
     def _stamp_turn_start(self, meta_info):
@@ -225,6 +228,10 @@ class StreamSynthesizer(BaseSynthesizer):
     def _on_push(self, meta_info, text):
         """Provider-specific hook called during push before sender is created."""
         pass
+
+    def _sender_text(self, text):
+        """Provider-specific hook: the text handed to sender(). Unchanged by default."""
+        return text
 
     # ------------------------------------------------------------------
     # generate()  — the main audio-producing async generator
