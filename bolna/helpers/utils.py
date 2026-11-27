@@ -1301,6 +1301,18 @@ def static_start_node(task: dict) -> Optional[dict]:
     return start_node if start_node and start_node.get("node_type") == NodeType.STATIC else None
 
 
+# Bolna's language codes that differ from ISO 639-1.
+_ISO_LANGUAGE = {"od": "or"}
+
+
+def primary_language_code(language) -> Optional[str]:
+    """ "hi-IN" or "hi_IN" to the ISO 639-1 "hi" speech servers expect; None for a blank or a non-string."""
+    if not isinstance(language, str) or not language.strip():
+        return None
+    primary = re.split(r"[-_]", language.strip().lower(), maxsplit=1)[0]
+    return _ISO_LANGUAGE.get(primary, primary)
+
+
 def message_language_key(language: Optional[str]) -> Optional[str]:
     """The key a language-keyed message is stored under: "hi-IN" and "multi-hi" both read "hi"."""
     parts = (language or "").split("-")

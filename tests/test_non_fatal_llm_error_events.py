@@ -61,6 +61,7 @@ async def test_errors_recorded_by_the_hangup_check_are_kept():
     tm._get_next_step = MagicMock(return_value="synthesizer")
     tm._append_eager_llm_stub = MagicMock()
     tm.turn_based_conversation = False
+    tm.has_transfer = False
     tm.conversation_history = MagicMock(get_copy=MagicMock(return_value=[]))
     tm._TaskManager__is_knowledgebase_agent = MagicMock(return_value=True)
     tm._TaskManager__is_graph_agent = MagicMock(return_value=False)
