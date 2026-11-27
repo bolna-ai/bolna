@@ -21,6 +21,7 @@ def _make_tm(multilingual_prompts=None):
     tm.multilingual_prompts = multilingual_prompts if multilingual_prompts is not None else {}
     tm.system_prompt = {"role": "system", "content": "OLD HINDI PROMPT"}
     tm.conversation_history = MagicMock()
+    tm.call_memory = None
     tm._TaskManager__language_directive = TaskManager._TaskManager__language_directive.__get__(tm, TaskManager)
     tm._invalidate_response_chain = MagicMock()
     return tm

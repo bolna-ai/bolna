@@ -81,6 +81,7 @@ def _tm(base="## Agent Prompt:\n\nBe helpful.\n\n## Transcript:\n", multilingual
     tm.multilingual_prompts = multilingual or {}
     tm.system_prompt = {"content": base}
     tm.conversation_history = MagicMock()
+    tm.call_memory = None
     # MagicMock would silently absorb the name-mangled helper call — bind the real one.
     tm._TaskManager__language_directive = lambda label: DIRECTIVE(tm, label)
     return tm
