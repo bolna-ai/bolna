@@ -203,13 +203,15 @@ async def test_the_transitions_the_model_reads_no_longer_ask_for_the_rationale()
     assert sent == [{}, {"slot": {"type": "object"}}]
 
 
-async def test_the_rationale_is_bounded():
+async def test_the_rationale_is_bounded_and_cannot_use_up_the_decisions_output_cap():
     backend = Backend(constrained_reply('{"reasoning": "r", "decision": {"name": "transition_to_no_data"}}'))
 
-    await bolna_llm(backend).route(MSGS, ROUTING_TOOLS)
+    await bolna_llm(backend, max_tokens=250).route(MSGS, ROUTING_TOOLS)
 
-    reasoning = backend.requests[0]["response_format"]["json_schema"]["schema"]["properties"]["reasoning"]
+    sent = backend.requests[0]
+    reasoning = sent["response_format"]["json_schema"]["schema"]["properties"]["reasoning"]
     assert reasoning["type"] == "string" and reasoning["maxLength"] > 0
+    assert sent["max_tokens"] == 250 + reasoning["maxLength"]
 
 
 @pytest.mark.parametrize("piece", [1, 2, 7, 1000])

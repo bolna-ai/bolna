@@ -21,7 +21,7 @@ logger = configure_logger(__name__)
 # Providers whose server accepts a forced tool_choice without enforcing it, so the model may answer instead.
 SCHEMA_FORCED_TOOL_PROVIDERS = frozenset({LLMProvider.BOLNA.value})
 
-# Guided decoding cuts a routing rationale at this length, so a rambling one cannot hold up the decision.
+# Longest routing rationale guided decoding allows before the decision.
 ROUTING_REASONING_MAX_CHARS = 600
 
 _ENVELOPE_HEAD = re.compile(r'\s*\{\s*"name"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"arguments"\s*:\s*')
@@ -35,23 +35,21 @@ class ForcedToolCall:
     translator: Callable
     # The tools as the model should read them, when they differ from the request's.
     tools: Optional[list] = None
+    # Output the reply writes ahead of the call, allowed on top of the request's cap so it cannot cut the call.
+    preamble_tokens: int = 0
 
     def stream(self, chunks) -> AsyncIterator:
         return _as_tool_call_deltas(chunks, self.translator())
 
 
 def _reason_first_choice(tools: list) -> ForcedToolCall:
-    """Pick among the tools with the rationale written first: {"reasoning", "decision": {"name", "arguments"?}}.
-
-    The rationale leaves the call, so the tools the model reads drop it too; a model still offered it writes it
-    into an argument's value.
-    """
+    """Pick among the tools with the rationale written first: {"reasoning", "decision": {"name", "arguments"?}}."""
+    # A model still offered the rationale as a parameter writes it into an argument's value.
     tools = [without_trailing_parameters(t) for t in tools]
     options = []
     for tool in tools:
         params = tool["function"]["parameters"]
         option = {"name": {"const": tool["function"]["name"]}}
-        # An empty arguments object the model has no reason to write invites whitespace padding.
         if params["properties"]:
             option["arguments"] = {**params, "additionalProperties": False}
         options.append(
@@ -66,7 +64,10 @@ def _reason_first_choice(tools: list) -> ForcedToolCall:
         "required": [REASONING_KEY, "decision"],
         "additionalProperties": False,
     }
-    return ForcedToolCall(_response_format("routing_decision", schema), _ReasonFirst, tools)
+    # A character costs at most about a token, so the rationale's length bounds its tokens.
+    return ForcedToolCall(
+        _response_format("routing_decision", schema), _ReasonFirst, tools, preamble_tokens=ROUTING_REASONING_MAX_CHARS
+    )
 
 
 def _forced_tool_call(tools, tool_choice, reason_first: bool = False) -> Optional[ForcedToolCall]:
@@ -103,6 +104,8 @@ def force_tools_by_schema(model_args: dict, reason_first: bool = False) -> Optio
         model_args["response_format"] = forced.response_format
         if forced.tools is not None:
             model_args["tools"] = forced.tools
+        if forced.preamble_tokens and model_args.get("max_tokens"):
+            model_args["max_tokens"] += forced.preamble_tokens
     return forced
 
 
@@ -166,7 +169,7 @@ class _Envelope:
 
 
 class _ReasonFirst:
-    """The reply is {"reasoning", "decision": {...}}; the call is whole only once the decision, which comes last, closes."""
+    """The reply is {"reasoning", "decision": {...}}; the decision comes last, so the call is whole only at the end."""
 
     def __init__(self):
         self.buffer = ""
