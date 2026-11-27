@@ -161,35 +161,64 @@ async def test_other_providers_still_force_through_tool_choice():
     assert backend.requests[0]["response_format"] == {"type": "text"}
 
 
-async def test_a_routing_hop_picks_among_transitions_by_schema():
+async def test_a_routing_hop_writes_its_rationale_before_it_picks_a_transition():
     backend = Backend(
-        constrained_reply(
-            '{"name": "transition_to_no_data", "arguments": {"reasoning": "nothing came back", "confidence": 0.8}}'
-        )
+        constrained_reply('{"reasoning": "nothing came back", "decision": {"name": "transition_to_no_data"}}')
     )
 
     decision = await bolna_llm(backend).route(MSGS, ROUTING_TOOLS)
 
     sent = backend.requests[0]
-    options = sent["response_format"]["json_schema"]["schema"]["anyOf"]
+    schema = sent["response_format"]["json_schema"]["schema"]
+    # Guided decoding emits properties in order, so the pick is made after the rationale, not before it.
+    assert list(schema["properties"]) == ["reasoning", "decision"]
+    options = schema["properties"]["decision"]["anyOf"]
     assert [o["properties"]["name"]["const"] for o in options] == ["transition_to_no_data", "transition_to_book"]
     # Each edge's condition lives only in its function's description, so the tools must stay in the prompt.
     assert [t["function"]["name"] for t in sent["tools"]] == ["transition_to_no_data", "transition_to_book"]
     assert sent["tool_choice"] == "auto"
     assert decision["function_name"] == "transition_to_no_data"
-    tail = await decision["routing_tail"]
-    assert (tail["reasoning"], tail["confidence"]) == ("nothing came back", 0.8)
+    assert decision["arguments"] == {}
+    assert (await decision["routing_tail"])["reasoning"] == "nothing came back"
+
+
+async def test_only_a_transition_with_edge_parameters_asks_for_arguments():
+    backend = Backend(constrained_reply('{"reasoning": "r", "decision": {"name": "transition_to_no_data"}}'))
+
+    await bolna_llm(backend).route(MSGS, ROUTING_TOOLS)
+
+    options = backend.requests[0]["response_format"]["json_schema"]["schema"]["properties"]["decision"]["anyOf"]
+    no_data, book = options
+    assert list(no_data["properties"]) == ["name"]
+    assert list(book["properties"]["arguments"]["properties"]) == ["slot"]
+
+
+async def test_the_rationale_is_bounded():
+    backend = Backend(constrained_reply('{"reasoning": "r", "decision": {"name": "transition_to_no_data"}}'))
+
+    await bolna_llm(backend).route(MSGS, ROUTING_TOOLS)
+
+    reasoning = backend.requests[0]["response_format"]["json_schema"]["schema"]["properties"]["reasoning"]
+    assert reasoning["type"] == "string" and reasoning["maxLength"] > 0
 
 
 @pytest.mark.parametrize("piece", [1, 2, 7, 1000])
 async def test_edge_parameters_survive_any_chunking_of_the_reply(piece):
-    reply = '{"name": "transition_to_book", "arguments": {"slot": {"day": "mon", "at": {"h": 9}}, "reasoning": "asked for monday", "confidence": 1}}'
+    reply = '{"reasoning": "asked for monday", "decision": {"name": "transition_to_book", "arguments": {"slot": {"day": "mon", "at": {"h": 9}}}}}'
 
     decision = await bolna_llm(Backend(constrained_reply(reply, piece))).route(MSGS, ROUTING_TOOLS)
 
     assert decision["function_name"] == "transition_to_book"
     assert decision["arguments"] == {"slot": {"day": "mon", "at": {"h": 9}}}
     assert (await decision["routing_tail"])["reasoning"] == "asked for monday"
+
+
+async def test_a_reply_cut_before_its_decision_routes_nowhere():
+    events = constrained_reply('{"reasoning": "the caller has not read back the year')[:-1] + [
+        sse(finish_reason="length")
+    ]
+
+    assert await bolna_llm(Backend(events)).route(MSGS, ROUTING_TOOLS) is None
 
 
 async def test_a_call_the_server_streams_natively_passes_through_untouched():
