@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from typing import Optional
 
 from bolna.helpers.logger_config import configure_logger
@@ -84,20 +85,23 @@ class DecisionRouter:
             return {}, None
         # Forced on the whole routing request: offered the edge alone, the LLM copies the caller's words into it.
         forced = {"type": "function", "function": {"name": name}}
+        started = time.perf_counter()
         filled = await self.llm_router.route(messages, tools, forced, meta_info)
+        latency_ms = round((time.perf_counter() - started) * 1000, 1)
         if not filled or filled.get("function_name") != name:
             logger.warning(f"Edge parameters for {name} could not be filled; transitioning without them")
             return {}, None
         parameters = {k: v for k, v in filled["arguments"].items() if k not in TRAILING_KEYS}
-        return parameters, asyncio.create_task(self._hop_tail(decision, filled))
+        return parameters, asyncio.create_task(self._hop_tail(decision, filled, latency_ms))
 
-    async def _hop_tail(self, decision: Decision, filled: dict) -> dict:
+    async def _hop_tail(self, decision: Decision, filled: dict, fill_latency_ms: float) -> dict:
         """The hop's usage, and under `parameter_fill` the LLM call that filled its parameters."""
         fill_tail = await filled["routing_tail"] if filled.get("routing_tail") else {}
         provider, model, _ = self.llm_router_identity
         fill = {
             "routing_provider": provider,
             "routing_model": model,
+            "latency_ms": fill_latency_ms,
             "usage": fill_tail.get("usage") or filled.get("usage") or {},
         }
         return {"usage": decision.usage, "parameter_fill": fill}

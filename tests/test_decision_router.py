@@ -100,14 +100,11 @@ async def test_the_chosen_edges_parameters_come_from_the_llm_router_forced_onto_
     assert tool_choice == {"type": "function", "function": {"name": "transition_to_book"}}
     assert hop["arguments"] == {"slot": "mon 9", "confidence": 0.9}
     # The hop keeps the decision's usage; the LLM call that filled the parameters is reported beside it.
-    assert await hop["routing_tail"] == {
-        "usage": {"input_tokens": 120, "output_tokens": 1},
-        "parameter_fill": {
-            "routing_provider": "openai",
-            "routing_model": "gpt-4.1-mini",
-            "usage": {"input_tokens": 900, "output_tokens": 30},
-        },
-    }
+    tail = await hop["routing_tail"]
+    assert tail["usage"] == {"input_tokens": 120, "output_tokens": 1}
+    fill = tail["parameter_fill"]
+    assert (fill["routing_provider"], fill["routing_model"]) == ("openai", "gpt-4.1-mini")
+    assert fill["usage"] == {"input_tokens": 900, "output_tokens": 30} and fill["latency_ms"] >= 0
 
 
 async def test_a_hop_the_decision_model_cannot_answer_is_routed_and_reported_by_the_llm_router():
