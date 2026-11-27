@@ -14,7 +14,7 @@ ENDPOINTS = {"gpt-6-luna": INDIA}
 PLATFORM_ENV = {
     "OPENAI_API_KEY": "platform-openai-key",
     "AZURE_OPENAI_API_KEY": "platform-azure-key",
-    "AZURE_OPENAI_ENDPOINT": "https://platform.azure.example",
+    "AZURE_OPENAI_ENDPOINT": "https://platform.openai.azure.com",
 }
 
 

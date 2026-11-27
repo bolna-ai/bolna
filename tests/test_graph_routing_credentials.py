@@ -15,7 +15,7 @@ from bolna.agent_types.graph_agent import GraphAgent
 PLATFORM_ENV = {
     "OPENAI_API_KEY": "platform-openai-key",
     "AZURE_OPENAI_API_KEY": "platform-azure-key",
-    "AZURE_OPENAI_ENDPOINT": "https://platform.azure.example",
+    "AZURE_OPENAI_ENDPOINT": "https://platform.openai.azure.com",
     "GOOGLE_API_KEY": "platform-google-key",
 }
 
@@ -93,14 +93,14 @@ def test_route_routing_to_conversation_reuses_azure_creds():
     agent, _ = _build(
         provider="azure",
         llm_key="conv-key",
-        base_url="https://conv.azure.example",
+        base_url="https://conv.openai.azure.com",
         api_version="2024-12-01-preview",
         route_routing_to_conversation=True,
     )
     kw = _routing_kwargs(agent)
     assert kw["provider"] == "azure"
     assert kw["llm_key"] == "conv-key"
-    assert kw["base_url"] == "https://conv.azure.example"
+    assert kw["base_url"] == "https://conv.openai.azure.com"
 
 
 def test_explicit_azure_routing_with_openai_conversation_uses_platform_creds():
@@ -118,13 +118,13 @@ def test_injected_routing_credentials_reach_the_routing_client():
         routing_provider="azure",
         routing_model="azure/gpt-4.1-mini",
         routing_llm_key="routing-azure-key",
-        routing_base_url="https://routing.azure.example",
+        routing_base_url="https://routing.openai.azure.com",
         routing_api_version="2024-12-01-preview",
     )
     kw = _routing_kwargs(agent)
     assert kw["provider"] == "azure"
     assert kw["llm_key"] == "routing-azure-key"
-    assert kw["base_url"] == "https://routing.azure.example"
+    assert kw["base_url"] == "https://routing.openai.azure.com"
     assert kw["api_version"] == "2024-12-01-preview"
 
 
@@ -135,15 +135,15 @@ def test_route_routing_to_conversation_overrides_injected_routing_credentials():
     agent, _ = _build(
         provider="azure",
         llm_key="ptu-conv-key",
-        base_url="https://ptu.azure.example",
+        base_url="https://ptu.openai.azure.com",
         route_routing_to_conversation=True,
         routing_provider="azure",
         routing_llm_key="standalone-azure-key",
-        routing_base_url="https://standalone.azure.example",
+        routing_base_url="https://standalone.openai.azure.com",
     )
     kw = _routing_kwargs(agent)
     assert kw["llm_key"] == "ptu-conv-key"
-    assert kw["base_url"] == "https://ptu.azure.example"
+    assert kw["base_url"] == "https://ptu.openai.azure.com"
 
 
 def test_injected_routing_credentials_win_over_conversation_inheritance():
@@ -152,15 +152,15 @@ def test_injected_routing_credentials_win_over_conversation_inheritance():
     agent, _ = _build(
         provider="azure",
         llm_key="conv-key",
-        base_url="https://conv.azure.example",
+        base_url="https://conv.openai.azure.com",
         routing_provider="azure",
         routing_model="azure/gpt-4.1-mini",
         routing_llm_key="routing-azure-key",
-        routing_base_url="https://routing.azure.example",
+        routing_base_url="https://routing.openai.azure.com",
     )
     kw = _routing_kwargs(agent)
     assert kw["llm_key"] == "routing-azure-key"
-    assert kw["base_url"] == "https://routing.azure.example"
+    assert kw["base_url"] == "https://routing.openai.azure.com"
 
 
 def test_routing_forwards_service_tier_and_reasoning_effort():
@@ -178,7 +178,7 @@ OVERFLOW = {"provider": "openai", "model": "gpt-4.1-mini", "llm_key": "eu-key"}
 def test_routing_following_the_conversation_takes_its_tier_and_overflow():
     agent, _ = _build(
         provider="azure",
-        base_url="https://ptu.azure.example",
+        base_url="https://ptu.openai.azure.com",
         route_routing_to_conversation=True,
         service_tier="priority",
         overflow_llm=OVERFLOW,
@@ -198,7 +198,7 @@ def test_azure_routing_on_its_own_deployment_takes_no_conversation_tier_or_overf
         routing_provider="azure",
         routing_model="azure/gpt-4.1-mini",
         routing_llm_key="standard-azure-key",
-        routing_base_url="https://standard.azure.example",
+        routing_base_url="https://standard.openai.azure.com",
     )
     kw = _routing_kwargs(agent)
     assert kw["llm_key"] == "standard-azure-key"
@@ -228,7 +228,7 @@ def test_openai_conversation_aux_llm_reuses_its_own_key():
 REAL_AGENT_ENV = {
     "OPENAI_API_KEY": "plat",
     "GOOGLE_API_KEY": "gg",
-    "AZURE_OPENAI_BASE_URL": "https://platform.azure.example",
+    "AZURE_OPENAI_BASE_URL": "https://platform.openai.azure.com",
     "AZURE_OPENAI_API_KEY": "platform-azure-key",
 }
 
@@ -275,7 +275,7 @@ AZURE_KEY_ONLY_ENV = {
     "OPENAI_API_KEY": "plat",
     "GOOGLE_API_KEY": "gg",
     "AZURE_OPENAI_API_KEY": "platform-azure-key",
-    "AZURE_OPENAI_BASE_URL": "https://platform.azure.example",
+    "AZURE_OPENAI_BASE_URL": "https://platform.openai.azure.com",
 }
 
 
@@ -289,13 +289,13 @@ def test_injected_azure_routing_creds_build_the_real_client_without_a_platform_e
         provider="google",
         model="gemini-3.7-flash",
         routing_llm_key="routing-azure-key",
-        routing_base_url="https://routing.azure.example",
+        routing_base_url="https://routing.openai.azure.com",
         routing_api_version="2024-12-01-preview",
         **AZURE_ROUTING,
     )
     assert isinstance(agent.routing_llm, AzureLLM)
     assert agent.routing_provider == "azure"
-    assert agent.routing_llm.llm_host == "routing.azure.example"
+    assert agent.routing_llm.llm_host == "routing.openai.azure.com"
 
 
 def test_azure_routing_without_resolvable_creds_surfaces_the_error():

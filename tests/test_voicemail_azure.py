@@ -14,17 +14,17 @@ def _agent():
 
 def test_voicemail_runs_on_the_platform_azure_deployment(monkeypatch):
     monkeypatch.delenv("VOICEMAIL_DETECTION_LLM", raising=False)
-    monkeypatch.setenv("AZURE_OPENAI_BASE_URL", "https://platform.azure.example")
+    monkeypatch.setenv("AZURE_OPENAI_BASE_URL", "https://platform.openai.azure.com")
     llm = _agent().voicemail_llm
     assert isinstance(llm, AzureLLM)
     assert llm.model == "gpt-4.1-mini"
-    assert llm.llm_host == "platform.azure.example"
+    assert llm.llm_host == "platform.openai.azure.com"
 
 
 def test_the_endpoint_falls_back_to_azure_openai_endpoint(monkeypatch):
     monkeypatch.delenv("AZURE_OPENAI_BASE_URL")
-    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://endpoint.azure.example")
-    assert _agent().voicemail_llm.llm_host == "endpoint.azure.example"
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://endpoint.openai.azure.com")
+    assert _agent().voicemail_llm.llm_host == "endpoint.openai.azure.com"
 
 
 def test_without_an_azure_endpoint_the_agent_does_not_start(monkeypatch):

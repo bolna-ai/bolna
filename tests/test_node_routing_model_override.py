@@ -14,7 +14,7 @@ from bolna.llms import LiteLLM
 
 ENV = {
     "OPENAI_API_KEY": "platform-openai-key",
-    "AZURE_OPENAI_BASE_URL": "https://platform.azure.example",
+    "AZURE_OPENAI_BASE_URL": "https://platform.openai.azure.com",
     "AZURE_OPENAI_API_KEY": "platform-azure-key",
 }
 PROVIDERS = ["openai", "azure", "google", "groq"]
