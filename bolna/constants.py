@@ -592,11 +592,15 @@ def default_reasoning_effort(model: str) -> str:
 ROUTING_THINKING_PROVIDERS = frozenset({LLMProvider.OPENAI.value})
 
 
+def routes_thinking_on_responses(model: str, provider: str) -> bool:
+    """Whether a router on this model thinks on the Responses API: one that would otherwise route with no reasoning."""
+    lowest_effort = default_reasoning_effort(canonical_model(model))
+    return provider in ROUTING_THINKING_PROVIDERS and lowest_effort == RE.NONE.value
+
+
 def default_routing_reasoning_effort(model: str, provider: str) -> str:
-    """Low where the router can think before it picks an edge; elsewhere the model's lowest-latency effort."""
-    if provider in ROUTING_THINKING_PROVIDERS and RE.LOW in MODEL_REASONING_EFFORT_MAP.get(model, ()):
-        return RE.LOW.value
-    return default_reasoning_effort(model)
+    """Low where the router thinks before it picks an edge; elsewhere the model's lowest-latency effort."""
+    return RE.LOW.value if routes_thinking_on_responses(model, provider) else default_reasoning_effort(model)
 
 
 GEMINI_THINKING_LEVEL_MAP = {

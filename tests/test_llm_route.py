@@ -215,7 +215,7 @@ async def test_a_reasoning_router_with_an_effort_thinks_on_the_responses_api():
             },
         },
     }
-    llm = OpenAiLLM(model="gpt-5.4-mini", llm_key="k", reasoning_effort="low", max_tokens=250)
+    llm = OpenAiLLM(model="gpt-5.4-mini", llm_key="k", provider="openai", reasoning_effort="low", max_tokens=250)
     llm.async_client = MagicMock()
     llm.async_client.responses.create = AsyncMock(return_value=_responses_stream())
 
@@ -224,7 +224,6 @@ async def test_a_reasoning_router_with_an_effort_thinks_on_the_responses_api():
     sent = llm.async_client.responses.create.call_args.kwargs
     assert sent["reasoning"] == {"effort": "low"} and sent["tool_choice"] == "required"
     assert [t["name"] for t in sent["tools"]] == ["go_to_x"]
-    # Reasoning tokens count against an output cap, so the routing cap is not sent.
     assert "max_output_tokens" not in sent
     assert res["function_name"] == "go_to_x" and res["arguments"] == {"slot": "mon"}
     assert (await res["routing_tail"])["usage"]["reasoning_tokens"] == 25
@@ -234,6 +233,14 @@ async def test_a_reasoning_router_on_bedrock_stays_on_chat_completions():
     from bolna.llms.bedrock_llm import BedrockLLM
 
     llm = BedrockLLM(model="bedrock/gpt-5.6-luna", llm_key="k", provider="bedrock", reasoning_effort="low")
+    llm.async_client = MagicMock()
+    llm.async_client.chat.completions.create = AsyncMock(return_value=_openai_stream())
+
+    assert (await llm.route(MSGS, TOOLS))["function_name"] == "go_to_x"
+
+
+async def test_a_router_that_already_thinks_stays_on_chat_completions():
+    llm = OpenAiLLM(model="gpt-5-mini", llm_key="k", provider="openai", reasoning_effort="minimal")
     llm.async_client = MagicMock()
     llm.async_client.chat.completions.create = AsyncMock(return_value=_openai_stream())
 

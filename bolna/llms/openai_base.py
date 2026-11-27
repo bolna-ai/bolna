@@ -88,7 +88,7 @@ class OpenAICompatibleLLM(BaseLLM):
     # Set by subclasses whose backend cannot force tool_choice (SCHEMA_FORCED_TOOL_PROVIDERS).
     _forces_tools_by_schema = False
 
-    # Set by subclasses whose backend serves the Responses API, where a reasoning model can think before routing.
+    # Set by subclasses whose router thinks on the Responses API (routes_thinking_on_responses).
     _routes_on_responses = False
 
     # The system prompt the Responses chain was built on; None until a request records one.
@@ -445,8 +445,7 @@ class OpenAICompatibleLLM(BaseLLM):
         }
         if model_args.get("service_tier"):
             create_kwargs["service_tier"] = model_args["service_tier"]
-        # No output cap: reasoning counts against it, the effort already bounds the reasoning, and the decision
-        # resolves before the trailing fields.
+        # No output cap: reasoning tokens would count against it.
         return responses_as_chat_chunks(await self._responses_client.responses.create(**create_kwargs))
 
     def invalidate_response_chain(self):

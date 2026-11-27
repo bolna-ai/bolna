@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from bolna.agent_types.graph_agent import GraphAgent
-from bolna.constants import GPT5_MODEL_PREFIX, MODEL_REASONING_EFFORT_MAP
+from bolna.constants import GPT5_MODEL_PREFIX, MODEL_REASONING_EFFORT_MAP, routes_thinking_on_responses
 
 # The map also carries realtime speech-to-speech models, which are never a routing model.
 GPT5_MODELS = sorted(m for m in MODEL_REASONING_EFFORT_MAP if m.startswith(GPT5_MODEL_PREFIX))
@@ -116,3 +116,12 @@ def test_an_openai_reasoning_router_thinks_at_low_effort():
 def test_a_router_that_cannot_reach_the_responses_api_keeps_the_lowest_effort():
     agent = _build(routing_model="azure/gpt-5.4-mini", routing_provider="azure", provider="azure")
     assert _kwargs(agent)["reasoning_effort"] == "none"
+
+
+def test_a_router_that_already_thinks_keeps_its_lowest_effort():
+    assert _kwargs(_build(routing_model="gpt-5-mini", routing_provider="openai"))["reasoning_effort"] == "minimal"
+
+
+def test_a_dated_snapshot_thinks_like_its_model():
+    assert routes_thinking_on_responses("gpt-5.4-mini-2026-03-17", "openai")
+    assert not routes_thinking_on_responses("gpt-5.4-mini-2026-03-17", "azure")

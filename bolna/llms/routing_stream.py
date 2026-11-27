@@ -220,7 +220,7 @@ async def responses_as_chat_chunks(events):
             elif event.type in (ResponseStreamEvent.FAILED, ResponseStreamEvent.ERROR):
                 raise RuntimeError(f"Routing response failed: {event}")
     finally:
-        # A reader that stops early closes this generator; the response underneath must close with it.
+        # Closing this generator closes the response underneath.
         close = getattr(events, "close", None) or getattr(events, "aclose", None)
         if close is not None:
             await close()
