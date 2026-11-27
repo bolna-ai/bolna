@@ -23,6 +23,15 @@ TRAILING_KEYS = (REASONING_KEY, CONFIDENCE_KEY)
 _TRAILING_TOKENS = tuple(f'"{k}"' for k in TRAILING_KEYS)
 
 
+def without_trailing_parameters(tool: dict) -> dict:
+    """The routing tool without the rationale and confidence parameters every edge carries."""
+    params = tool["function"].get("parameters") or {"type": "object", "properties": {}}
+    properties = {k: v for k, v in (params.get("properties") or {}).items() if k not in TRAILING_KEYS}
+    required = [k for k in params.get("required", []) if k in properties]
+    parameters = {**params, "properties": properties, "required": required}
+    return {**tool, "function": {**tool["function"], "parameters": parameters}}
+
+
 def _args_before_trailing(arguments: str) -> Optional[dict]:
     """Arguments emitted before the first trailing key, or None if none has arrived yet."""
     cuts = [arguments.index(token) for token in _TRAILING_TOKENS if token in arguments]

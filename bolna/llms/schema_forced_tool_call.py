@@ -14,7 +14,7 @@ from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall, ChoiceD
 
 from bolna.enums import LLMProvider
 from bolna.helpers.logger_config import configure_logger
-from bolna.llms.routing_stream import REASONING_KEY, TRAILING_KEYS
+from bolna.llms.routing_stream import REASONING_KEY, without_trailing_parameters
 
 logger = configure_logger(__name__)
 
@@ -40,24 +40,13 @@ class ForcedToolCall:
         return _as_tool_call_deltas(chunks, self.translator())
 
 
-def _without_rationale(tool: dict) -> dict:
-    """The tool without the rationale and confidence parameters every routing edge carries."""
-    params = _parameters(tool["function"])
-    properties = {k: v for k, v in (params.get("properties") or {}).items() if k not in TRAILING_KEYS}
-    required = [k for k in params.get("required", []) if k in properties]
-    return {
-        **tool,
-        "function": {**tool["function"], "parameters": {**params, "properties": properties, "required": required}},
-    }
-
-
 def _reason_first_choice(tools: list) -> ForcedToolCall:
     """Pick among the tools with the rationale written first: {"reasoning", "decision": {"name", "arguments"?}}.
 
     The rationale leaves the call, so the tools the model reads drop it too; a model still offered it writes it
     into an argument's value.
     """
-    tools = [_without_rationale(t) for t in tools]
+    tools = [without_trailing_parameters(t) for t in tools]
     options = []
     for tool in tools:
         params = tool["function"]["parameters"]
