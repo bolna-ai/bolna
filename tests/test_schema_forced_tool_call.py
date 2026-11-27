@@ -193,6 +193,16 @@ async def test_only_a_transition_with_edge_parameters_asks_for_arguments():
     assert list(book["properties"]["arguments"]["properties"]) == ["slot"]
 
 
+async def test_the_transitions_the_model_reads_no_longer_ask_for_the_rationale():
+    backend = Backend(constrained_reply('{"reasoning": "r", "decision": {"name": "transition_to_no_data"}}'))
+
+    await bolna_llm(backend).route(MSGS, ROUTING_TOOLS)
+
+    # Still offered it, the model writes the rationale into an argument's value and the reply stops parsing.
+    sent = [t["function"]["parameters"]["properties"] for t in backend.requests[0]["tools"]]
+    assert sent == [{}, {"slot": {"type": "object"}}]
+
+
 async def test_the_rationale_is_bounded():
     backend = Backend(constrained_reply('{"reasoning": "r", "decision": {"name": "transition_to_no_data"}}'))
 

@@ -8,13 +8,13 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Callable, Optional
 
 from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall, ChoiceDeltaToolCallFunction
 
 from bolna.enums import LLMProvider
 from bolna.helpers.logger_config import configure_logger
-from bolna.llms.routing_stream import CONFIDENCE_KEY, REASONING_KEY
+from bolna.llms.routing_stream import REASONING_KEY, TRAILING_KEYS
 
 logger = configure_logger(__name__)
 
@@ -31,46 +31,53 @@ _TRAILING_CLOSE = re.compile(r"[}\s]*$")
 @dataclass
 class ForcedToolCall:
     response_format: dict
-    # Set when one named function is forced; None when the reply picks among several ("required").
-    function_name: Optional[str]
-    reason_first: bool = False
+    # Builds the reader that turns the constrained reply back into tool-call deltas.
+    translator: Callable
+    # The tools as the model should read them, when they differ from the request's.
+    tools: Optional[list] = None
 
     def stream(self, chunks) -> AsyncIterator:
-        return _as_tool_call_deltas(chunks, self.function_name, self.reason_first)
+        return _as_tool_call_deltas(chunks, self.translator())
 
 
-def _reason_first_choice(functions: dict) -> ForcedToolCall:
-    """Pick among functions with the rationale written first: {"reasoning", "decision": {"name", "arguments"?}}."""
-    reasoning = {"type": "string"}
+def _without_rationale(tool: dict) -> dict:
+    """The tool without the rationale and confidence parameters every routing edge carries."""
+    params = _parameters(tool["function"])
+    properties = {k: v for k, v in (params.get("properties") or {}).items() if k not in TRAILING_KEYS}
+    required = [k for k in params.get("required", []) if k in properties]
+    return {
+        **tool,
+        "function": {**tool["function"], "parameters": {**params, "properties": properties, "required": required}},
+    }
+
+
+def _reason_first_choice(tools: list) -> ForcedToolCall:
+    """Pick among the tools with the rationale written first: {"reasoning", "decision": {"name", "arguments"?}}.
+
+    The rationale leaves the call, so the tools the model reads drop it too; a model still offered it writes it
+    into an argument's value.
+    """
+    tools = [_without_rationale(t) for t in tools]
     options = []
-    for name, fn in functions.items():
-        params = _parameters(fn)
-        properties = dict(params.get("properties") or {})
-        reasoning = properties.pop(REASONING_KEY, None) or reasoning
-        properties.pop(CONFIDENCE_KEY, None)
-        option = {"name": {"const": name}}
-        # An empty arguments object the model has no reason to write makes guided decoding spin on whitespace.
-        if properties:
-            required = [k for k in params.get("required", []) if k in properties]
-            option["arguments"] = {
-                **params,
-                "properties": properties,
-                "required": required,
-                "additionalProperties": False,
-            }
+    for tool in tools:
+        params = tool["function"]["parameters"]
+        option = {"name": {"const": tool["function"]["name"]}}
+        # An empty arguments object the model has no reason to write invites whitespace padding.
+        if params["properties"]:
+            option["arguments"] = {**params, "additionalProperties": False}
         options.append(
             {"type": "object", "properties": option, "required": list(option), "additionalProperties": False}
         )
     schema = {
         "type": "object",
         "properties": {
-            REASONING_KEY: {**reasoning, "maxLength": ROUTING_REASONING_MAX_CHARS},
+            REASONING_KEY: {"type": "string", "maxLength": ROUTING_REASONING_MAX_CHARS},
             "decision": {"anyOf": options},
         },
         "required": [REASONING_KEY, "decision"],
         "additionalProperties": False,
     }
-    return ForcedToolCall(_response_format("routing_decision", schema), None, reason_first=True)
+    return ForcedToolCall(_response_format("routing_decision", schema), _ReasonFirst, tools)
 
 
 def _forced_tool_call(tools, tool_choice, reason_first: bool = False) -> Optional[ForcedToolCall]:
@@ -80,21 +87,21 @@ def _forced_tool_call(tools, tool_choice, reason_first: bool = False) -> Optiona
         name = (tool_choice.get("function") or {}).get("name")
         if name not in functions:
             return None
-        return ForcedToolCall(_response_format(name, _parameters(functions[name])), name)
-    if tool_choice == "required" and functions and reason_first:
-        return _reason_first_choice(functions)
-    if tool_choice == "required" and functions:
-        options = [
-            {
-                "type": "object",
-                "properties": {"name": {"const": name}, "arguments": _parameters(fn)},
-                "required": ["name", "arguments"],
-                "additionalProperties": False,
-            }
-            for name, fn in functions.items()
-        ]
-        return ForcedToolCall(_response_format("tool_call", {"anyOf": options}), None)
-    return None
+        return ForcedToolCall(_response_format(name, _parameters(functions[name])), lambda: _Arguments(name))
+    if tool_choice != "required" or not functions:
+        return None
+    if reason_first:
+        return _reason_first_choice(tools)
+    options = [
+        {
+            "type": "object",
+            "properties": {"name": {"const": name}, "arguments": _parameters(fn)},
+            "required": ["name", "arguments"],
+            "additionalProperties": False,
+        }
+        for name, fn in functions.items()
+    ]
+    return ForcedToolCall(_response_format("tool_call", {"anyOf": options}), _Envelope)
 
 
 def force_tools_by_schema(model_args: dict, reason_first: bool = False) -> Optional[ForcedToolCall]:
@@ -105,6 +112,8 @@ def force_tools_by_schema(model_args: dict, reason_first: bool = False) -> Optio
         # A stop string inside an argument would cut the JSON short.
         model_args.pop("stop", None)
         model_args["response_format"] = forced.response_format
+        if forced.tools is not None:
+            model_args["tools"] = forced.tools
     return forced
 
 
@@ -188,11 +197,7 @@ class _ReasonFirst:
             return None, ""
 
 
-async def _as_tool_call_deltas(chunks, function_name: Optional[str], reason_first: bool = False):
-    if reason_first:
-        translator = _ReasonFirst()
-    else:
-        translator = _Arguments(function_name) if function_name else _Envelope()
+async def _as_tool_call_deltas(chunks, translator):
     call_id = f"call_{uuid.uuid4().hex}"
     named = False
 
