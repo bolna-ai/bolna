@@ -3467,8 +3467,7 @@ class TaskManager(BaseManager):
                 select_message_by_language(target_node.get("static_message"), self.language) if target_node else ""
             )
             if static_text:
-                if self.context_data:
-                    static_text = update_prompt_with_context(static_text, self.context_data)
+                static_text = self.tools["llm_agent"].render_static_text(static_text)
                 self.conversation_history.append_assistant(static_text, sequence_id=-1)
                 meta_info = {
                     "io": self.tools["output"].get_provider(),

@@ -79,7 +79,11 @@ def _tm(turn_based=False):
     tm.interruptible_hangup_message = False
     tm._hangup_interruptible_window = False
     tm.conversation_ended = False
-    tm.tools = {"input": MagicMock(input_stream_ended=False), "output": MagicMock(get_provider=lambda: "plivo")}
+    tm.tools = {
+        "input": MagicMock(input_stream_ended=False),
+        "output": MagicMock(get_provider=lambda: "plivo"),
+        "llm_agent": MagicMock(render_static_text=lambda text: text),
+    }
     tm.mark_event_meta_data = MagicMock(mark_event_meta_data={})
     tm.hangup_mark_event_timeout = 5
     tm.process_call_hangup = AsyncMock()
