@@ -13,6 +13,7 @@ import time
 import json
 import uuid
 import copy
+import dataclasses
 import base64
 import difflib
 import unicodedata
@@ -139,7 +140,7 @@ from bolna.helpers.utils import (
     enrich_context_with_time_variables,
 )
 from bolna.helpers.logger_config import configure_logger
-from ..helpers.mark_event_meta_data import MarkEventMetaData
+from ..helpers.mark_event_meta_data import MarkEventMetaData, PlaybackChunk
 from ..helpers.tts_audio_monitor import TtsAudioMonitor
 from ..helpers.tts_clips import clip_pieces, load_fixed_line_clip, recall_clip, render_clip, wire_seconds
 from ..helpers.tts_response_cache import Capture, TtsResponseCache
@@ -653,6 +654,8 @@ class TaskManager(BaseManager):
         self._response_turn_id = 0
         self._turn_msg_map = {}  # turn_id → assistant message dict ref in _messages
         self._pending_assistant_history = {}  # sequence_id -> {content, turn_id, response_uid}
+        # response_uid -> the text the synthesizer rendered before a request of that reply failed
+        self._rendered_before_failure = {}
 
         # Language detection
         self.language_detector = LanguageDetector(self.task_config["task_config"], run_id=self.run_id)
@@ -2697,20 +2700,60 @@ class TaskManager(BaseManager):
         for chunk in pending_chunks:
             if cumulative_duration >= actual_play_time:
                 break
-            chunk_duration = chunk["duration"]
+            chunk_duration = chunk.duration
             if cumulative_duration + chunk_duration <= actual_play_time:
-                played_text.append(chunk["text"])
+                played_text.append(chunk.text)
             else:
                 remaining_time = actual_play_time - cumulative_duration
                 proportion = remaining_time / chunk_duration if chunk_duration > 0 else 0
-                char_count = int(len(chunk["text"]) * proportion)
-                partial_text = chunk["text"][:char_count]
-                if partial_text and char_count < len(chunk["text"]):
+                char_count = int(len(chunk.text) * proportion)
+                partial_text = chunk.text[:char_count]
+                if partial_text and char_count < len(chunk.text):
                     partial_text = self._trim_partial_to_complete_words(partial_text)
                 if partial_text:
                     played_text.append(partial_text)
             cumulative_duration += chunk_duration
         return "".join(played_text)
+
+    @staticmethod
+    def _playback_chunks(marks):
+        """Marks as the playback estimate reads them. A request's closing mark (`closing_pause_ms` set) carries the
+        text of the whole request, and its speech ended that many ms of pause before the mark: the text is placed
+        there at zero length, so a clock inside the pause credits the whole request."""
+        chunks = []
+        for mark_data in marks:
+            chunk = PlaybackChunk(
+                text=mark_data.get("text_synthesized") or "",
+                duration=mark_data.get("duration", 0),
+                sent_ts=mark_data.get("sent_ts") or 0,
+            )
+            pause_ms = mark_data.get("closing_pause_ms")
+            if chunk.text and pause_ms is not None:
+                pause, moved = pause_ms / 1000, 0.0
+                while pause > 0 and chunks and not chunks[-1].text:
+                    last = chunks.pop()
+                    taken = min(pause, last.duration)
+                    pause, moved = pause - taken, moved + taken
+                    if taken < last.duration:
+                        chunks.append(dataclasses.replace(last, duration=last.duration - taken))
+                        break
+                chunks.append(dataclasses.replace(chunk, duration=0))
+                chunk = dataclasses.replace(chunk, text="", duration=moved + chunk.duration)
+            chunks.append(chunk)
+        return chunks
+
+    @classmethod
+    def _pending_text_chunks(cls, mark_events_data, target_turn_id):
+        """The target turn's pending audio for the playback estimate, or none when no mark carries text."""
+        chunks = cls._playback_chunks(
+            mark_data
+            for _, mark_data in mark_events_data
+            if mark_data.get("type", "") not in NON_EVIDENCE_MARK_TYPES
+            and (target_turn_id is None or mark_data.get("turn_id") == target_turn_id)
+        )
+        # Text-less marks before a mark with text are its audio: they keep their playing time, and the turn's first
+        # mark starts the clock.
+        return chunks if any(chunk.text for chunk in chunks) else []
 
     async def sync_history(
         self, mark_events_data, interruption_processed_at, extend_with_playback_estimate=False, caller_onset=None
@@ -2773,18 +2816,13 @@ class TaskManager(BaseManager):
                     if sent_ts and sent_ts <= last_acked_sent_ts:
                         continue
                     # Text-less marks (Azure sets text on a sentence's last chunk only) still take playback time.
-                    pending_tail.append(
-                        {
-                            "text": mark_data.get("text_synthesized") or "",
-                            "duration": mark_data.get("duration", 0),
-                            "sent_ts": sent_ts,
-                        }
-                    )
+                    pending_tail.append(mark_data)
+                pending_tail = self._playback_chunks(pending_tail)
                 if pending_tail and last_acked:
                     # Proportional by the wall clock since playback of the tail could start: the last ACK,
                     # or the tail's send if it was still being generated then. The ACK lags true playout end,
                     # so this window under-credits — it can't stamp unheard text.
-                    tail_start = max(last_acked["ack_ts"], pending_tail[0]["sent_ts"])
+                    tail_start = max(last_acked["ack_ts"], pending_tail[0].sent_ts)
                     tail_play_time = max(0.0, heard_until - tail_start)
                     tail_text = self.estimate_played_text_for_time(pending_tail, tail_play_time)
                     if tail_text:
@@ -2795,22 +2833,10 @@ class TaskManager(BaseManager):
                         response_heard = (raw_heard + tail_text).strip()
 
             if not response_heard:
-                pending_marks = [{"mark_id": k, "mark_data": v} for k, v in mark_events_data]
-                pending_chunks = []
-                for mark in pending_marks:
-                    mark_data = mark.get("mark_data", {})
-                    mark_type = mark_data.get("type", "")
-                    text = mark_data.get("text_synthesized", "")
-                    if target_turn_id is not None and mark_data.get("turn_id") != target_turn_id:
-                        continue
-                    if mark_type in ["pre_mark_message", "backchanneling"] or not text:
-                        continue
-                    pending_chunks.append(
-                        {"text": text, "duration": mark_data.get("duration", 0), "sent_ts": mark_data.get("sent_ts", 0)}
-                    )
+                pending_chunks = self._pending_text_chunks(mark_events_data, target_turn_id)
 
                 if pending_chunks:
-                    first_sent_ts = pending_chunks[0].get("sent_ts", 0)
+                    first_sent_ts = pending_chunks[0].sent_ts
                     if first_sent_ts > 0:
                         time_since_first_send = heard_until - first_sent_ts
                         actual_play_time = max(0, time_since_first_send)
@@ -2828,8 +2854,7 @@ class TaskManager(BaseManager):
                     # No text_synthesized on marks (streaming synths). Group pending
                     # marks by turn_id and use audio duration to determine play state.
                     pending_by_turn = {}  # turn_id → {seq_ids: set, pending_dur: float}
-                    for mark in pending_marks:
-                        mark_data = mark.get("mark_data", {})
+                    for _, mark_data in mark_events_data:
                         if mark_data.get("type") == "pre_mark_message":
                             continue
                         t_id = mark_data.get("turn_id")
@@ -5638,6 +5663,13 @@ class TaskManager(BaseManager):
             return
 
         self._committed_assistant_sequences.add(sequence_id)
+        if staged["response_uid"] in self._rendered_before_failure:
+            rendered = self._rendered_before_failure.pop(staged["response_uid"])
+            content = self._rendered_prefix(staged["content"], rendered)
+            logger.info(f"Committing {len(content)} of {len(staged['content'])} chars: synthesis failed partway")
+            if not content:
+                return
+            staged = {**staged, "content": content}
         self._last_spoken_assistant = (staged["turn_id"], staged["content"])
         self._last_spoken_user_input = staged.get("user_input")
         stamps = {"sequence_id": sequence_id} | ({"node": staged["node"]} if staged.get("node") else {})
@@ -5671,6 +5703,7 @@ class TaskManager(BaseManager):
         staged = self._pending_assistant_history.pop(sequence_id, None)
         if staged is None:
             return
+        self._rendered_before_failure.pop(staged["response_uid"], None)
         logger.info(
             "BOLNA_TRACE_TM drop_assistant_history seq=%s turn=%s response_uid=%s reason=%s",
             sequence_id,
@@ -7831,6 +7864,43 @@ class TaskManager(BaseManager):
             }
         )
 
+    def __keep_rendered_text(self, meta_info):
+        """A reply whose synthesis failed partway keeps only the text that was rendered, in history and out of the
+        reply cache. A reply the LLM is still writing is cut when it is committed."""
+        self._response_captures.pop(meta_info.get("sequence_id"), None)
+        rendered = meta_info.get("text_rendered") or ""
+        response_uid = meta_info.get("response_uid")
+        logger.info(f"Synthesis failed partway: keeping {len(rendered)} rendered chars of response_uid {response_uid}")
+        if response_uid is None:
+            return
+        # A reply not committed yet is cut when it is; a committed one is cut here.
+        if meta_info.get("sequence_id") not in self._committed_assistant_sequences:
+            self._rendered_before_failure[response_uid] = rendered
+        self.conversation_history.sync_response_after_interruption(response_uid, rendered, self._rendered_prefix)
+        self.conversation_history.sync_interim_response_after_interruption(
+            response_uid, rendered, self._rendered_prefix
+        )
+        # The duplicate check compares a regenerated reply with what the caller heard, not what was sent.
+        if self._last_spoken_assistant and self._last_spoken_assistant[0] == meta_info.get("turn_id"):
+            cut = self._rendered_prefix(self._last_spoken_assistant[1], rendered)
+            self._last_spoken_assistant = (self._last_spoken_assistant[0], cut) if cut else None
+
+    def _rendered_prefix(self, original, rendered):
+        """The start of original that rendered says, matched without whitespace, since rendered joins the requests'
+        texts with single spaces."""
+        target = "".join((rendered or "").split())
+        if original and target:
+            matched = 0
+            for index, char in enumerate(original):
+                if char.isspace():
+                    continue
+                if char != target[matched]:
+                    break
+                matched += 1
+                if matched == len(target):
+                    return original[: index + 1]
+        return self.update_transcript_for_interruption(original, rendered)
+
     def __capture_reply_audio(self, message):
         """Keep a learning reply's live audio; at its end, hand the whole clip to the cache."""
         meta_info = message["meta_info"]
@@ -8213,6 +8283,8 @@ class TaskManager(BaseManager):
                                         )
 
                                 self.__enqueue_synthesized(message)
+                                if meta_info.get("synthesis_failed"):
+                                    self.__keep_rendered_text(meta_info)
                                 self.__capture_reply_audio(message)
                             else:
                                 # Non-streaming output

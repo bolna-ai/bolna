@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import time
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -11,6 +12,15 @@ from bolna.helpers.logger_config import configure_logger
 logger = configure_logger(__name__)
 
 HIGH_DELAY_THRESHOLD = 2.0
+
+
+@dataclass(frozen=True)
+class PlaybackChunk:
+    """A stretch of sent audio and the text it speaks, as the playback estimate reads it."""
+
+    text: str
+    duration: float
+    sent_ts: float = 0
 
 
 class SequenceStats(BaseModel):
