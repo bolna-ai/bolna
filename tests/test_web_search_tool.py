@@ -79,6 +79,39 @@ async def test_parallel_uses_fast_mode_and_excerpts():
     assert "P - e1" in out
 
 
+async def test_keenable_uses_realtime_mode_and_snippets():
+    post = AsyncMock(
+        return_value={
+            "results": [{"title": "K", "url": "https://www.keenable.ai/a", "snippet": "s1", "description": ""}]
+        }
+    )
+    with patch(f"{MOD}._post_json", post):
+        out = await run_web_search("q", _cfg(provider="keenable", api_key="kn-key", max_results=4))
+
+    url, headers, body, _ = post.await_args.args
+    assert url == web_search.KEENABLE_SEARCH_URL
+    assert headers == {"X-API-Key": "kn-key", "X-Keenable-Title": "bolna"}
+    assert body == {
+        "query": "q",
+        "mode": "realtime",
+        "max_results": 4,
+        "snippet_max_length": 400,
+        "disable_cards": True,
+    }
+    assert "1. K - s1 (source: keenable.ai)" in out
+
+
+async def test_keenable_raises_snippet_length_to_api_minimum(monkeypatch):
+    monkeypatch.setenv("KEENABLE_API_KEY", "env-key")
+    post = AsyncMock(return_value={"results": []})
+    with patch(f"{MOD}._post_json", post):
+        out = await run_web_search("q", _cfg(provider="keenable", max_snippet_chars=100))
+
+    assert post.await_args.args[1]["X-API-Key"] == "env-key"
+    assert post.await_args.args[2]["snippet_max_length"] == web_search.KEENABLE_MIN_SNIPPET_CHARS
+    assert out == NO_RESULTS
+
+
 async def test_http_provider_uses_configured_timeout():
     post = AsyncMock(return_value={"results": []})
     with patch(f"{MOD}._post_json", post):

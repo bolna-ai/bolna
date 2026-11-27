@@ -1024,7 +1024,7 @@ class S2SConfig(BaseModel):
 
 class WebSearchConfig(BaseModel):
     enabled: bool = False
-    provider: Literal["openai", "firecrawl", "exa", "parallel"] = "openai"
+    provider: Literal["openai", "firecrawl", "exa", "parallel", "keenable"] = "openai"
     api_key: Optional[str] = None
     max_results: int = Field(default=3, ge=1, le=10)
     max_snippet_chars: int = Field(default=400, ge=50, le=4000)
