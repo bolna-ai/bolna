@@ -47,14 +47,16 @@ async def test_jev_is_asked_one_choice_question_about_the_context():
     assert (decision.choice, decision.confidence, decision.usage["input_tokens"]) == ("yes", 0.9, 120)
 
 
-async def test_gemini_takes_the_same_question_under_its_own_key_and_field():
-    model, sent = decision_model("gemini-decisions", keyed("no"))
+async def test_gemini_takes_the_same_question_under_its_own_key_and_fields():
+    reply = {**keyed("no"), "usage": {"total_input_tokens": 103, "total_output_tokens": 0}}
+    model, sent = decision_model("gemini-decisions", reply)
 
-    await model.choose("ctx", "q", CHOICES)
+    decision = await model.choose("ctx", "q", CHOICES)
 
     body = json.loads(sent[0].content)
     assert sent[0].headers["x-goog-api-key"] == "g-key"
     assert body["model"] == "gemini-decision-1" and body["input"] == "ctx" and "state" not in body
+    assert decision.usage == {"input_tokens": 103, "output_tokens": 0}
 
 
 async def test_openai_decisions_lists_its_questions_and_answers():

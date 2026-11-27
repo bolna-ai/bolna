@@ -60,6 +60,8 @@ class _Api:
     context_field: str
     question: Callable[[str, dict], object]
     answer: Callable[[dict], tuple]
+    # What the usage record puts before "input_tokens" and "output_tokens".
+    usage_prefix: str = ""
 
 
 APIS = {
@@ -80,6 +82,7 @@ APIS = {
         context_field="input",
         question=_keyed_question,
         answer=_keyed_answer,
+        usage_prefix="total_",
     ),
     DecisionProvider.OPENAI_DECISIONS: _Api(
         url="https://api.openai.com/v1/decisions",
@@ -126,7 +129,6 @@ class DecisionModel:
             raise DecisionError(f"no choice in the answer: {e!r}") from e
         if choice not in choices:
             raise DecisionError(f"answered {choice!r}, which is not one of the choices")
-        usage = body.get("usage") or {}
-        return Decision(
-            choice, confidence, {"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens")}
-        )
+        reported, prefix = body.get("usage") or {}, self._api.usage_prefix
+        usage = {key: reported.get(prefix + key) for key in ("input_tokens", "output_tokens")}
+        return Decision(choice, confidence, usage)
