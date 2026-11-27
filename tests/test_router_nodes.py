@@ -1042,3 +1042,33 @@ class TestNodeExtractedData:
             await _collect(agent.generate([{"role": "user", "content": "hmm"}]))
 
         assert agent.node_extracted_data == {}
+
+
+def _confirm_agent(recipient_data):
+    nodes = [
+        {
+            "id": "ask",
+            "prompt": "Ask whether the candidate is available.",
+            "edges": [{"to_node_id": "confirm", "condition": "replied", "parameters": {"availability": "string"}}],
+        },
+        {"id": "confirm", "prompt": "The candidate said: {availability}.", "edges": []},
+    ]
+    agent = _make_agent(_base_config(nodes, "ask", context_data={"recipient_data": recipient_data}))
+    agent._apply_extracted_params({"availability": "Yes"})
+    agent._advance_to_node("confirm", 0)
+    return agent
+
+
+class TestExtractedValuesInPrompts:
+    async def test_later_node_prompt_reads_the_extracted_value(self):
+        messages = await _confirm_agent({"name": "Asha"})._build_messages([])
+        assert "The candidate said: Yes." in messages[0]["content"]
+
+    async def test_extracted_value_wins_over_a_same_named_recipient_variable(self):
+        messages = await _confirm_agent({"availability": ""})._build_messages([])
+        assert "The candidate said: Yes." in messages[0]["content"]
+
+    def test_static_message_reads_the_extracted_value(self):
+        agent = _confirm_agent({"name": "Asha"})
+        chunk = agent._static_message_chunk({"id": "s", "static_message": "{name}, you said {availability}."})
+        assert chunk["static_message"] == "Asha, you said Yes."

@@ -19,6 +19,8 @@ def graph_agent(node):
     agent = GraphAgent.__new__(GraphAgent)
     agent.current_node_id = node
     agent.get_node_by_id = lambda node_id: None
+    agent.context_data = {}
+    agent.node_extracted_data = {}
     return agent
 
 
