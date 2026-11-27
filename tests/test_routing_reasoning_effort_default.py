@@ -107,3 +107,12 @@ def test_recorded_effort_mirrors_what_was_sent():
 def test_routing_max_tokens_override_is_respected():
     agent = _build(routing_model="gpt-5.4-mini", routing_provider="openai", routing_max_tokens=99)
     assert _kwargs(agent)["max_tokens"] == 99
+
+
+def test_an_openai_reasoning_router_thinks_at_low_effort():
+    assert _kwargs(_build(routing_model="gpt-5.4-mini", routing_provider="openai"))["reasoning_effort"] == "low"
+
+
+def test_a_router_that_cannot_reach_the_responses_api_keeps_the_lowest_effort():
+    agent = _build(routing_model="azure/gpt-5.4-mini", routing_provider="azure", provider="azure")
+    assert _kwargs(agent)["reasoning_effort"] == "none"

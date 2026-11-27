@@ -44,7 +44,7 @@ from bolna.constants import (
     LLM_VENDOR_ENDPOINTS,
     RESPONSES_API_MODEL_PREFIXES,
     canonical_model,
-    default_reasoning_effort,
+    default_routing_reasoning_effort,
     is_reasoning_model,
 )
 
@@ -557,7 +557,7 @@ class GraphAgent(BaseAgent):
             kwargs["reasoning_effort"] = (
                 self.routing_reasoning_effort
                 or os.getenv("GPT5_ROUTING_REASONING_EFFORT")
-                or default_reasoning_effort(family)
+                or default_routing_reasoning_effort(family, self._routing_base_kwargs["provider"])
             )
         return kwargs
 

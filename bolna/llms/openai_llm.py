@@ -25,6 +25,7 @@ from websockets.protocol import State as WSState
 from bolna.constants import (
     DEFAULT_LANGUAGE_CODE,
     LLM_VENDOR_ENDPOINTS,
+    ROUTING_THINKING_PROVIDERS,
     default_reasoning_effort,
     is_reasoning_model,
 )
@@ -248,6 +249,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
             LLMProvider.BOLNA.value,
         )
         self._forces_tools_by_schema = provider in SCHEMA_FORCED_TOOL_PROVIDERS
+        self._routes_on_responses = (
+            not compatible_endpoint and (provider or LLMProvider.OPENAI.value) in ROUTING_THINKING_PROVIDERS
+        )
         is_custom = provider == LLMProvider.CUSTOM.value
         if compatible_endpoint:
             if kwargs.get("extra_body"):

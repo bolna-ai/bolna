@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bolna.agent_types.graph_agent import GraphAgent
-from bolna.constants import default_reasoning_effort
+from bolna.constants import default_routing_reasoning_effort
 from bolna.llms import LiteLLM
 
 ENV = {
@@ -102,7 +102,11 @@ def test_a_gpt5_override_gets_a_reasoning_effort_and_a_non_gpt5_one_does_not():
         assert agent._routing_reasoning_effort_used is None
         five, _, effort5 = agent._routing_llm_for({"id": "a", "routing_model": "gpt-5-mini"})
         four, _, effort4 = agent._routing_llm_for({"id": "b", "routing_model": "gpt-4o"})
-        assert five.captured_kwargs["reasoning_effort"] == effort5 == default_reasoning_effort("gpt-5-mini")
+        assert (
+            five.captured_kwargs["reasoning_effort"]
+            == effort5
+            == default_routing_reasoning_effort("gpt-5-mini", "openai")
+        )
         assert "reasoning_effort" not in four.captured_kwargs and effort4 is None
 
 

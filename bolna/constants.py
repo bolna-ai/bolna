@@ -588,6 +588,17 @@ def default_reasoning_effort(model: str) -> str:
     return supported[0].value
 
 
+# Providers whose router reaches the Responses API, where a reasoning model thinks before it calls a tool.
+ROUTING_THINKING_PROVIDERS = frozenset({LLMProvider.OPENAI.value})
+
+
+def default_routing_reasoning_effort(model: str, provider: str) -> str:
+    """Low where the router can think before it picks an edge; elsewhere the model's lowest-latency effort."""
+    if provider in ROUTING_THINKING_PROVIDERS and RE.LOW in MODEL_REASONING_EFFORT_MAP.get(model, ()):
+        return RE.LOW.value
+    return default_reasoning_effort(model)
+
+
 GEMINI_THINKING_LEVEL_MAP = {
     "gemini-3-flash-preview": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
     "gemini-3.1-flash-lite": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
