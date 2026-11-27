@@ -135,6 +135,18 @@ class LLMProvider(str, Enum):
         return [provider.value for provider in cls]
 
 
+class DecisionProvider(str, Enum):
+    """Decision-model APIs a graph agent can route on: they score each edge instead of decoding text."""
+
+    TYPESAFE = "typesafe"
+    OPENAI_DECISIONS = "openai-decisions"
+    GEMINI_DECISIONS = "gemini-decisions"
+
+    @classmethod
+    def all_values(cls):
+        return [provider.value for provider in cls]
+
+
 class ReasoningEffort(str, Enum):
     NONE = "none"
     MINIMAL = "minimal"

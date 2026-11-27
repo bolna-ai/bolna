@@ -26,6 +26,7 @@ from bolna.helpers.utils import (
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
 from bolna.enums import (
     ChatRole,
+    DecisionProvider,
     EdgeConditionType,
     EdgeOrder,
     ExpressionOperator,
@@ -35,6 +36,7 @@ from bolna.enums import (
 )
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import AzureLLM, OpenAiLLM, LiteLLM
+from bolna.llms.decision_router import DecisionRouter
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 from bolna.constants import (
@@ -485,7 +487,11 @@ class GraphAgent(BaseAgent):
         }
 
     def _init_routing_client(self):
-        """Build the routing LLM from the same registry as the conversation model."""
+        """Build the routing LLM from the same registry as the conversation model, under a decision model if one is set."""
+        decision_provider = self.routing_provider if self.routing_provider in DecisionProvider.all_values() else None
+        if decision_provider:
+            # The decision model picks the edge; the LLM router built below fills its parameters and stands in for it.
+            decision_model, self.routing_provider, self.routing_model = self.routing_model, None, None
         conv_provider = self.config.get("provider") or self.config.get("llm_provider") or "openai"
         # Self-hosted OpenAI-compatible endpoints (custom/ola) have no platform router, so they route on
         # their own model and endpoint; everything else defaults to the platform OpenAI router. Either can
@@ -535,6 +541,10 @@ class GraphAgent(BaseAgent):
         routing_kwargs = self._routing_kwargs_for_model(self.routing_model)
         self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
         self.routing_llm = self._routing_llm_class()(**routing_kwargs)
+        if decision_provider:
+            self.routing_llm = DecisionRouter(decision_provider, fallback=self.routing_llm, model=decision_model)
+            self.routing_provider, self.routing_model = decision_provider, self.routing_llm.model
+            self._routing_reasoning_effort_used = None
         # What the last routing call actually ran on; a node override moves these for one call.
         self._last_routing_model = self.routing_model
         self._last_routing_effort = self._routing_reasoning_effort_used

@@ -16,6 +16,7 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 from .providers import *
 from .enums import (
+    DecisionProvider,
     TelephonyProvider,
     SynthesizerProvider,
     TranscriberProvider,
@@ -819,6 +820,18 @@ class GraphAgentConfig(Llm):
         None  # GPT-5 reasoning effort: "minimal", "low", "medium", "high"
     )
     routing_max_tokens: Optional[int] = None  # Max tokens for routing response
+
+    @model_validator(mode="after")
+    def validate_decision_routing_without_node_overrides(self):
+        """A decision model routes every node; a node's routing model and effort only configure an LLM router."""
+        if self.routing_provider in DecisionProvider.all_values():
+            for node in self.nodes:
+                if node.routing_model or node.routing_reasoning_effort is not None:
+                    raise ValueError(
+                        f"Node '{node.id}' sets its own routing model or effort, which a graph routed on "
+                        f"{self.routing_provider} does not take."
+                    )
+        return self
 
     @model_validator(mode="after")
     def validate_routing_reasoning_effort_for_model(self):
