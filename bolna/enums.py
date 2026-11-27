@@ -71,6 +71,8 @@ class SynthesizerProvider(str, Enum):
     NAVANA = "navana"
     # A customer's own TTS server, over the OpenAI speech API.
     CUSTOM = "custom"
+    # Our own TTS servers, over the same API, at the endpoint in the server's environment.
+    BOLNA = "bolna"
 
     @classmethod
     def all_values(cls):

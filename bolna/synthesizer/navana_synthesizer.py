@@ -24,7 +24,7 @@ from .elevenlabs_synthesizer import split_flushable
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
-from bolna.helpers.utils import pcm_to_ulaw, pcm_to_wav_bytes
+from bolna.helpers.utils import pcm_to_ulaw, pcm_to_wav_bytes, primary_language_code
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
 logger = configure_logger(__name__)
@@ -40,7 +40,6 @@ NAVANA_TTS_MODELS = (NAVANA_TTS_DEFAULT_MODEL, NAVANA_TTS_FAST_MODEL)
 NAVANA_TTS_DEFAULT_VOICE = "default_female"
 NAVANA_TTS_LANGUAGES = frozenset({"bn", "en", "gu", "hi", "kn", "ml", "mr", "or", "ta", "te"})
 # bolna also carries Odia as "od".
-_LANGUAGE_ALIASES = {"od": "or"}
 
 SAMPLE_RATES = (8000, 16000, 24000)
 
@@ -128,10 +127,7 @@ class NavanaSynthesizer(StreamSynthesizer):
     @staticmethod
     def _normalise_language(language):
         """Reduce bolna's region-qualified code ("hi-IN") to the bare code Navana wants."""
-        if not isinstance(language, str) or not language.strip():
-            return "hi"
-        primary = re.split(r"[-_]", language.strip().lower(), maxsplit=1)[0]
-        return _LANGUAGE_ALIASES.get(primary, primary)
+        return primary_language_code(language) or "hi"
 
     def _validate_options(self):
         if self.language not in NAVANA_TTS_LANGUAGES:

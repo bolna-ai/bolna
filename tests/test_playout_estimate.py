@@ -8,11 +8,12 @@ dangerous direction.
 """
 
 from bolna.agent_manager.task_manager import TaskManager
+from bolna.helpers.mark_event_meta_data import PlaybackChunk
 
 CHUNKS = [
-    {"text": "We are open ", "duration": 1.0},
-    {"text": "from nine to five, ", "duration": 2.0},
-    {"text": "Monday through Friday.", "duration": 2.0},
+    PlaybackChunk("We are open ", 1.0),
+    PlaybackChunk("from nine to five, ", 2.0),
+    PlaybackChunk("Monday through Friday.", 2.0),
 ]
 FULL = "We are open from nine to five, Monday through Friday."
 
@@ -54,7 +55,7 @@ def test_no_chunks_credits_nothing():
 
 def test_a_zero_duration_chunk_is_credited_whole():
     """Nothing to apportion, so it is either reached or not."""
-    assert _estimate([{"text": "abc", "duration": 0}], 5.0) == "abc"
+    assert _estimate([PlaybackChunk("abc", 0)], 5.0) == "abc"
 
 
 def test_trailing_partial_word_is_dropped():
