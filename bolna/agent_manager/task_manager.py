@@ -1075,9 +1075,9 @@ class TaskManager(BaseManager):
                 )
             self.__inject_switch_language_tool()
 
-        # In-call memory is for simple and knowledge-base agents; graph agents carry values node to node.
+        # Only simple and knowledge-base agents get update_memory; graph agents carry values node to node.
         self.call_memory = None
-        # Called with the whole memory after each change, so the host can store it during the call.
+        # Optional callback, called with the whole memory after each change.
         self.on_memory_update = self.kwargs.get("on_memory_update")
         self._memory_write_tasks = set()
         llm_agent = self.task_config["tools_config"].get("llm_agent") or {}
@@ -8062,7 +8062,7 @@ class TaskManager(BaseManager):
         self._invalidate_response_chain()
 
     def __report_memory_update(self) -> None:
-        """Hand the host a snapshot of the memory without holding up the reply."""
+        """Pass a snapshot of the memory to on_memory_update without holding up the reply."""
         if not self.on_memory_update:
             return
         try:

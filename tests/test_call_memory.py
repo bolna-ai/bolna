@@ -1,4 +1,4 @@
-"""In-call memory: typed values the agent saves with the update_memory tool and reads back from its prompt."""
+"""CallMemory and the update_memory tool: typed values the agent saves during a call."""
 
 import asyncio
 import json
