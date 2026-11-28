@@ -27,6 +27,7 @@ from bolna.constants import (
     LLM_VENDOR_ENDPOINTS,
     default_reasoning_effort,
     is_reasoning_model,
+    routes_thinking_on_responses,
 )
 from bolna.enums import LLMProvider, ResponseStreamEvent, ResponseItemType, Verbosity
 from bolna.helpers.ssl_context import get_ssl_context
@@ -248,6 +249,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             LLMProvider.BOLNA.value,
         )
         self._forces_tools_by_schema = provider in SCHEMA_FORCED_TOOL_PROVIDERS
+        self._routes_on_responses = routes_thinking_on_responses(model, provider)
         is_custom = provider == LLMProvider.CUSTOM.value
         if compatible_endpoint:
             if kwargs.get("extra_body"):

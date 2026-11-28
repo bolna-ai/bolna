@@ -588,6 +588,25 @@ def default_reasoning_effort(model: str) -> str:
     return supported[0].value
 
 
+# Providers whose router reaches the Responses API, where a reasoning model thinks before it calls a tool. That
+# path skips `_route_completion`, so a provider that overrides it (Azure's overflow) does not belong here as is.
+ROUTING_THINKING_PROVIDERS = frozenset({LLMProvider.OPENAI.value})
+
+# Reasoning a router on the Responses API may write before its call, allowed on top of the routing cap.
+ROUTING_REASONING_ALLOWANCE = 4096
+
+
+def routes_thinking_on_responses(model: str, provider: str) -> bool:
+    """Whether a router on this model thinks on the Responses API: one that would otherwise route with no reasoning."""
+    lowest_effort = default_reasoning_effort(canonical_model(model))
+    return provider in ROUTING_THINKING_PROVIDERS and lowest_effort == RE.NONE.value
+
+
+def default_routing_reasoning_effort(model: str, provider: str) -> str:
+    """Low where the router thinks before it picks an edge; elsewhere the model's lowest-latency effort."""
+    return RE.LOW.value if routes_thinking_on_responses(model, provider) else default_reasoning_effort(model)
+
+
 GEMINI_THINKING_LEVEL_MAP = {
     "gemini-3-flash-preview": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
     "gemini-3.1-flash-lite": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],

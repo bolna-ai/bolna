@@ -5,8 +5,8 @@ from typing import Optional
 
 from openai import BadRequestError, APIError
 
-from bolna.constants import IS_USER_ONLINE_MESSAGE, is_reasoning_model
-from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
+from bolna.constants import IS_USER_ONLINE_MESSAGE, ROUTING_REASONING_ALLOWANCE, is_reasoning_model
+from bolna.enums import ChatRole, ReasoningEffort, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
 from bolna.helpers.utils import (
     convert_to_request_log,
     compute_function_pre_call_message,
@@ -15,7 +15,7 @@ from bolna.helpers.utils import (
 )
 from .llm import BaseLLM
 from .message_models import MessageFormatAdapter, strip_internal_keys
-from .routing_stream import read_routing_stream
+from .routing_stream import read_routing_stream, responses_as_chat_chunks
 from .schema_forced_tool_call import force_tools_by_schema
 from .types import APIParams, LLMStreamChunk, LatencyData, FunctionCallPayload
 from bolna.helpers.function_calling_helpers import record_unresolved_tool_call, redacted_url, resolve_tool_name
@@ -87,6 +87,9 @@ class OpenAICompatibleLLM(BaseLLM):
 
     # Set by subclasses whose backend cannot force tool_choice (SCHEMA_FORCED_TOOL_PROVIDERS).
     _forces_tools_by_schema = False
+
+    # Set by subclasses whose router thinks on the Responses API (routes_thinking_on_responses).
+    _routes_on_responses = False
 
     # The system prompt the Responses chain was built on; None until a request records one.
     _chain_system_prompt = None
@@ -415,6 +418,8 @@ class OpenAICompatibleLLM(BaseLLM):
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if self._routes_on_responses and model_args.get("reasoning_effort") not in (None, ReasoningEffort.NONE.value):
+            return await read_routing_stream(await self._route_responses(model_args), parsed_tools)
         if "reasoning_effort" in model_args:  # gpt-5 family fixes temperature, so leave it unset
             model_args.pop("temperature", None)
         else:
@@ -424,6 +429,26 @@ class OpenAICompatibleLLM(BaseLLM):
         if forced:
             stream = forced.stream(stream)
         return await read_routing_stream(stream, parsed_tools, overflowed)
+
+    async def _route_responses(self, model_args):
+        """Route on the Responses API: Chat Completions refuses tools beside a reasoning effort."""
+        _, input_items = MessageFormatAdapter.chat_to_responses_input(model_args["messages"])
+        create_kwargs = {
+            "model": model_args["model"],
+            "input": input_items,
+            "tools": MessageFormatAdapter.chat_tools_to_responses_tools(model_args["tools"]),
+            "tool_choice": MessageFormatAdapter.chat_tool_choice_to_responses(model_args["tool_choice"]),
+            "parallel_tool_calls": False,
+            "reasoning": {"effort": model_args["reasoning_effort"]},
+            "store": False,
+            "stream": True,
+        }
+        if model_args.get("service_tier"):
+            create_kwargs["service_tier"] = model_args["service_tier"]
+        cap = model_args.get("max_completion_tokens") or model_args.get("max_tokens")
+        if cap:
+            create_kwargs["max_output_tokens"] = cap + ROUTING_REASONING_ALLOWANCE
+        return responses_as_chat_chunks(await self._responses_client.responses.create(**create_kwargs))
 
     def invalidate_response_chain(self):
         self.previous_response_id = None

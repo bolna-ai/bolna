@@ -8,6 +8,16 @@ import asyncio
 import json
 from typing import Optional
 
+from openai.types.chat import ChatCompletionChunk
+from openai.types.chat.chat_completion_chunk import (
+    Choice,
+    ChoiceDelta,
+    ChoiceDeltaToolCall,
+    ChoiceDeltaToolCallFunction,
+)
+from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
+
+from bolna.enums import ResponseItemType, ResponseStreamEvent
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -160,3 +170,59 @@ async def read_routing_stream(stream, tools: list, overflowed: bool = False) -> 
         "overflowed": overflowed,
         "routing_tail": tail,
     }
+
+
+def _chat_chunk(tool_call=None, usage=None, service_tier=None) -> ChatCompletionChunk:
+    choices = [Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call]))] if tool_call else []
+    return ChatCompletionChunk.construct(
+        id="",
+        object="chat.completion.chunk",
+        created=0,
+        model="",
+        choices=choices,
+        usage=usage,
+        service_tier=service_tier,
+    )
+
+
+def _chat_usage(usage) -> Optional[CompletionUsage]:
+    if usage is None:
+        return None
+    reasoning = getattr(usage.output_tokens_details, "reasoning_tokens", None)
+    cached = getattr(usage.input_tokens_details, "cached_tokens", None)
+    return CompletionUsage(
+        prompt_tokens=usage.input_tokens,
+        completion_tokens=usage.output_tokens,
+        total_tokens=usage.total_tokens,
+        completion_tokens_details=CompletionTokensDetails(reasoning_tokens=reasoning),
+        prompt_tokens_details=PromptTokensDetails(cached_tokens=cached),
+    )
+
+
+async def responses_as_chat_chunks(events):
+    """A streamed Responses API tool call as the chat-completion chunks RoutingStreamReader reads."""
+    try:
+        async for event in events:
+            if (
+                event.type == ResponseStreamEvent.OUTPUT_ITEM_ADDED
+                and event.item.type == ResponseItemType.FUNCTION_CALL
+            ):
+                function = ChoiceDeltaToolCallFunction(name=event.item.name, arguments=event.item.arguments or "")
+                yield _chat_chunk(
+                    ChoiceDeltaToolCall(index=0, id=event.item.call_id, type="function", function=function)
+                )
+            elif event.type == ResponseStreamEvent.FUNCTION_CALL_ARGS_DELTA:
+                yield _chat_chunk(
+                    ChoiceDeltaToolCall(index=0, function=ChoiceDeltaToolCallFunction(arguments=event.delta))
+                )
+            elif event.type in (ResponseStreamEvent.COMPLETED, ResponseStreamEvent.INCOMPLETE):
+                if event.type == ResponseStreamEvent.INCOMPLETE:
+                    logger.warning(f"Routing response incomplete: {event.response.incomplete_details}")
+                yield _chat_chunk(usage=_chat_usage(event.response.usage), service_tier=event.response.service_tier)
+            elif event.type in (ResponseStreamEvent.FAILED, ResponseStreamEvent.ERROR):
+                raise RuntimeError(f"Routing response failed: {event}")
+    finally:
+        # Closing this generator closes the response underneath.
+        close = getattr(events, "close", None) or getattr(events, "aclose", None)
+        if close is not None:
+            await close()

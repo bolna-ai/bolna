@@ -12,6 +12,7 @@ import httpx
 from openai import APIStatusError
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from bolna.constants import ROUTING_REASONING_ALLOWANCE
 from bolna.llms import OpenAiLLM, AzureLLM, LiteLLM, GeminiLLM
 
 TOOLS = [
@@ -179,3 +180,69 @@ async def test_route_returns_none_without_tool_call():
     llm.async_client = MagicMock()
     llm.async_client.chat.completions.create = AsyncMock(return_value=_aiter([_chunk()]))
     assert await llm.route(MSGS, TOOLS) is None
+
+
+def _responses_stream(name="go_to_x", args=None):
+    """A routing call on the Responses API: reasoning first, then the function call, then the usage."""
+    args = json.dumps(args if args is not None else {"slot": "mon", "reasoning": "clear", "confidence": 0.9})
+    usage = SimpleNamespace(
+        input_tokens=100,
+        output_tokens=40,
+        total_tokens=140,
+        output_tokens_details=SimpleNamespace(reasoning_tokens=25),
+        input_tokens_details=SimpleNamespace(cached_tokens=0),
+    )
+    item = SimpleNamespace(type="function_call", name=name, call_id="c1", arguments="")
+    return _aiter(
+        [
+            SimpleNamespace(type="response.output_item.added", item=SimpleNamespace(type="reasoning")),
+            SimpleNamespace(type="response.output_item.added", item=item),
+            SimpleNamespace(type="response.function_call_arguments.delta", delta=args[:9]),
+            SimpleNamespace(type="response.function_call_arguments.delta", delta=args[9:]),
+            SimpleNamespace(type="response.completed", response=SimpleNamespace(usage=usage, service_tier="default")),
+        ]
+    )
+
+
+async def test_a_reasoning_router_with_an_effort_thinks_on_the_responses_api():
+    edge = {
+        "type": "function",
+        "function": {
+            "name": "go_to_x",
+            "parameters": {
+                "type": "object",
+                "properties": {"slot": {"type": "string"}, **TOOLS[0]["function"]["parameters"]["properties"]},
+                "required": ["slot"],
+            },
+        },
+    }
+    llm = OpenAiLLM(model="gpt-5.4-mini", llm_key="k", provider="openai", reasoning_effort="low", max_tokens=250)
+    llm.async_client = MagicMock()
+    llm.async_client.responses.create = AsyncMock(return_value=_responses_stream())
+
+    res = await llm.route(MSGS, [edge])
+
+    sent = llm.async_client.responses.create.call_args.kwargs
+    assert sent["reasoning"] == {"effort": "low"} and sent["tool_choice"] == "required"
+    assert [t["name"] for t in sent["tools"]] == ["go_to_x"]
+    assert sent["max_output_tokens"] == 250 + ROUTING_REASONING_ALLOWANCE
+    assert res["function_name"] == "go_to_x" and res["arguments"] == {"slot": "mon"}
+    assert (await res["routing_tail"])["usage"]["reasoning_tokens"] == 25
+
+
+async def test_a_reasoning_router_on_bedrock_stays_on_chat_completions():
+    from bolna.llms.bedrock_llm import BedrockLLM
+
+    llm = BedrockLLM(model="bedrock/gpt-5.6-luna", llm_key="k", provider="bedrock", reasoning_effort="low")
+    llm.async_client = MagicMock()
+    llm.async_client.chat.completions.create = AsyncMock(return_value=_openai_stream())
+
+    assert (await llm.route(MSGS, TOOLS))["function_name"] == "go_to_x"
+
+
+async def test_a_router_that_already_thinks_stays_on_chat_completions():
+    llm = OpenAiLLM(model="gpt-5-mini", llm_key="k", provider="openai", reasoning_effort="minimal")
+    llm.async_client = MagicMock()
+    llm.async_client.chat.completions.create = AsyncMock(return_value=_openai_stream())
+
+    assert (await llm.route(MSGS, TOOLS))["function_name"] == "go_to_x"
