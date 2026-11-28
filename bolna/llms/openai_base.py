@@ -419,7 +419,7 @@ class OpenAICompatibleLLM(BaseLLM):
             model_args.pop("temperature", None)
         else:
             model_args["temperature"] = 0.0
-        forced = force_tools_by_schema(model_args) if self._forces_tools_by_schema else None
+        forced = force_tools_by_schema(model_args, reason_first=True) if self._forces_tools_by_schema else None
         stream, overflowed = await self._route_completion(model_args)
         if forced:
             stream = forced.stream(stream)
