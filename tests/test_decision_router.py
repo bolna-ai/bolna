@@ -131,13 +131,13 @@ async def test_a_timed_out_decision_api_is_not_asked_again_in_the_call():
 
 async def test_a_failing_decision_api_is_switched_off_only_after_failures_in_a_row():
     error = RuntimeError("503")
-    answers = [error, error, decided("stay_on_current_node"), error, error, error]
+    answers = [error, error, decided("stay_on_current_node"), error, DecisionError("not an edge"), error, error, error]
     r, decision_model, _ = router(answers, llm_route=STAY)
 
-    hops = [await r.route(MESSAGES, TOOLS) for _ in range(7)]
+    hops = [await r.route(MESSAGES, TOOLS) for _ in range(9)]
 
-    assert [bool(hop.get("routed_by")) for hop in hops] == [True, True, False, True, True, True, True]
-    assert decision_model.choose.await_count == 6
+    assert [bool(hop.get("routed_by")) for hop in hops] == [True, True, False, True, True, True, True, True, True]
+    assert decision_model.choose.await_count == 8
 
 
 async def test_a_move_whose_parameters_cannot_be_filled_stays_on_the_node():
@@ -147,7 +147,7 @@ async def test_a_move_whose_parameters_cannot_be_filled_stays_on_the_node():
 
         hop = await r.route(MESSAGES, TOOLS)
 
-        assert (hop["function_name"], hop["arguments"]) == ("stay_on_current_node", {"confidence": 0.9})
+        assert (hop["function_name"], hop["arguments"]) == ("stay_on_current_node", {})
         assert hop["usage"]["input_tokens"] == 120 and hop["routing_tail"] is None
 
 

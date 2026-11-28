@@ -63,12 +63,13 @@ class DecisionRouter:
         filled = await self._edge_parameters(messages, tools, decision, meta_info)
         if filled is None:
             # A move without the edge's parameters would leave the next node short of values it needs.
-            choice, parameters, tail = STAY_TOOL, {}, None
+            choice, arguments, tail = STAY_TOOL, {}, None
         else:
-            choice, (parameters, tail) = decision.choice, filled
+            parameters, tail = filled
+            choice, arguments = decision.choice, {**parameters, CONFIDENCE_KEY: decision.confidence}
         return {
             "function_name": choice,
-            "arguments": {**parameters, CONFIDENCE_KEY: decision.confidence},
+            "arguments": arguments,
             "usage": decision.usage,
             "service_tier": None,
             "overflowed": False,
@@ -80,6 +81,8 @@ class DecisionRouter:
         try:
             decision = await self.decision_model.choose(routing_context(messages), INSTRUCTIONS, edge_choices(tools))
         except DecisionError as e:
+            # The API answered, so it is up: this hop alone routes on the LLM router.
+            self._failures = 0
             logger.warning(f"No routing decision from {provider}, routing this hop on the LLM router: {e}")
             return None
         except Exception as e:
