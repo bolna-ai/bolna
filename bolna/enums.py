@@ -135,6 +135,18 @@ class LLMProvider(str, Enum):
         return [provider.value for provider in cls]
 
 
+class DecisionProvider(str, Enum):
+    """Decision-model APIs: they answer a choice question with one of its choices instead of text."""
+
+    TYPESAFE = "typesafe"
+    OPENAI_DECISIONS = "openai-decisions"
+    GEMINI_DECISIONS = "gemini-decisions"
+
+    @classmethod
+    def all_values(cls):
+        return [provider.value for provider in cls]
+
+
 class ReasoningEffort(str, Enum):
     NONE = "none"
     MINIMAL = "minimal"

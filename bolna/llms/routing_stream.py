@@ -26,6 +26,8 @@ logger = configure_logger(__name__)
 # is never built still drains its stream rather than being cancelled mid-flight.
 _TAILS: set = set()
 
+# The routing tool a router calls to stay on the current node.
+STAY_TOOL = "stay_on_current_node"
 REASONING_KEY = "reasoning"
 CONFIDENCE_KEY = "confidence"
 # Emitted by the router for observability; neither is read to make the routing decision.
