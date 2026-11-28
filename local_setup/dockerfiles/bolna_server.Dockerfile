@@ -40,7 +40,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     (echo "Failed to install bolna package. See error above." && exit 1)
 
 # Copy application files
-COPY quickstart_server.py /app/
+COPY quickstart_server.py transcribers.html /app/
 COPY presets /app/presets
 
 EXPOSE 5001

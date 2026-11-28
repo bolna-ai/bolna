@@ -2,7 +2,9 @@ import os
 import asyncio
 import uuid
 import traceback
+from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Body
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import redis.asyncio as redis
 from dotenv import load_dotenv
@@ -30,6 +32,12 @@ app.add_middleware(
 class CreateAgentPayload(BaseModel):
     agent_config: AgentModel
     agent_prompts: Optional[Dict[str, Dict[str, str]]]
+
+
+@app.get("/transcribers", response_class=HTMLResponse)
+async def transcriber_selector():
+    """Browse STT providers and build a transcriber configuration for an agent."""
+    return FileResponse(Path(__file__).with_name("transcribers.html"), media_type="text/html")
 
 
 @app.get("/agent/{agent_id}")

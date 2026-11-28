@@ -86,6 +86,7 @@ class TranscriberProvider(str, Enum):
     DEEPGRAM = "deepgram"
     AZURE = "azure"
     SARVAM = "sarvam"
+    GNANI = "gnani"
     ASSEMBLY = "assembly"
     GOOGLE = "google"
     PIXA = "pixa"

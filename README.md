@@ -260,7 +260,31 @@ These are the current supported ASRs Providers:
 | Provider     | Environment variable to be added in `.env` file |
 |--------------|-------------------------------------------------|
 | Deepgram     | `DEEPGRAM_AUTH_TOKEN`                           |
+| Gnani AI (Prisma v2.5 and v3.0) | `GNANI_API_KEY` |
 | Bolna (self-hosted, OpenAI Realtime transcription protocol) | `REALTIME_TRANSCRIBER_URL` (`{model}` is replaced by the model), `REALTIME_TRANSCRIBER_KEY` |
+
+In the local quickstart, open [the speech-to-text selector](http://localhost:5001/transcribers), search for `gnani`, and select a Prisma model. Set the agent's `tools_config.transcriber` field to the resulting configuration.
+
+```json
+{"provider": "gnani", "model": "prisma-v3.0", "language": "hi-IN"}
+```
+
+Live voice agents stream audio to Prisma. The defaults are `prisma-v2.5` and `en-IN`.
+Both models accept `bn-IN`, `en-IN`, `gu-IN`, `hi-IN`, `kn-IN`, `ml-IN`, `mr-IN`, `pa-IN`, `ta-IN`, and `te-IN`.
+Use `indic-auto` for automatic language detection with v3.0, or with v2.5 when streaming.
+Prisma v3.0 accepts up to four comma-separated locale hints, such as `hi-IN,en-IN`. For streaming, Bolna sends them as candidates for automatic detection.
+A per-call `transcriber_key` takes precedence over the server's `GNANI_API_KEY`.
+
+Use the transcriber's REST method with a recorded turn of up to 30 seconds.
+
+```python
+from pathlib import Path
+from bolna.transcriber import GnaniTranscriber
+
+prisma = GnaniTranscriber("default", model="prisma-v3.0", language="indic-auto", stream=False)
+result = await prisma.transcribe_recording(Path("turn.wav").read_bytes())
+print(result["data"])
+```
 
 </details>
 &nbsp;<br>
