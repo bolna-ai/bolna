@@ -340,3 +340,76 @@ def test_monitor_stops_once_the_call_is_over():
     asyncio.run(asyncio.wait_for(v3.monitor_connection(), timeout=2))
     assert v3.websocket is None
     assert asyncio.run(v3._ensure_connection()) is False
+
+
+# ---------------------------------------------------------------------------
+# fixed-line clips, rendered over a socket of their own
+# ---------------------------------------------------------------------------
+
+
+def _clip_socket(monkeypatch, messages):
+    """Stub websockets.connect with one FakeWS replaying messages; returns (urls, sockets)."""
+    urls, sockets = [], []
+
+    async def connect(url, **_):
+        urls.append(url)
+        sockets.append(FakeWS(messages))
+        return sockets[-1]
+
+    monkeypatch.setattr(elevenlabs_synthesizer.websockets, "connect", connect)
+    return urls, sockets
+
+
+def _no_http(monkeypatch):
+    def fail(*_, **__):
+        raise AssertionError("a v3/v4 clip must not fall back to an HTTP render")
+
+    monkeypatch.setattr(elevenlabs_synthesizer.aiohttp, "ClientSession", fail)
+
+
+@pytest.mark.parametrize("model", ["eleven_v3_conversational", "eleven_v4_turbo"])
+async def test_clip_is_sent_over_the_socket_the_way_a_call_turn_is(monkeypatch, model):
+    _no_http(monkeypatch)
+    text = "Hey, are you still there?"
+    urls, sockets = _clip_socket(monkeypatch, [_audio_msg(), _audio_msg(), _turn_end_msg()])
+    synth = _make(model, clone_strength=0.4)
+
+    clip = await synth.synthesize_telephony_clip(text)
+
+    call = _make(model, clone_strength=0.4)
+    call.websocket = FakeWS()
+    await call.sender(text, sequence_id=1, end_of_llm_stream=True)
+    assert type(synth).one_shot_matches_stream
+    assert "/text-to-dialogue/stream-input" in urls[0] and "output_format=ulaw_8000" in urls[0]
+    assert sockets[0].sent[0] == call._session_message()
+    assert sockets[0].sent[1:] == call.websocket.sent, "same fragments, new_turn and flush as a live turn"
+    assert clip == b"\x01\x02\x03\x04" * 2
+    assert sockets[0].closed
+
+
+async def test_pcm_clip_renders_in_the_pcm_format(monkeypatch):
+    _no_http(monkeypatch)
+    urls, _ = _clip_socket(monkeypatch, [_audio_msg(), _turn_end_msg()])
+    synth = _make(use_mulaw=False, sampling_rate="16000")
+    assert await synth.synthesize_pcm_clip("Bye now.", 16000) == b"\x01\x02\x03\x04"
+    assert "output_format=pcm_16000" in urls[0]
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [json.dumps({"error": "invalid_request", "message": "bad"})],
+        [_turn_end_msg()],
+        [],
+    ],
+    ids=["error frame", "no audio", "socket closed"],
+)
+async def test_a_failed_clip_raises_rather_than_falling_back_to_http(monkeypatch, messages):
+    from bolna.helpers.tts_clips import render_clip
+
+    _no_http(monkeypatch)
+    _, sockets = _clip_socket(monkeypatch, messages)
+    with pytest.raises(Exception) as raised:
+        await render_clip(_make("eleven_v4_turbo"), "Thank you for your time.", mulaw_wire=True)
+    assert not isinstance(raised.value, AssertionError), str(raised.value)
+    assert sockets[0].closed

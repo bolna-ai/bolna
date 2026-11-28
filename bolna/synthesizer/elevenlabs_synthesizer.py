@@ -21,6 +21,9 @@ from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
 logger = configure_logger(__name__)
 
+# PCM rates ElevenLabs renders natively.
+NATIVE_PCM_RATES = (16000, 22050, 24000, 44100)
+
 # Left to split a reply itself, ElevenLabs can cut mid-sentence and repeat or garble the word at the cut.
 SENTENCE_END = re.compile(r"""[।॥。！？؟۔]+["'”’)]*|[?!.]+["'”’)]*(?=\s|$)""")
 CLAUSE_BREAKS = ",，、،;"
@@ -143,7 +146,7 @@ class ElevenlabsBase(StreamSynthesizer):
             # kills the synth loop. PCM at the target rate needs no decode and usually no
             # resample — same pattern as cartesia/sarvam on the web/freeswitch path.
             rate = int(self.sampling_rate)
-            self.wire_pcm_rate = rate if rate in (16000, 22050, 24000, 44100) else 24000
+            self.wire_pcm_rate = rate if rate in NATIVE_PCM_RATES else 24000
             self.wire_format = f"pcm_{self.wire_pcm_rate}"
 
     @staticmethod
@@ -216,8 +219,7 @@ class ElevenlabsBase(StreamSynthesizer):
         return await self._generate_http(text, format="mp3_44100_128")
 
     async def synthesize_pcm_clip(self, text, sample_rate):
-        # Natively rendered rates only.
-        if int(sample_rate) not in (16000, 22050, 24000, 44100):
+        if int(sample_rate) not in NATIVE_PCM_RATES:
             return None
         return await self._generate_http(text, format=f"pcm_{int(sample_rate)}")
 
@@ -619,6 +621,8 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
 # v3 accepts any stability value but only these three change anything.
 STABILITY_PRESETS = (0.0, 0.5, 1.0)
 DEFAULT_STABILITY = 0.5
+CONNECT_TIMEOUT_S = 10
+CLIP_RECV_TIMEOUT_S = 10
 CLOSE_TIMEOUT_S = 1
 RECONNECT_POLL_INTERVAL_S = 0.05
 # The endpoint ignores inactivity_timeout and drops idle sockets at 20s.
@@ -628,12 +632,11 @@ KEEP_ALIVE_INTERVAL_S = 8
 class ElevenlabsV3Synthesizer(ElevenlabsBase):
     """Eleven v3 over the text-to-dialogue socket: one flush per turn, no contexts."""
 
+    one_shot_matches_stream = True
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.ws_url = (
-            f"wss://{self.elevenlabs_host}/v1/text-to-dialogue/stream-input"
-            f"?model_id={self.model}&output_format={self.wire_format}&sync_alignment=true"
-        )
+        self.ws_url = self._socket_url(self.wire_format)
         # v3 rejects optimize_streaming_latency with a 400.
         self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/stream?output_format="
         # Snapped once so the inherited HTTP path matches the streamed voice. temperature is
@@ -653,6 +656,72 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
     def get_sleep_time(self):
         return 0.01
 
+    def _socket_url(self, output_format):
+        return (
+            f"wss://{self.elevenlabs_host}/v1/text-to-dialogue/stream-input"
+            f"?model_id={self.model}&output_format={output_format}&sync_alignment=true"
+        )
+
+    def _session_message(self):
+        """First message on a socket: stability, clone_strength on v4, and dictionaries for the whole socket."""
+        message = {"voices": [self.voice], "voice_settings": {"stability": self.temperature}}
+        if self.clone_strength is not None:
+            message["voice_settings"]["clone_strength"] = self.clone_strength
+        if self.pronunciation_dictionary_locators:
+            message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
+        return message
+
+    def _turn_input(self, text_chunk, new_turn):
+        # new_turn goes on a turn's first fragment only; per-fragment it would break intonation inside one utterance.
+        item = {"text": text_chunk, "voice_id": self.voice}
+        if new_turn:
+            item["new_turn"] = True
+        return {"inputs": [item]}
+
+    async def synthesize_telephony_clip(self, text):
+        if not self.use_mulaw:
+            return None
+        return await self._render_clip(text, self.wire_format)
+
+    async def synthesize_pcm_clip(self, text, sample_rate):
+        if int(sample_rate) not in NATIVE_PCM_RATES:
+            return None
+        return await self._render_clip(text, f"pcm_{int(sample_rate)}")
+
+    async def _render_clip(self, text, output_format):
+        """Over a socket of its own, sent the way a call turn is, since an HTTP render sounds unlike the call.
+
+        Raises instead of returning None, so render_clip never falls back to an HTTP render."""
+        text_chunks = list(self.text_chunker(text or ""))
+        if not text_chunks:
+            raise ValueError("ElevenLabs v3 clip has no text")
+        url = self._socket_url(output_format)
+        websocket = await asyncio.wait_for(
+            websockets.connect(url, ssl=get_ssl_context(url), additional_headers={"xi-api-key": self.api_key}),
+            timeout=CONNECT_TIMEOUT_S,
+        )
+        try:
+            await websocket.send(json.dumps(self._session_message()))
+            for index, text_chunk in enumerate(text_chunks):
+                await websocket.send(json.dumps(self._turn_input(text_chunk, new_turn=index == 0)))
+            await websocket.send(json.dumps({"flush": True}))
+            audio = bytearray()
+            while True:
+                data = json.loads(await asyncio.wait_for(websocket.recv(), timeout=CLIP_RECV_TIMEOUT_S))
+                if data.get("error"):
+                    raise RuntimeError(f"ElevenLabs v3 clip error: {data.get('error')} - {data.get('message')}")
+                if data.get("audio"):
+                    audio += base64.b64decode(data["audio"])
+                if data.get("is_final_audio_for_turn"):
+                    if not audio:
+                        raise RuntimeError("ElevenLabs v3 clip ended without audio")
+                    return bytes(audio)
+        finally:
+            try:
+                await asyncio.wait_for(websocket.close(), timeout=CLOSE_TIMEOUT_S)
+            except Exception:
+                pass
+
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
@@ -662,22 +731,12 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
                     ssl=get_ssl_context(self.ws_url),
                     additional_headers={"xi-api-key": self.api_key},
                 ),
-                timeout=10.0,
+                timeout=CONNECT_TIMEOUT_S,
             )
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
                 self.ws_trace_id = websocket.response.headers.get("x-trace-id")
                 logger.info(f"Elevenlabs v3 WebSocket connected trace_id={self.ws_trace_id}")
-            # First message only. The socket takes stability and, on v4, clone_strength; dictionaries apply to the
-            # whole socket.
-            first_message = {
-                "voices": [self.voice],
-                "voice_settings": {"stability": self.temperature},
-            }
-            if self.clone_strength is not None:
-                first_message["voice_settings"]["clone_strength"] = self.clone_strength
-            if self.pronunciation_dictionary_locators:
-                first_message["pronunciation_dictionary_locators"] = self.pronunciation_dictionary_locators
-            await websocket.send(json.dumps(first_message))
+            await websocket.send(json.dumps(self._session_message()))
             self._last_send_time = time.perf_counter()
             self._new_turn_pending = True
             # Teardown is over once a replacement is up.
@@ -807,17 +866,13 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
                             self.ws_send_time = time.perf_counter()
                             self._turn_eos_emitted = False
                             logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
-                        # Only the first fragment of a turn; per-fragment new_turn would
-                        # break intonation inside one utterance.
-                        payload = {"text": text_chunk, "voice_id": self.voice}
-                        if self._new_turn_pending:
-                            payload["new_turn"] = True
-                            self._new_turn_pending = False
+                        payload = self._turn_input(text_chunk, self._new_turn_pending)
+                        self._new_turn_pending = False
                         ws = self.websocket
                         if ws is None:
                             self._classify_lost_socket("mid-send")
                             return
-                        await ws.send(json.dumps({"inputs": [payload]}))
+                        await ws.send(json.dumps(payload))
                         self._last_send_time = time.perf_counter()
                     except websockets.exceptions.ConnectionClosed:
                         self._classify_lost_socket("mid-send")
