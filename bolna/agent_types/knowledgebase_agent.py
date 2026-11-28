@@ -11,7 +11,7 @@ from bolna.helpers.rag_service_client import RAGServiceClientSingleton
 from bolna.helpers.function_calling_helpers import guard_llm_base_url
 from bolna.helpers.utils import format_messages
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
-from bolna.llms import AzureLLM, OpenAiLLM
+from bolna.agent_types.contextual_conversational_agent import completion_llm_for, voicemail_llm_or_none
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 
 logger = configure_logger(__name__)
@@ -38,12 +38,9 @@ class KnowledgeBaseAgent(BaseAgent):
         # Main LLM for conversation
         self.llm = self._initialize_llm()
 
-        # Separate LLM for checking if call should end
-        self.conversation_completion_llm = OpenAiLLM(model=os.getenv("CHECK_FOR_COMPLETION_LLM", self.llm_model))
-        self.voicemail_llm = AzureLLM(
-            model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"),
-            base_url=os.getenv("AZURE_OPENAI_BASE_URL") or os.getenv("AZURE_OPENAI_ENDPOINT"),
-        )
+        # Hangup check uses OpenAI only when that key is configured. Otherwise the agent's own LLM does it.
+        self.conversation_completion_llm = completion_llm_for(self.llm, self.llm_model)
+        self.voicemail_llm = voicemail_llm_or_none()
         # RAG configuration
         self.rag_config = self._initialize_rag_config()
         self.rag_server_url = os.getenv("RAG_SERVER_URL", "http://localhost:8000")
@@ -165,6 +162,8 @@ class KnowledgeBaseAgent(BaseAgent):
         Returns:
             dict with 'is_voicemail': 'Yes' or 'No', 'latency_ms': float
         """
+        if self.voicemail_llm is None:
+            return {"is_voicemail": "No"}, {}
         try:
             detection_prompt = voicemail_detection_prompt or VOICEMAIL_DETECTION_PROMPT
             prompt = [
