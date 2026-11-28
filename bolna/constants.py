@@ -588,8 +588,12 @@ def default_reasoning_effort(model: str) -> str:
     return supported[0].value
 
 
-# Providers whose router reaches the Responses API, where a reasoning model thinks before it calls a tool.
+# Providers whose router reaches the Responses API, where a reasoning model thinks before it calls a tool. That
+# path skips `_route_completion`, so a provider that overrides it (Azure's overflow) does not belong here as is.
 ROUTING_THINKING_PROVIDERS = frozenset({LLMProvider.OPENAI.value})
+
+# Reasoning a router on the Responses API may write before its call, allowed on top of the routing cap.
+ROUTING_REASONING_ALLOWANCE = 4096
 
 
 def routes_thinking_on_responses(model: str, provider: str) -> bool:

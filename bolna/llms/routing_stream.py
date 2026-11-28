@@ -216,6 +216,8 @@ async def responses_as_chat_chunks(events):
                     ChoiceDeltaToolCall(index=0, function=ChoiceDeltaToolCallFunction(arguments=event.delta))
                 )
             elif event.type in (ResponseStreamEvent.COMPLETED, ResponseStreamEvent.INCOMPLETE):
+                if event.type == ResponseStreamEvent.INCOMPLETE:
+                    logger.warning(f"Routing response incomplete: {event.response.incomplete_details}")
                 yield _chat_chunk(usage=_chat_usage(event.response.usage), service_tier=event.response.service_tier)
             elif event.type in (ResponseStreamEvent.FAILED, ResponseStreamEvent.ERROR):
                 raise RuntimeError(f"Routing response failed: {event}")

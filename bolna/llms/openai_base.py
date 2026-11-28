@@ -5,7 +5,7 @@ from typing import Optional
 
 from openai import BadRequestError, APIError
 
-from bolna.constants import IS_USER_ONLINE_MESSAGE, is_reasoning_model
+from bolna.constants import IS_USER_ONLINE_MESSAGE, ROUTING_REASONING_ALLOWANCE, is_reasoning_model
 from bolna.enums import ChatRole, ReasoningEffort, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
 from bolna.helpers.utils import (
     convert_to_request_log,
@@ -445,7 +445,9 @@ class OpenAICompatibleLLM(BaseLLM):
         }
         if model_args.get("service_tier"):
             create_kwargs["service_tier"] = model_args["service_tier"]
-        # No output cap: reasoning tokens would count against it.
+        cap = model_args.get("max_completion_tokens") or model_args.get("max_tokens")
+        if cap:
+            create_kwargs["max_output_tokens"] = cap + ROUTING_REASONING_ALLOWANCE
         return responses_as_chat_chunks(await self._responses_client.responses.create(**create_kwargs))
 
     def invalidate_response_chain(self):
