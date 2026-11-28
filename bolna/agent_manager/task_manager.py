@@ -8469,7 +8469,7 @@ class TaskManager(BaseManager):
                             text, self.assistant_name, "mp3", assistant_id=self.assistant_id, local=self.is_local
                         )
                         if audio is not None:
-                            mulaw_wire = self.__handoff_mulaw_wire()
+                            mulaw_wire = self.__mulaw_wire()
                             # The decode shells out to ffmpeg, so it runs off the event loop.
                             audio_chunk = await asyncio.to_thread(self._static_clip_to_wire, audio, mulaw_wire)
                             meta_info["format"] = "mulaw" if mulaw_wire else "pcm"

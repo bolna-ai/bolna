@@ -51,7 +51,7 @@ def _task_manager(monkeypatch, synthesizer, constructed=None):
     }
     tm._TaskManager__pool_leg_kwargs = TaskManager._TaskManager__pool_leg_kwargs.__get__(tm, TaskManager)
     tm._TaskManager__static_audio_identity = TaskManager._TaskManager__static_audio_identity.__get__(tm, TaskManager)
-    tm._TaskManager__handoff_mulaw_wire = TaskManager._TaskManager__handoff_mulaw_wire.__get__(tm, TaskManager)
+    tm._TaskManager__mulaw_wire = TaskManager._TaskManager__mulaw_wire.__get__(tm, TaskManager)
     tm._static_clip_to_wire = TaskManager._static_clip_to_wire
     TaskManager._TaskManager__setup_synthesizer.__get__(tm, TaskManager)()
     return tm
