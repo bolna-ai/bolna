@@ -822,9 +822,11 @@ class GraphAgentConfig(Llm):
     routing_max_tokens: Optional[int] = None  # Max tokens for routing response
 
     @model_validator(mode="after")
-    def validate_decision_routing_without_node_overrides(self):
-        """A decision model routes every node; a node's routing model and effort only configure an LLM router."""
+    def validate_decision_routing_without_llm_settings(self):
+        """A decision model routes every node; a routing effort, or a node's routing model, only configures an LLM router."""
         if self.routing_provider in DecisionProvider.all_values():
+            if self.routing_reasoning_effort is not None:
+                raise ValueError(f"A graph routed on {self.routing_provider} does not take a routing_reasoning_effort.")
             for node in self.nodes:
                 if node.routing_model or node.routing_reasoning_effort is not None:
                     raise ValueError(

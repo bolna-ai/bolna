@@ -42,7 +42,10 @@ STAY = {"function_name": "stay_on_current_node", "arguments": {}}
 
 def router(choose, llm_route=None, available=True):
     decision_model = MagicMock(available=available)
-    decision_model.choose = AsyncMock(side_effect=choose) if callable(choose) else AsyncMock(return_value=choose)
+    if isinstance(choose, list) or callable(choose):
+        decision_model.choose = AsyncMock(side_effect=choose)
+    else:
+        decision_model.choose = AsyncMock(return_value=choose)
     llm_router = MagicMock()
     llm_router.route = AsyncMock(return_value=llm_route)
     return DecisionRouter(decision_model, llm_router, LLM_ROUTER), decision_model, llm_router
@@ -117,13 +120,35 @@ async def test_a_hop_the_decision_model_cannot_answer_is_routed_and_reported_by_
     assert decision_model.choose.await_count == 2
 
 
-async def test_a_failing_decision_api_is_not_asked_again_in_the_call():
-    r, decision_model, _ = router(fails(TimeoutError()), llm_route=STAY)
+async def test_a_timed_out_decision_api_is_not_asked_again_in_the_call():
+    r, decision_model, _ = router(fails(asyncio.TimeoutError()), llm_route=STAY)
 
     hops = [await r.route(MESSAGES, TOOLS) for _ in range(3)]
 
     assert all(hop["routed_by"] == LLM_ROUTER for hop in hops)
     assert decision_model.choose.await_count == 1
+
+
+async def test_a_failing_decision_api_is_switched_off_only_after_failures_in_a_row():
+    error = RuntimeError("503")
+    answers = [error, error, decided("stay_on_current_node"), error, error, error]
+    r, decision_model, _ = router(answers, llm_route=STAY)
+
+    hops = [await r.route(MESSAGES, TOOLS) for _ in range(7)]
+
+    assert [bool(hop.get("routed_by")) for hop in hops] == [True, True, False, True, True, True, True]
+    assert decision_model.choose.await_count == 6
+
+
+async def test_a_move_whose_parameters_cannot_be_filled_stays_on_the_node():
+    for fill in (None, RuntimeError("429")):
+        r, _, llm_router = router(decided("transition_to_book"))
+        llm_router.route = AsyncMock(side_effect=fill) if isinstance(fill, Exception) else AsyncMock(return_value=fill)
+
+        hop = await r.route(MESSAGES, TOOLS)
+
+        assert (hop["function_name"], hop["arguments"]) == ("stay_on_current_node", {"confidence": 0.9})
+        assert hop["usage"]["input_tokens"] == 120 and hop["routing_tail"] is None
 
 
 async def test_without_its_key_every_hop_routes_on_the_llm_router():
@@ -144,6 +169,21 @@ def test_a_decision_routed_graph_rejects_per_node_routing_overrides():
     }
 
     with pytest.raises(ValueError, match="routing model or effort"):
+        GraphAgentConfig(**config)
+
+
+def test_a_decision_routed_graph_rejects_a_routing_effort():
+    config = {
+        "agent_information": "a",
+        "model": "gpt-4.1-mini",
+        "provider": "openai",
+        "routing_provider": "typesafe",
+        "routing_reasoning_effort": "low",
+        "current_node_id": "start",
+        "nodes": [{"id": "start", "prompt": "hi", "edges": []}],
+    }
+
+    with pytest.raises(ValueError, match="routing_reasoning_effort"):
         GraphAgentConfig(**config)
 
 

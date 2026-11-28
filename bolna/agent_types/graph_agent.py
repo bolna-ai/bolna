@@ -38,6 +38,7 @@ from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import AzureLLM, OpenAiLLM, LiteLLM
 from bolna.llms.decision_model import DecisionModel
 from bolna.llms.decision_router import DecisionRouter
+from bolna.llms.routing_stream import STAY_TOOL
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 from bolna.constants import (
@@ -719,7 +720,7 @@ class GraphAgent(BaseAgent):
                 {
                     "type": "function",
                     "function": {
-                        "name": "stay_on_current_node",
+                        "name": STAY_TOOL,
                         "description": "No transition matches. Need more info or clarification.",
                         "parameters": {
                             "type": "object",
@@ -1336,7 +1337,7 @@ class GraphAgent(BaseAgent):
                 f"Routing decision (LLM): {function_name} | confidence: {confidence} | reasoning: {reasoning} (latency: {latency_ms:.1f}ms)"
             )
 
-            if function_name == "stay_on_current_node":
+            if function_name == STAY_TOOL:
                 return None, None, latency_ms, messages, tools, reasoning, confidence, usage_info
 
             # Find the edge for this function (may be the default)

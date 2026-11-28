@@ -7,9 +7,12 @@ from typing import Optional
 
 from bolna.helpers.logger_config import configure_logger
 from bolna.llms.decision_model import Decision, DecisionError, DecisionModel
-from bolna.llms.routing_stream import CONFIDENCE_KEY, TRAILING_KEYS
+from bolna.llms.routing_stream import CONFIDENCE_KEY, STAY_TOOL, TRAILING_KEYS
 
 logger = configure_logger(__name__)
+
+# Decision API failures in a row after which the rest of the call routes on the LLM router.
+FAILURES_BEFORE_SWITCHING_OFF = 3
 
 INSTRUCTIONS = (
     "Select the one edge that matches the caller's latest completed response. "
@@ -48,6 +51,7 @@ class DecisionRouter:
         # (provider, model, reasoning effort), as the graph agent reports a routing call.
         self.llm_router_identity = llm_router_identity
         self._decides = decision_model.available
+        self._failures = 0
 
     async def route(self, messages, tools, tool_choice="required", meta_info=None):
         tools = json.loads(tools) if isinstance(tools, str) else tools
@@ -56,9 +60,14 @@ class DecisionRouter:
             routed = await self.llm_router.route(messages, tools, tool_choice, meta_info)
             # Marked so the hop is reported under the router that answered it.
             return routed and {**routed, "routed_by": self.llm_router_identity}
-        parameters, tail = await self._edge_parameters(messages, tools, decision, meta_info)
+        filled = await self._edge_parameters(messages, tools, decision, meta_info)
+        if filled is None:
+            # A move without the edge's parameters would leave the next node short of values it needs.
+            choice, parameters, tail = STAY_TOOL, {}, None
+        else:
+            choice, (parameters, tail) = decision.choice, filled
         return {
-            "function_name": decision.choice,
+            "function_name": choice,
             "arguments": {**parameters, CONFIDENCE_KEY: decision.confidence},
             "usage": decision.usage,
             "service_tier": None,
@@ -69,28 +78,38 @@ class DecisionRouter:
     async def _decide(self, messages, tools) -> Optional[Decision]:
         provider = self.decision_model.provider.value
         try:
-            return await self.decision_model.choose(routing_context(messages), INSTRUCTIONS, edge_choices(tools))
+            decision = await self.decision_model.choose(routing_context(messages), INSTRUCTIONS, edge_choices(tools))
         except DecisionError as e:
             logger.warning(f"No routing decision from {provider}, routing this hop on the LLM router: {e}")
+            return None
         except Exception as e:
-            # A failing API costs every hop its timeout, so the rest of the call routes on the LLM router.
-            self._decides = False
-            logger.error(f"Decision routing on {provider} failed, routing the call on the LLM router: {e!r}")
-        return None
+            # A timeout costs every later hop the same wait, so it switches decision routing off at once.
+            timed_out = isinstance(e, asyncio.TimeoutError)
+            self._failures = FAILURES_BEFORE_SWITCHING_OFF if timed_out else self._failures + 1
+            self._decides = self._failures < FAILURES_BEFORE_SWITCHING_OFF
+            scope = "this hop" if self._decides else "the rest of the call"
+            logger.error(f"Decision routing on {provider} failed, routing {scope} on the LLM router: {e!r}")
+            return None
+        self._failures = 0
+        return decision
 
-    async def _edge_parameters(self, messages, tools, decision: Decision, meta_info) -> tuple:
-        """The chosen edge's own parameters from the LLM router, and the tail that reports that call."""
+    async def _edge_parameters(self, messages, tools, decision: Decision, meta_info) -> Optional[tuple]:
+        """The chosen edge's own parameters from the LLM router and the tail that reports that call, or None."""
         name = decision.choice
         if not _has_own_parameters(next(t for t in tools if t["function"]["name"] == name)):
             return {}, None
         # Forced on the whole routing request: offered the edge alone, the LLM copies the caller's words into it.
         forced = {"type": "function", "function": {"name": name}}
         started = time.perf_counter()
-        filled = await self.llm_router.route(messages, tools, forced, meta_info)
+        try:
+            filled = await self.llm_router.route(messages, tools, forced, meta_info)
+        except Exception as e:
+            filled = None
+            logger.error(f"Filling the parameters of {name} failed: {e!r}")
         latency_ms = round((time.perf_counter() - started) * 1000, 1)
         if not filled or filled.get("function_name") != name:
-            logger.warning(f"Edge parameters for {name} could not be filled; transitioning without them")
-            return {}, None
+            logger.warning(f"Edge parameters for {name} could not be filled; staying on the node")
+            return None
         parameters = {k: v for k, v in filled["arguments"].items() if k not in TRAILING_KEYS}
         return parameters, asyncio.create_task(self._hop_tail(decision, filled, latency_ms))
 
