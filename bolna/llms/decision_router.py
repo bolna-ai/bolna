@@ -60,12 +60,11 @@ class DecisionRouter:
             routed = await self.llm_router.route(messages, tools, tool_choice, meta_info)
             # Marked so the hop is reported under the router that answered it.
             return routed and {**routed, "routed_by": self.llm_router_identity}
-        filled = await self._edge_parameters(messages, tools, decision, meta_info)
-        if filled is None:
+        parameters, tail = await self._edge_parameters(messages, tools, decision, meta_info)
+        if parameters is None:
             # A move without the edge's parameters would leave the next node short of values it needs.
-            choice, arguments, tail = STAY_TOOL, {}, None
+            choice, arguments = STAY_TOOL, {}
         else:
-            parameters, tail = filled
             choice, arguments = decision.choice, {**parameters, CONFIDENCE_KEY: decision.confidence}
         return {
             "function_name": choice,
@@ -96,8 +95,8 @@ class DecisionRouter:
         self._failures = 0
         return decision
 
-    async def _edge_parameters(self, messages, tools, decision: Decision, meta_info) -> Optional[tuple]:
-        """The chosen edge's own parameters from the LLM router and the tail that reports that call, or None."""
+    async def _edge_parameters(self, messages, tools, decision: Decision, meta_info) -> tuple:
+        """The chosen edge's parameters from the LLM router (None if it could not fill them), and that call's tail."""
         name = decision.choice
         if not _has_own_parameters(next(t for t in tools if t["function"]["name"] == name)):
             return {}, None
@@ -110,11 +109,12 @@ class DecisionRouter:
             filled = None
             logger.error(f"Filling the parameters of {name} failed: {e!r}")
         latency_ms = round((time.perf_counter() - started) * 1000, 1)
+        # A call that answered spent tokens, so its tail is reported whether or not it filled the edge.
+        tail = asyncio.create_task(self._hop_tail(decision, filled, latency_ms)) if filled else None
         if not filled or filled.get("function_name") != name:
             logger.warning(f"Edge parameters for {name} could not be filled; staying on the node")
-            return None
-        parameters = {k: v for k, v in filled["arguments"].items() if k not in TRAILING_KEYS}
-        return parameters, asyncio.create_task(self._hop_tail(decision, filled, latency_ms))
+            return None, tail
+        return {k: v for k, v in filled["arguments"].items() if k not in TRAILING_KEYS}, tail
 
     async def _hop_tail(self, decision: Decision, filled: dict, fill_latency_ms: float) -> dict:
         """The hop's usage, and under `parameter_fill` the LLM call that filled its parameters."""

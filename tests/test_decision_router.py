@@ -140,15 +140,29 @@ async def test_a_failing_decision_api_is_switched_off_only_after_failures_in_a_r
     assert decision_model.choose.await_count == 8
 
 
-async def test_a_move_whose_parameters_cannot_be_filled_stays_on_the_node():
-    for fill in (None, RuntimeError("429")):
-        r, _, llm_router = router(decided("transition_to_book"))
-        llm_router.route = AsyncMock(side_effect=fill) if isinstance(fill, Exception) else AsyncMock(return_value=fill)
+@pytest.mark.parametrize("fill", [None, RuntimeError("429")], ids=["empty", "raises"])
+async def test_a_move_whose_parameters_cannot_be_filled_stays_on_the_node(fill):
+    r, _, llm_router = router(decided("transition_to_book"))
+    llm_router.route = AsyncMock(side_effect=fill) if isinstance(fill, Exception) else AsyncMock(return_value=fill)
 
-        hop = await r.route(MESSAGES, TOOLS)
+    hop = await r.route(MESSAGES, TOOLS)
 
-        assert (hop["function_name"], hop["arguments"]) == ("stay_on_current_node", {})
-        assert hop["usage"]["input_tokens"] == 120 and hop["routing_tail"] is None
+    assert (hop["function_name"], hop["arguments"]) == ("stay_on_current_node", {})
+    assert hop["usage"]["input_tokens"] == 120 and hop["routing_tail"] is None
+
+
+async def test_a_fill_on_another_edge_stays_and_still_reports_its_tokens():
+    fill_tail = asyncio.get_running_loop().create_future()
+    fill_tail.set_result({"usage": {"input_tokens": 900, "output_tokens": 30}})
+    other_edge = {"function_name": "stay_on_current_node", "arguments": {}, "routing_tail": fill_tail}
+    r, _, _ = router(decided("transition_to_book"), llm_route=other_edge)
+
+    hop = await r.route(MESSAGES, TOOLS)
+
+    assert (hop["function_name"], hop["arguments"]) == ("stay_on_current_node", {})
+    tail = await hop["routing_tail"]
+    assert tail["usage"] == {"input_tokens": 120, "output_tokens": 1}
+    assert tail["parameter_fill"]["usage"] == {"input_tokens": 900, "output_tokens": 30}
 
 
 async def test_without_its_key_every_hop_routes_on_the_llm_router():
